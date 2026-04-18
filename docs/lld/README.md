@@ -4,6 +4,10 @@ Lead and teammates write here freely. Contents are either append-only
 retrospective or discardable scratch — nothing in this tree is
 load-bearing for users or for downstream stages.
 
+**Per-stage entry points live elsewhere.** To work on a stage, read its
+brief under [`../stages/`](../stages/) — that doc names everything here
+(research, first-pass LLD, retrospective) in reading order.
+
 - [`stages/`](./stages/) — per-stage retrospectives (one file per
   completed stage, named `NN-slug.md`).
 - `research/` — researcher agent output. Created on demand by the

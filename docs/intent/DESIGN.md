@@ -244,10 +244,14 @@ bristol-ml-reference/
     ├── intent/                  # Deny: project spec
     │   └── DESIGN.md            # This document
     ├── architecture/            # Warn: structural design
-    │   ├── README.md            # Pointer into §3 of this doc
+    │   ├── README.md            # Overarching frame + layer-doc index
+    │   ├── layers/              # One file per module layer, added as each layer first lands
     │   └── decisions/           # MADR ADRs (append-only by convention)
     │       ├── 0001-use-hydra-plus-pydantic.md
     │       └── 0002-filesystem-registry-first.md
+    ├── stages/                  # Per-stage navigational hub (entry point for "implement Stage N")
+    │   ├── README.md            # Index across all stages (Warn: status transitions only)
+    │   └── NN-<slug>.md         # Allow: living work brief per stage
     └── lld/                     # Allow: low-level design
         ├── README.md            # Index of the LLD tier
         └── stages/              # One markdown per completed stage
