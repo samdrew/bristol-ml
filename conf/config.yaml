@@ -1,0 +1,12 @@
+# defaults: []  # no groups yet; Stage 1+ will add ingestion/, features/, model/, ...
+
+project:
+  name: bristol_ml
+  seed: 20260418
+
+hydra:
+  run:
+    dir: data/_runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: data/_runs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

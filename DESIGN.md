@@ -221,16 +221,19 @@ bristol-ml-reference/
 │   └── ci.yml                   # Lint + pytest on push
 │
 ├── conf/                        # Hydra config tree
-│   ├── config.yaml              # Top-level defaults list
+│   ├── __init__.py              # Makes `conf._schemas` importable
+│   ├── config.yaml              # Top-level defaults + hydra.run/sweep.dir overrides → data/_runs/
 │   └── _schemas.py              # Pydantic schemas for resolved configs
 │
 ├── data/                        # gitignored, local cache
 │   └── .gitkeep
 │
 ├── src/bristol_ml/
-│   ├── __init__.py
+│   ├── __init__.py              # Exposes __version__ and load_config
+│   ├── __main__.py              # Enables `python -m bristol_ml`
 │   ├── cli.py                   # Hydra entry point
-│   └── config.py                # Config resolution + validation helpers
+│   ├── config.py                # Config resolution + validation helpers
+│   └── py.typed                 # PEP 561 marker
 │
 ├── tests/
 │   ├── __init__.py

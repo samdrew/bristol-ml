@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv / venv
+.venv/
+venv/
+.python-version
+
+# Hydra (defence in depth; conf/config.yaml redirects to data/_runs/)
+outputs/
+multirun/
+.hydra/
+
+# Data (local cache; .gitkeep is pinned)
+data/*
+!data/.gitkeep
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.*
+*.key
+
+# Notebook cruft
+.ipynb_checkpoints/
+
+# Build
+dist/
+build/
+htmlcov/
+.coverage
