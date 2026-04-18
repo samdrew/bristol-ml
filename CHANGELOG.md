@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Reorganised `docs/` into a tiered `intent/` / `architecture/` / `lld/` layout to support `.claude/hooks/tiered-write-paths.sh` from the lead agent. `DESIGN.md` moved to `docs/intent/DESIGN.md`; ADRs to `docs/architecture/decisions/`; stage retrospectives to `docs/lld/stages/`. Lead agent frontmatter wired to the tiered hook.
+
 ## [0.0.0] — 2026-04-18
 
 ### Added

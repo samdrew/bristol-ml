@@ -57,7 +57,7 @@ The energy domain is well-chosen because it exercises every architectural slot: 
 2. **Stages are small enough for one Claude Code session.** Two to four hours of focused work, one clear goal.
 3. **Stages are independently interesting.** An attendee picking a mid-project stage gets something coherent without having internalised every preceding stage.
 4. **Complexity is earned.** Advanced patterns (bi-temporal storage, proper LLM extraction) land in stages where their purpose is concretely motivated — not front-loaded "because that's how you do it properly."
-5. **The repo explains itself.** `README.md` pitches; `DESIGN.md` (this document) scopes; `docs/stages/` records what each stage did and why; `docs/adrs/` records decisions that seem obvious in retrospect but weren't.
+5. **The repo explains itself.** `README.md` pitches; `docs/intent/DESIGN.md` (this document) scopes; `docs/lld/stages/` records what each stage did and why; `docs/architecture/decisions/` records architectural decisions that seem obvious in retrospect but weren't.
 
 ---
 
@@ -212,7 +212,6 @@ bristol-ml-reference/
 ├── CLAUDE.md                    # Top-level Claude Code guidance
 ├── README.md                    # Pitch, quick start, entry points
 ├── CHANGELOG.md
-├── DESIGN.md                    # This document
 ├── pyproject.toml               # uv-managed
 ├── uv.lock
 ├── .pre-commit-config.yaml
@@ -241,16 +240,21 @@ bristol-ml-reference/
 │   ├── integration/
 │   └── fixtures/
 │
-└── docs/
-    ├── architecture.md          # Pointer into §3 of this doc
-    ├── stages/                  # One markdown per completed stage
-    │   └── 00-foundation.md
-    └── adrs/                    # Architecture decision records
-        ├── 0001-use-hydra-plus-pydantic.md
-        └── 0002-filesystem-registry-first.md
+└── docs/                        # Tiered write surface (see CLAUDE.md for hook wiring)
+    ├── intent/                  # Deny: project spec
+    │   └── DESIGN.md            # This document
+    ├── architecture/            # Warn: structural design
+    │   ├── README.md            # Pointer into §3 of this doc
+    │   └── decisions/           # MADR ADRs (append-only by convention)
+    │       ├── 0001-use-hydra-plus-pydantic.md
+    │       └── 0002-filesystem-registry-first.md
+    └── lld/                     # Allow: low-level design
+        ├── README.md            # Index of the LLD tier
+        └── stages/              # One markdown per completed stage
+            └── 00-foundation.md
 ```
 
-Stage 0 does **not** create the module directories for ingestion, features, models, evaluation, llm, registry, serving, or monitoring. Those arrive in their respective stages along with a `CLAUDE.md`, at least one test, and an entry in `docs/stages/`.
+Stage 0 does **not** create the module directories for ingestion, features, models, evaluation, llm, registry, serving, or monitoring. Those arrive in their respective stages along with a `CLAUDE.md`, at least one test, and an entry in `docs/lld/stages/`.
 
 ---
 
@@ -360,7 +364,7 @@ Each choice is swappable. ADRs record reasoning where non-obvious.
 
 ## 9. Stage plan
 
-Each stage is a unit of Claude Code work: one focused session, one demoable output, one PR, one entry in `docs/stages/`.
+Each stage is a unit of Claude Code work: one focused session, one demoable output, one PR, one entry in `docs/lld/stages/`.
 
 Stages are ordered to maximise "something visible throughout" rather than strictly by layer. After the first model arrives (Stage 4), stages fan out so a facilitator or author can pick any of several in-progress threads.
 
@@ -371,7 +375,7 @@ Every stage ships with:
 - At least one test on the public interface.
 - `CLAUDE.md` added or updated for any touched module.
 - `README.md` updated with any new entry point.
-- `docs/stages/NN-name.md` capturing what was built and why.
+- `docs/lld/stages/NN-name.md` capturing what was built and why.
 - A notebook demonstrating the output (where the stage produces user-facing output).
 - `CHANGELOG.md` entry.
 - Section 6 of this document updated to reflect the new layout.

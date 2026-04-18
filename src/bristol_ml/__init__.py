@@ -1,4 +1,4 @@
-"""bristol_ml — reference ML architecture. See DESIGN.md."""
+"""bristol_ml — reference ML architecture. See docs/intent/DESIGN.md."""
 
 from importlib.metadata import PackageNotFoundError, version
 
