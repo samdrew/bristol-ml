@@ -1,0 +1,42 @@
+# @package ingestion.neso
+#
+# NESO Historic Demand Data — per-year CKAN resource catalogue.
+# Year → UUID is not derivable; IDs enumerated via
+#   GET https://api.neso.energy/api/3/action/package_show?id=historic-demand-data
+# on 2026-04-18. 2023 UUID matches the research note
+# (docs/lld/research/01-neso-ingestion.md §1).
+# Adding a new year is one list entry.
+
+base_url: https://api.neso.energy/api/3/action/
+# Defaults to ``data/raw/neso`` relative to the current working directory when
+# ``fetch`` runs. The CLI (``python -m bristol_ml.ingestion.neso``) resolves via
+# ``load_config`` which does not ``chdir``; notebooks call ``os.chdir(REPO_ROOT)``
+# before ``load_config``. Override with ``BRISTOL_ML_CACHE_DIR`` for portable caches.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/neso}
+cache_filename: neso_demand.parquet
+page_size: 32000
+request_timeout_seconds: 30.0
+max_attempts: 3
+backoff_base_seconds: 1.0
+backoff_cap_seconds: 10.0
+min_inter_request_seconds: 30.0
+columns:
+  - ND
+  - TSD
+resources:
+  - year: 2018
+    resource_id: fcb12133-0db0-4f27-a4a5-1669fd9f6d33
+  - year: 2019
+    resource_id: dd9de980-d724-415a-b344-d8ae11321432
+  - year: 2020
+    resource_id: 33ba6857-2a55-479f-9308-e5c4c53d4381
+  - year: 2021
+    resource_id: 18c69c42-f20d-46f0-84e9-e279045befc6
+  - year: 2022
+    resource_id: bb44a1b5-75b1-4db2-8491-257f23385006
+  - year: 2023
+    resource_id: bf5ab335-9b40-4ea4-b93a-ab4af7bce003
+  - year: 2024
+    resource_id: f6d02c0f-957b-48cb-82ee-09003f2ba759
+  - year: 2025
+    resource_id: b2bde559-3455-4021-b179-dfe60c0337b0

@@ -1,4 +1,6 @@
-# defaults: []  # no groups yet; Stage 1+ will add ingestion/, features/, model/, ...
+defaults:
+  - _self_
+  - ingestion/neso@ingestion.neso
 
 project:
   name: bristol_ml

@@ -166,31 +166,62 @@ Internal helpers (private, lowercase `_prefix`):
 
 ## 6. Settlement period → UTC conversion
 
-Research §3 confirms the shape. The conversion is:
+> **Updated 2026-04-18 to match shipped behaviour.** The pre-implementation draft of this section reflected a narrower Elexon numbering model (gap-skipping on clock-change days, with periods 3–4 as the ambiguous pair on autumn-fallback and no period 3–4 on spring-forward) that does not match real NESO data. Real Elexon numbering is contiguous: 1..46 on spring-forward, 1..50 on autumn-fallback. The shipped `_to_utc` reconstructs local wall-clock time with a period-dependent shift and enforces the per-day range explicitly.
+
+Research §3 captured the shape of the half-hourly period scheme correctly. The shipped conversion is:
 
 ```python
 def _to_utc(df: pd.DataFrame) -> pd.DataFrame:
-    # Build naive local start-of-period timestamps
-    naive_local = (
-        pd.to_datetime(df["SETTLEMENT_DATE"])
-        + pd.to_timedelta((df["SETTLEMENT_PERIOD"] - 1) * 30, unit="min")
-    )
-    ambiguous = _autumn_fallback_mask(df["SETTLEMENT_DATE"], df["SETTLEMENT_PERIOD"])
+    # Elexon numbering is contiguous 1..46 on spring-forward and 1..50 on
+    # autumn-fallback. A naive (period-1)*30-min mapping mis-places periods
+    # >= 3 on spring-forward (because 01:00-02:00 does not exist) and
+    # periods >= 5 on autumn-fallback (because 01:00-02:00 is lived twice
+    # without a gap in numbering). Apply a period-dependent shift to
+    # reconstruct naive local wall-clock time:
+    #
+    #   Spring-forward (46 periods): periods >= 3 -> +60 min.
+    #   Autumn-fallback (50 periods): periods >= 5 -> -60 min.
+    #
+    # tz_localize then resolves the one remaining local-time ambiguity
+    # (01:00-02:00 wall-clock on autumn-fallback) via a deterministic
+    # mask: periods 3-4 are first-occurrence (BST); periods 5-6 are
+    # second-occurrence (GMT).
+    settlement_date = pd.to_datetime(df["SETTLEMENT_DATE"])
+    period = df["SETTLEMENT_PERIOD"].astype("int64")
+
+    # Explicit per-day range check; anything beyond the day's valid count
+    # is corrupt upstream data and raises before any shift is applied.
+    #   spring-forward day: 1..46
+    #   autumn-fallback day: 1..50
+    #   normal day: 1..48
+    # A ValueError is raised citing the offending (date, period) rows.
+    ...
+
+    minutes = (period - 1) * 30
+    minutes = minutes.where(~(is_autumn & (period >= 5)), minutes - 60)
+    minutes = minutes.where(~(is_spring & (period >= 3)), minutes + 60)
+    naive_local = settlement_date + pd.to_timedelta(minutes, unit="m")
+
+    ambiguous = is_autumn & period.isin([3, 4])
     local = naive_local.dt.tz_localize(
         "Europe/London",
-        ambiguous=ambiguous,       # bool array, True = first (BST) occurrence
-        nonexistent="raise",       # spring-forward gap is data corruption
+        ambiguous=ambiguous.to_numpy(),   # True for autumn periods 3-4 (first, BST);
+                                          # False for 5-6 (second, GMT)
+        nonexistent="raise",              # retained as a defence; under contiguous
+                                          # numbering this should never fire
     )
     df["timestamp_local"] = local
     df["timestamp_utc"] = local.dt.tz_convert("UTC")
     return df
 ```
 
-`_autumn_fallback_mask` returns `True` for period 3 (first 01:00 BST) and `False` for period 4 (second 01:00 GMT) on the autumn-fallback date, and `False` elsewhere. Computed deterministically from the date, not inferred from data. Spring-forward dates have no period 3 or 4 in valid NESO data; `nonexistent="raise"` enforces this.
+`is_spring` / `is_autumn` are computed deterministically from the calendar — the last Sunday of March / October for each year seen in the frame — not inferred from data. The autumn-fallback `ambiguous` mask is therefore `True` for periods 3–4 (first occurrence, BST) and `False` for periods ≥ 5 (second occurrence, GMT). `nonexistent="raise"` is retained as a structural defence against a future upstream change; under the contiguous-numbering reality the shift formula keeps periods off the vanished 01:00–02:00 local hour, so it is expected never to fire.
+
+The per-day range check raises `ValueError` on any row whose period exceeds the day's valid count (`> 46` on spring-forward days, `> 50` on autumn-fallback days, `> 48` on normal days), naming the offending `(SETTLEMENT_DATE, SETTLEMENT_PERIOD)` pairs. That replaces the pre-implementation assumption that spring-forward days simply "have no period 3 or 4 in valid NESO data".
 
 Unit test fixture `tests/fixtures/neso/clock_change_rows.csv` contains:
-- Spring-forward 2024 (31 March), periods 1, 2, 5, 6 — expected to load without period 3 or 4.
-- Autumn-fallback 2024 (27 October), periods 1–6 — expected to produce distinct UTC timestamps for periods 3 and 4.
+- Spring-forward 2024 (31 March), periods 1, 2, 3, 46, 47 — the trailing period 47 exercises the per-day range check (spring-forward days are capped at 46) and must raise.
+- Autumn-fallback 2024 (27 October), periods 1–7 — periods 3 and 4 resolve to the first (BST) 01:00 / 01:30 occurrences; periods 5 and 6 resolve to the second (GMT) 01:00 / 01:30 occurrences, producing distinct UTC timestamps one hour apart.
 
 ## 7. Cache semantics
 

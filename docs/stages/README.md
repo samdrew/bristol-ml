@@ -25,7 +25,7 @@ Stages 2-19 are intentionally `planning` — briefs land when each stage becomes
 | # | Title | Status | Intent | Brief | Layer | LLD | Retro |
 |---|---|---|---|---|---|---|---|
 | 0 | Project foundation | `shipped` | [intent](../intent/00-foundation.md) | [brief](./00-foundation.md) | — | — | [retro](../lld/stages/00-foundation.md) |
-| 1 | NESO demand ingestion | `ready` | [intent](../intent/01-neso-demand-ingestion.md) | [brief](./01-neso-demand-ingestion.md) | [ingestion](../architecture/layers/ingestion.md) | [lld](../lld/ingestion/neso.md) | — |
+| 1 | NESO demand ingestion | `shipped` | [intent](../intent/01-neso-demand-ingestion.md) | [brief](./01-neso-demand-ingestion.md) | [ingestion](../architecture/layers/ingestion.md) | [lld](../lld/ingestion/neso.md) | [retro](../lld/stages/01-neso-demand-ingestion.md) |
 | 2 | Weather ingestion | `planning` | [intent](../intent/02-weather-ingestion.md) | — | [ingestion](../architecture/layers/ingestion.md) | — | — |
 | 3 | Feature assembler + split | `planning` | [intent](../intent/03-feature-assembler.md) | — | — | — | — |
 | 4 | Linear baseline + eval harness | `planning` | [intent](../intent/04-linear-baseline.md) | — | — | — | — |
