@@ -35,7 +35,6 @@ From a clean clone, the project builds, tests pass, and the CLI's `--help` outpu
 3. Lint and format checks pass across the whole tree.
 4. The configuration framework loads a minimal default configuration and rejects malformed overrides with a clear error.
 5. The top-level Claude Code guide fits within the lightweight length target recommended by Claude Code best-practice writing.
-6. The three foundational architecture decision records exist and are linked from the design document.
 
 ## Points for consideration
 
