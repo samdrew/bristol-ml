@@ -64,9 +64,9 @@ docs/
 │   ├── README.md        # overarching frame + layer-doc index
 │   ├── layers/          # one file per module layer, written as each layer lands
 │   └── decisions/       # MADR ADRs (append-only by convention)
-├── stages/              # mixed — ALLOW for per-stage briefs, WARN for README.md
-│   ├── README.md        # index across all stages (status, links)
-│   └── NN-<slug>.md     # per-stage navigational hub; entry point for "implement Stage N"
+├── plans/               # ALLOW — per-stage plans
+│   ├── active/          # in-flight plans; one NN-<slug>.md per stage
+│   └── completed/       # archived plans, moved here at PR merge
 └── lld/                 # ALLOW — low-level design
     ├── README.md
     ├── stages/          # one markdown per completed stage
@@ -78,8 +78,8 @@ docs/
 |------|------|--------|-------|
 | Intent | `docs/intent/` | Deny | Substantive edits require human approval; mechanical edits (e.g. DESIGN.md §6 at stage boundaries) happen in the main Claude Code session, not in `--agent lead`. |
 | Architecture | `docs/architecture/` | Warn | Layer docs under `layers/` and new ADRs under `decisions/` are legitimate lead activities; ADRs are append-only (supersede rather than edit). |
-| Stages index | `docs/stages/README.md` | Warn | Edit when a stage transitions status (`ready` → `in-progress` → `shipped`); do not touch for minor brief edits. |
-| Stage briefs | `docs/stages/NN-*.md` | Allow | Living work briefs; the lead updates status, links its produced LLD, and tweaks reading order during a stage. |
+| Active plans | `docs/plans/active/NN-*.md` | Allow | Living work briefs for the current stage; the lead updates status, links produced LLD, and tweaks reading order in flight. Moves to `completed/` at PR merge. |
+| Completed plans | `docs/plans/completed/NN-*.md` | Allow | Archive of shipped plans; kept for reference, not edited in place. |
 | LLD | `docs/lld/` | Allow | Stage retros, research, reframings, ad-hoc notes — freely mutable. |
 
 Root-level files: `CHANGELOG.md` = allow; `CLAUDE.md` = warn; `README.md` = warn. Everything else in the repo (`src/`, `tests/`, `conf/`, `data/`, `.github/`, `.claude/`, `pyproject.toml`, `uv.lock`, `Dockerfile`, `.gitignore`, `.pre-commit-config.yaml`) is hard-denied to the lead by the hook's fail-closed default.
@@ -167,6 +167,6 @@ Do not skip tiers. Do not allow more than four attempts without human escalation
 
 ## Session conventions
 
-- For any "implement Stage N" request, the canonical entry point is `docs/stages/NN-<slug>.md` — it names every other document to read, in order, with acceptance criteria and exit checklist. Read the brief before opening code; spawn teammates with the brief (not this CLAUDE.md) as the self-contained context.
+- For any "implement Stage N" request, the canonical entry point is `docs/plans/active/NN-<slug>.md` — it names every other document to read, in order, with acceptance criteria and exit checklist. Read the plan before opening code; spawn teammates with the plan (not this CLAUDE.md) as the self-contained context. (The legacy `docs/stages/` tree is deprecated and retained for historical briefs only.)
 - Publish interface contracts to `docs/lld/` (subdir per module as needed) before implementation begins, so teammates work against an agreed schema.
 - When the team finishes, clean it up explicitly. Do not leave teammates idle.
