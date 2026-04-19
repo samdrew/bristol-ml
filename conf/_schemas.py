@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
@@ -131,8 +132,74 @@ class IngestionGroup(BaseModel):
     weather: WeatherIngestionConfig | None = None
 
 
+class FeatureSetConfig(BaseModel):
+    """Configuration for one named feature set (Stage 3 onwards).
+
+    A feature set is a reproducible recipe: which upstream parquets to join,
+    how to resample demand to hourly cadence, how long a weather gap may be
+    forward-filled before the row is dropped, and where to persist the
+    resulting parquet. Stage 3 ships the ``weather_only`` set; Stage 5 adds
+    ``weather_calendar`` alongside it so the with/without comparison is a
+    config swap, not a code change.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    demand_aggregation: Literal["mean", "max"] = "mean"
+    cache_dir: Path
+    cache_filename: str
+    forward_fill_hours: int = Field(default=3, ge=0)
+
+
+class FeaturesGroup(BaseModel):
+    """Container for named feature-set configs.
+
+    Each field is optional so stage-0/1/2 configs (no features section) still
+    validate. Stage 5 will add ``weather_calendar: FeatureSetConfig | None``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    weather_only: FeatureSetConfig | None = None
+
+
+class SplitterConfig(BaseModel):
+    """Configuration for the rolling-origin train/test splitter (Stage 3).
+
+    ``min_train_periods`` fixes the minimum training window before the first
+    test origin. ``test_len`` is the fold's test-window length (hours for the
+    Stage 3 hourly feature table). ``step`` advances the origin by this many
+    rows between folds. ``gap`` introduces an embargo between the end of
+    training and the start of testing (zero is the day-ahead default; non-zero
+    encodes a gate-closure-style discipline). ``fixed_window=True`` turns the
+    default expanding window into a sliding window of size ``min_train_periods``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_train_periods: int = Field(ge=1)
+    test_len: int = Field(ge=1)
+    step: int = Field(ge=1)
+    gap: int = Field(default=0, ge=0)
+    fixed_window: bool = False
+
+
+class EvaluationGroup(BaseModel):
+    """Container for evaluation-side configs (splitters; metrics land Stage 4).
+
+    Each field is optional so pre-Stage-3 configs still validate.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rolling_origin: SplitterConfig | None = None
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     project: ProjectConfig
     ingestion: IngestionGroup = Field(default_factory=IngestionGroup)
+    features: FeaturesGroup = Field(default_factory=FeaturesGroup)
+    evaluation: EvaluationGroup = Field(default_factory=EvaluationGroup)
