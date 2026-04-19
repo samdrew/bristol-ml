@@ -1,13 +1,14 @@
-"""Evaluation layer — splitters, metrics, and evaluators.
+"""Evaluation layer — splitters, metrics, evaluators, and benchmarks.
 
 Stage 3 shipped this module with the rolling-origin splitter; Stage 4
-extends it with metric functions (MAE, MAPE, RMSE, WAPE) and the
-evaluator harness that consumes the splitter's fold indices.
+extends it with metric functions (MAE, MAPE, RMSE, WAPE), the evaluator
+harness that consumes the splitter's fold indices, and the three-way
+NESO day-ahead benchmark comparison.
 
 Submodules are not imported eagerly so ``python -m bristol_ml`` (scaffold
 invocation) stays cheap. Import by name::
 
-    from bristol_ml.evaluation import splitter, metrics, harness
+    from bristol_ml.evaluation import splitter, metrics, harness, benchmarks
 
 or resolve a top-level alias lazily via ``__getattr__``::
 
@@ -15,6 +16,7 @@ or resolve a top-level alias lazily via ``__getattr__``::
     from bristol_ml.evaluation import rolling_origin_split_from_config
     from bristol_ml.evaluation import mae, mape, rmse, wape, METRIC_REGISTRY
     from bristol_ml.evaluation import evaluate
+    from bristol_ml.evaluation import align_half_hourly_to_hourly, compare_on_holdout
 """
 
 from __future__ import annotations
@@ -22,6 +24,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
+    from bristol_ml.evaluation.benchmarks import (
+        align_half_hourly_to_hourly,
+        compare_on_holdout,
+    )
     from bristol_ml.evaluation.harness import evaluate
     from bristol_ml.evaluation.metrics import (
         METRIC_REGISTRY,
@@ -39,6 +45,8 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
 __all__ = [
     "METRIC_REGISTRY",
     "MetricFn",
+    "align_half_hourly_to_hourly",
+    "compare_on_holdout",
     "evaluate",
     "mae",
     "mape",
@@ -51,10 +59,11 @@ __all__ = [
 _SPLITTER_NAMES = frozenset({"rolling_origin_split", "rolling_origin_split_from_config"})
 _METRIC_NAMES = frozenset({"METRIC_REGISTRY", "MetricFn", "mae", "mape", "rmse", "wape"})
 _HARNESS_NAMES = frozenset({"evaluate"})
+_BENCHMARK_NAMES = frozenset({"align_half_hourly_to_hourly", "compare_on_holdout"})
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-export of public splitter, metric, and harness symbols."""
+    """Lazy re-export of public splitter, metric, harness, and benchmark symbols."""
     if name in _SPLITTER_NAMES:
         from bristol_ml.evaluation import splitter as _splitter
 
@@ -67,4 +76,8 @@ def __getattr__(name: str) -> object:
         from bristol_ml.evaluation import harness as _harness
 
         return getattr(_harness, name)
+    if name in _BENCHMARK_NAMES:
+        from bristol_ml.evaluation import benchmarks as _benchmarks
+
+        return getattr(_benchmarks, name)
     raise AttributeError(f"module 'bristol_ml.evaluation' has no attribute {name!r}")
