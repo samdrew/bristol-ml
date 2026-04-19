@@ -29,6 +29,7 @@ from conf._schemas import (
     FeaturesGroup,
     LinearConfig,
     MetricsConfig,
+    ModelMetadata,
     NaiveConfig,
     NesoBenchmarkConfig,
     NesoForecastIngestionConfig,
@@ -641,3 +642,132 @@ def test_app_config_model_field_defaults_to_none() -> None:
     assert app.model is None, (
         "Backwards-compat: AppConfig constructed without model= must have model=None."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T2 — ModelMetadata schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_model_metadata_defaults() -> None:
+    """Guards T2: ``ModelMetadata`` field defaults.
+
+    Per ``conf/_schemas.py`` the schema has:
+    - ``fit_utc: datetime | None = None``
+    - ``git_sha: str | None = None``
+    - ``hyperparameters: dict[str, Any] = {}`` (via ``default_factory=dict``)
+
+    Constructs with only the two required fields (``name``, ``feature_columns``)
+    and asserts every optional field carries its documented default.
+
+    Guards T2 (``ModelMetadata`` schema contract).
+    """
+    meta = ModelMetadata(name="linear-ols", feature_columns=("t2m",))
+
+    assert meta.fit_utc is None, (
+        f"fit_utc default must be None; got {meta.fit_utc!r} (T2 ModelMetadata defaults)."
+    )
+    assert meta.git_sha is None, (
+        f"git_sha default must be None; got {meta.git_sha!r} (T2 ModelMetadata defaults)."
+    )
+    assert meta.hyperparameters == {}, (
+        f"hyperparameters default must be {{}}; got {meta.hyperparameters!r} "
+        "(T2 ModelMetadata defaults)."
+    )
+
+
+def test_model_metadata_frozen_rejects_mutation() -> None:
+    """Guards T2: ``ModelMetadata`` is immutable (``frozen=True``).
+
+    ``ConfigDict(frozen=True)`` on ``ModelMetadata`` must prevent in-place
+    attribute assignment.  Attempting ``meta.name = "other"`` must raise
+    (either ``ValidationError`` from Pydantic or ``TypeError`` from Python's
+    ``__setattr__`` hook — the project tests accept both per the pattern in
+    ``test_feature_set_config_direct_construction_smoke``).
+
+    Guards T2 (immutable provenance record — ``conf/_schemas.ModelMetadata``
+    docstring "Immutable provenance record").
+    """
+    meta = ModelMetadata(name="linear-ols", feature_columns=())
+
+    with pytest.raises((ValidationError, TypeError)):
+        meta.name = "other"  # type: ignore[misc]  # testing frozen enforcement
+
+
+def test_model_metadata_forbids_extra_keys() -> None:
+    """Guards T2: ``ModelMetadata`` uses ``extra="forbid"``.
+
+    An unknown keyword argument (e.g. ``bogus=1``) must be rejected at
+    construction time with a ``ValidationError`` so config drift is caught
+    early rather than silently accepted.
+
+    Guards T2 (``ConfigDict(extra='forbid')`` on ``ModelMetadata``).
+    """
+    with pytest.raises(ValidationError):
+        ModelMetadata(  # type: ignore[call-arg]  # testing extra="forbid"
+            name="x",
+            feature_columns=(),
+            bogus=1,
+        )
+
+
+def test_model_metadata_rejects_naive_fit_utc() -> None:
+    """Guards T2: naive ``fit_utc`` is rejected by the ``model_validator``.
+
+    The ``_validate_fit_utc`` validator in ``ModelMetadata`` must raise
+    ``ValidationError`` when ``fit_utc`` is a naive ``datetime`` (i.e. one
+    with no ``tzinfo``).  The error message must name ``fit_utc`` so the
+    caller can diagnose the problem.
+
+    Guards T2 (``model_validator`` rejects naive ``fit_utc`` — ``conf/_schemas.py``
+    docstring: "Reject naive ``fit_utc`` values: we only store tz-aware UTC times").
+    """
+    naive_dt = datetime(2024, 1, 1)  # no tzinfo — intentionally naive
+
+    with pytest.raises(ValidationError, match="fit_utc"):
+        ModelMetadata(
+            name="linear-ols",
+            feature_columns=(),
+            fit_utc=naive_dt,
+        )
+
+
+def test_model_metadata_accepts_tz_aware_fit_utc() -> None:
+    """Guards T2: a UTC-aware ``fit_utc`` constructs without error.
+
+    The counterpart to ``test_model_metadata_rejects_naive_fit_utc``: a
+    properly tz-aware datetime (UTC offset == 0) must pass the
+    ``_validate_fit_utc`` validator without raising.
+
+    Guards T2 (positive path for tz-aware ``fit_utc``).
+    """
+    aware_dt = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+
+    meta = ModelMetadata(
+        name="linear-ols",
+        feature_columns=("t2m", "wind_speed"),
+        fit_utc=aware_dt,
+    )
+
+    assert meta.fit_utc == aware_dt, (
+        f"fit_utc must be stored as supplied; got {meta.fit_utc!r} (T2 tz-aware positive path)."
+    )
+    assert meta.fit_utc.tzinfo is not None, (
+        "fit_utc must retain tzinfo after round-trip through Pydantic (T2 tz-aware positive path)."
+    )
+
+
+def test_model_metadata_name_pattern_rejects_uppercase() -> None:
+    """Guards T2: ``ModelMetadata.name`` pattern rejects uppercase letters.
+
+    The field is annotated ``Field(pattern=r'^[a-z][a-z0-9_.-]*$')`` — names
+    must start with a lowercase letter and contain only lowercase letters,
+    digits, underscores, dots, or hyphens.  A name starting with an uppercase
+    letter (e.g. ``"BadName"``) must be rejected with a ``ValidationError``
+    so model identifiers stay machine-friendly and consistent with
+    ``ProjectConfig.name`` and ``FeatureSetConfig.name`` conventions.
+
+    Guards T2 (``Field(pattern=...)`` on ``ModelMetadata.name``).
+    """
+    with pytest.raises(ValidationError):
+        ModelMetadata(name="BadName", feature_columns=())
