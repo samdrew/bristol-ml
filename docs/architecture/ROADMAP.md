@@ -19,21 +19,6 @@ written. The questions are prompts for the Phase 1 plan that
 introduces the layer — not commitments, not open questions against
 current architecture.
 
-### Models
-*First realised by [Stage 4](../intent/DESIGN.md#9-stage-plan).*
-
-Introduces the `Model` protocol (DESIGN.md §7.3) — the contract every
-model (linear baseline, SARIMAX, SciPy parametric, two NNs) implements
-so the evaluation harness and registry can treat them uniformly.
-Questions for the layer doc:
-
-- `Model.metadata` contents — what must be present for a registry
-  entry to be reproducible and comparable.
-- Where `model.fit`/`predict`/`save`/`load` live per-family — a single
-  base class, a Protocol, or a registry of adapter functions.
-- How hyperparameter tuning composes with the rolling-origin harness
-  without nested cross-validation becoming the happy path.
-
 ### Registry
 *First realised by [Stage 9](../intent/DESIGN.md#9-stage-plan).*
 

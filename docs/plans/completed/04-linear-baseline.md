@@ -1,6 +1,6 @@
 # Plan — Stage 4: Linear regression baseline + evaluation harness
 
-**Status:** `approved` — all decisions (D1–D11) and housekeeping carry-overs (H-1–H-3) accepted by human 2026-04-19. Phase 2 in progress.
+**Status:** `shipped` — all eleven tasks (T0-T10) landed; all decisions (D1-D11) and housekeeping carry-overs (H-1-H-3) accepted by human 2026-04-19; retrospective at [`docs/lld/stages/04-linear-baseline.md`](../../lld/stages/04-linear-baseline.md).
 **Intent:** [`docs/intent/04-linear-baseline.md`](../../intent/04-linear-baseline.md)
 **Upstream stages shipped:** Stage 0 (foundation), Stage 1 (NESO demand), Stage 2 (weather + national aggregate), Stage 3 (feature assembler + splitter).
 **Downstream consumers:** every subsequent modelling stage (5, 7, 8, 10, 11) implements the `Model` protocol established here. Stage 9 (registry) retrofits these models. Stage 12 (serving) loads them.

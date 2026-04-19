@@ -89,7 +89,7 @@ A new `- model/linear@model.linear` entry slots in here. The `@model.linear` syn
 
 ### Ingestion template for `neso_forecast.py`
 
-**File:** `/workspace/src/bristol_ml/ingestion/neso.py` (template)  
+**File:** `/workspace/src/bristol_ml/ingestion/neso.py` (template)
 **Helper:** `/workspace/src/bristol_ml/ingestion/_common.py`
 
 The NESO forecast ingester is a copy-and-adapt of `neso.py`. Key shared helpers from `_common.py`: `CachePolicy`, `CacheMissingError`, `_atomic_write(table, path)`, `_cache_path(config)`, `_retrying_get(client, url, params, config)`, `_respect_rate_limit(last, gap)`. All accept structural `Protocol` types (`RetryConfig`, `RateLimitConfig`, `CachePathConfig`) so any new Pydantic config model that exposes the same attribute names is accepted without inheriting a base class. The retry policy is tenacity 3-attempt exponential backoff (base 1 s, cap 10 s), retrying only `ConnectError | ReadTimeout | HTTP 5xx/429`. Provenance column: `retrieved_at_utc` (`timestamp[us, tz=UTC]`) written on every row, scalar per fetch call.
