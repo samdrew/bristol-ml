@@ -9,7 +9,7 @@ schema is enforced at the module boundary via the ``OUTPUT_SCHEMA``
 constant; downstream stages treat the schema as a contract and may rely on
 column order, dtype, and timezone metadata.
 
-Decisions (see ``docs/plans/active/03-feature-assembler.md`` §1):
+Decisions (see ``docs/plans/completed/03-feature-assembler.md`` §1):
 
 * **D1** — half-hourly NESO rows are aggregated to hourly via
   ``mean`` (default) or ``max``; the choice is a config field
@@ -228,7 +228,7 @@ def build(
     neso_retrieved_at_utc
         Scalar provenance for the NESO fetch (D8). Optional; if ``None``,
         the ``retrieved_at_utc`` column of ``demand_hourly`` (if present)
-        is used, else :func:`pandas.Timestamp.utcnow` at call time.
+        is used, else :func:`pandas.Timestamp.now` with ``tz="UTC"`` at call time.
     weather_retrieved_at_utc
         Scalar provenance for the weather fetch (D8). Optional; same
         fallback semantics as ``neso_retrieved_at_utc``.
@@ -377,7 +377,7 @@ def _resolve_provenance(
     """Decide the scalar retrieved_at_utc to write on every row.
 
     Preference order: explicit argument → column on source frame (first
-    non-null; warn if not unique) → ``pd.Timestamp.utcnow()``. The fallback
+    non-null; warn if not unique) → ``pd.Timestamp.now("UTC")``. The fallback
     guards against the no-provenance case (e.g. a hand-crafted fixture with
     no ``retrieved_at_utc`` column at all); the assembler does not fail
     hard in that case because a downstream unit test should not need to
@@ -389,7 +389,7 @@ def _resolve_provenance(
     if column in source_frame.columns:
         non_null = source_frame[column].dropna()
         if len(non_null) == 0:
-            return pd.Timestamp.utcnow().floor("us")
+            return pd.Timestamp.now("UTC").floor("us")
         if non_null.nunique() > 1:
             logger.warning(
                 "Provenance column {!r} carries {} distinct values on {} frame; using the first.",
@@ -399,7 +399,7 @@ def _resolve_provenance(
             )
         return pd.Timestamp(non_null.iloc[0]).tz_convert("UTC")
 
-    return pd.Timestamp.utcnow().floor("us")
+    return pd.Timestamp.now("UTC").floor("us")
 
 
 # ---------------------------------------------------------------------------

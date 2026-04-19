@@ -18,8 +18,13 @@ the renormalised weighted mean of a constant is the constant.
 
 ### `assembler` (Stage 3)
 
-Public surface:
+Public surface (matches `assembler.__all__`):
 
+- `DEMAND_COLUMNS: tuple[str, ...]` — `("nd_mw", "tsd_mw")`. The demand
+  columns carried through the hourly resample; both are `int32` MW.
+- `WEATHER_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]` — the five
+  weather aggregate columns and their arrow types. `cloud_cover` is widened
+  from `int8` (long-form weather schema) to `float32` here.
 - `OUTPUT_SCHEMA: pa.Schema` — the declared parquet schema. Column order,
   arrow dtypes and timezone metadata are contractual; downstream models
   may rely on all three.

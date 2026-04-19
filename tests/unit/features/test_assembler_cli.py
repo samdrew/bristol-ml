@@ -6,7 +6,7 @@ pure ``build`` function. The spec-derived behavioural tests for
 ``build`` / ``load`` / ``_resample_demand_hourly`` live in
 ``test_assembler.py``.
 
-Plan cross-reference: ``docs/plans/active/03-feature-assembler.md``
+Plan cross-reference: ``docs/plans/completed/03-feature-assembler.md``
 §6 Task T4.
 
 Approach
