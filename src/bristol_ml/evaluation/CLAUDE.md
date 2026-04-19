@@ -57,7 +57,7 @@ backed by the resolved `evaluation.rolling_origin` Hydra config.
 
 - Layer contract — `docs/architecture/layers/evaluation.md` (Stage 3 lands
   the initial version; Stage 4/6 extend it).
-- Stage 3 plan — `docs/plans/active/03-feature-assembler.md` §5 (the
+- Stage 3 plan — `docs/plans/completed/03-feature-assembler.md` §5 (the
   public surface signature) and §6 Task T2.
 - Rolling-origin research — `docs/lld/research/03-feature-assembler.md`
   §2 (vocabulary, fold-count arithmetic, the argument against

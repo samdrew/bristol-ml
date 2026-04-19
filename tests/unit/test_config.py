@@ -8,7 +8,7 @@ Stage 3 T1 tests encode the acceptance criteria for the new Hydra config groups
 the four new Pydantic models (`FeatureSetConfig`, `FeaturesGroup`,
 `SplitterConfig`, `EvaluationGroup`).  Each test docstring cites the plan
 decision or acceptance criterion it guards so future readers can trace back to
-`docs/plans/active/03-feature-assembler.md`.
+`docs/plans/completed/03-feature-assembler.md`.
 """
 
 from __future__ import annotations

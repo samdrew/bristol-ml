@@ -2,9 +2,9 @@
 
 Every test is derived from:
 
-- ``docs/plans/active/03-feature-assembler.md`` §4 (Acceptance Criteria) and
+- ``docs/plans/completed/03-feature-assembler.md`` §4 (Acceptance Criteria) and
   §6 Task T3 (the named test list).
-- ``docs/plans/active/03-feature-assembler.md`` §1 (the eight human-ratified
+- ``docs/plans/completed/03-feature-assembler.md`` §1 (the eight human-ratified
   decisions: D1 demand aggregation, D2 pyarrow schema, D5 missing-data policy,
   D8 provenance columns).
 - ``src/bristol_ml/features/CLAUDE.md`` "Invariants" section — the load-bearing
@@ -34,7 +34,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from loguru import logger
 
 # Skip the entire module until the implementation lands.
 assembler_mod = pytest.importorskip("bristol_ml.features.assembler")
@@ -47,23 +46,6 @@ DEMAND_COLUMNS = assembler_mod.DEMAND_COLUMNS
 WEATHER_VARIABLE_COLUMNS = assembler_mod.WEATHER_VARIABLE_COLUMNS
 
 _WEATHER_NAMES = [name for name, _dtype in WEATHER_VARIABLE_COLUMNS]
-
-
-# ---------------------------------------------------------------------------
-# Loguru → caplog adapter (plan §6 T3, D5)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def loguru_caplog(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
-    """Route loguru INFO output into pytest's caplog fixture.
-
-    The assembler uses loguru (house style).  Stdlib ``caplog`` does not
-    capture loguru records without this adapter.  Pattern taken from plan §6.
-    """
-    handler_id = logger.add(caplog.handler, format="{message}", level="INFO")
-    yield caplog
-    logger.remove(handler_id)
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +449,6 @@ class TestAssemblerLogsStructuredSummary:
 
         Guards D5 (plan §1) and CLAUDE.md structured-log invariant.
         """
-        import logging
-
         # Build a demand frame where hour-index 2 has NaN nd_mw.
         n_hours = 8
         demand_half = _make_half_hourly_demand("2023-01-01T00:00:00+00:00", n_periods=n_hours * 2)
@@ -501,7 +481,7 @@ class TestAssemblerLogsStructuredSummary:
 
         config = _make_feature_set_config(tmp_path, forward_fill_hours=3)
 
-        with loguru_caplog.at_level(logging.INFO):
+        with loguru_caplog.at_level("INFO"):
             result = build(demand_hourly, weather_df, config)
 
         # Exactly one INFO record from the assembler.

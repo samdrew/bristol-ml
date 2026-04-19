@@ -2,11 +2,11 @@
 
 Every test is derived from:
 
-- ``docs/plans/active/03-feature-assembler.md`` §4 (Acceptance Criteria) and
+- ``docs/plans/completed/03-feature-assembler.md`` §4 (Acceptance Criteria) and
   §6 Task T2 (named tests and fold-count formula).
 - ``src/bristol_ml/evaluation/CLAUDE.md`` "Invariants" section (the load-bearing
   list that every downstream modelling stage relies on).
-- ``docs/plans/active/03-feature-assembler.md`` §1 D4 (window-type decision:
+- ``docs/plans/completed/03-feature-assembler.md`` §1 D4 (window-type decision:
   expanding default, ``fixed_window`` knob for sliding).
 
 No production code is modified here.  If any test below fails, the failure
