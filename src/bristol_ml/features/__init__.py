@@ -23,7 +23,13 @@ __all__ = ["national_aggregate"]
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-export of ``national_aggregate`` from the weather submodule."""
+    """Lazy re-export of ``national_aggregate`` from the weather submodule.
+
+    The assembler module (Stage 3) has a wider public surface (``build``,
+    ``load``, ``assemble``, ``OUTPUT_SCHEMA``) so is accessed by submodule
+    import rather than a single top-level alias — ``from bristol_ml.features
+    import assembler`` — matching the ``bristol_ml.ingestion`` convention.
+    """
     if name == "national_aggregate":
         from bristol_ml.features import weather as _weather
 
