@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Stage 2: `bristol_ml.ingestion.weather` — Open-Meteo historical-weather archive ingestion. Public interface `fetch(config, *, cache=CachePolicy.AUTO) -> Path` and `load(path) -> pd.DataFrame`; writes long-form hourly parquet (one row per station × hour) to `${BRISTOL_ML_CACHE_DIR:-data/raw/weather}/weather.parquet`. On-disk schema (`timestamp_utc`, `station`, five weather variables, `retrieved_at_utc`) documented in [`src/bristol_ml/ingestion/CLAUDE.md`](src/bristol_ml/ingestion/CLAUDE.md).
+- Stage 2: `bristol_ml.ingestion._common` — shared helpers extracted from `neso.py` (`CachePolicy`, `CacheMissingError`, `_atomic_write`, `_cache_path`, `_respect_rate_limit`, `_retrying_get`, `_RetryableStatusError`). Retry / rate-limit / cache-path helpers accept any config satisfying the structural `Protocol` types (`RetryConfig`, `RateLimitConfig`, `CachePathConfig`) — zero-behaviour-change refactor for Stage 1.
+- Stage 2: `bristol_ml.features` — features layer introduced one stage earlier than DESIGN §9 implies so the Stage 2 notebook can import a weighted-mean helper instead of reimplementing it. `bristol_ml.features.weather.national_aggregate(df, weights)` collapses long-form per-station hourly weather into a wide-form national signal; subset-of-stations and NaN-safe weight renormalisation documented in the module docstring.
+- Stage 2: Hydra config group `conf/ingestion/weather.yaml` wired through `AppConfig.ingestion.weather` (`WeatherStation`, `WeatherIngestionConfig` in `conf/_schemas.py`). Ten UK population centres with ONS 2011 Census BUA weights; default variables `temperature_2m`, `dew_point_2m`, `wind_speed_10m`, `cloud_cover`, `shortwave_radiation`.
+- Stage 2: module CLIs `python -m bristol_ml.ingestion.weather` and `python -m bristol_ml.features.weather` — standalone Hydra-driven entry points per principle §2.1.1.
+- Stage 2: `notebooks/02_weather_demand.ipynb` — thin demo notebook that primes both caches, joins hourly demand to the national weather aggregate, and plots temperature vs demand with a LOWESS fit; narrative motivates Open-Meteo over Met Office DataHub (AC5) and frames the curve as a hockey-stick rather than a symmetric V.
+- Stage 2: recorded HTTP cassette `tests/fixtures/weather/cassettes/weather_2023_01.yaml` (London + Bristol, January 2023, five variables, ~64 kB) plus the one-off recorder at `scripts/record_weather_cassette.py`; `statsmodels` added as a runtime dependency for LOWESS.
+
 - Stage 1: `bristol_ml.ingestion.neso` — NESO historic demand ingestion. Public interface `fetch(config, *, cache=CachePolicy.AUTO) -> Path` and `load(path) -> pd.DataFrame`, with `CachePolicy` values `AUTO | REFRESH | OFFLINE` and a `CacheMissingError` raised when `OFFLINE` is requested without a cache. Writes half-hourly parquet to `${BRISTOL_ML_CACHE_DIR:-data/raw/neso}/neso_demand.parquet`; on-disk schema (canonical `timestamp_utc` in UTC, plus `timestamp_local`, `settlement_date`, `settlement_period`, `nd_mw`, `tsd_mw`, `source_year`, `retrieved_at_utc`) documented in [`src/bristol_ml/ingestion/CLAUDE.md`](src/bristol_ml/ingestion/CLAUDE.md).
 - Stage 1: Hydra config group `conf/ingestion/neso.yaml` wired through `AppConfig.ingestion.neso` (`IngestionGroup` + `NesoIngestionConfig` in `conf/_schemas.py`). Covers the NESO annual resources for 2018–2025; adding a year is one YAML list entry.
 - Stage 1: module CLI `python -m bristol_ml.ingestion.neso [--cache auto|refresh|offline] [overrides ...]` — calls `fetch` with the composed Hydra config and prints the resulting cache path.
@@ -17,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Stage 2: `bristol_ml.ingestion.neso` refactored to import `CachePolicy`, `CacheMissingError`, `_atomic_write`, `_cache_path`, `_respect_rate_limit`, `_retrying_get`, and `_RetryableStatusError` from `bristol_ml.ingestion._common`. Public interface unchanged; Stage 1's 35 tests continue to pass without modification.
 - Reorganised `docs/` into a tiered `intent/` / `architecture/` / `lld/` layout to support `.claude/hooks/tiered-write-paths.sh` from the lead agent. `DESIGN.md` moved to `docs/intent/DESIGN.md`; ADRs to `docs/architecture/decisions/`; stage retrospectives to `docs/lld/stages/`. Lead agent frontmatter wired to the tiered hook.
 
 ## [0.0.0] — 2026-04-18

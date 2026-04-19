@@ -103,9 +103,59 @@ Built from `(SETTLEMENT_DATE + (SETTLEMENT_PERIOD - 1) × 30 min)` then
   between paginated calls.
 - On final failure the error names the URL and attempt count.
 
+## Shared helpers — `_common.py`
+
+Stage 2 extracted `CachePolicy`, `CacheMissingError`, `_atomic_write`,
+`_cache_path`, `_respect_rate_limit`, `_retrying_get`, and
+`_RetryableStatusError` from `neso.py` into `_common.py`. The retry /
+rate-limit / cache-path helpers accept any config that satisfies the
+structural `Protocol` types declared in `_common` (`RetryConfig`,
+`RateLimitConfig`, `CachePathConfig`) — so `NesoIngestionConfig` and
+`WeatherIngestionConfig` both work without a shared base class. Per-source
+modules (`neso.py`, `weather.py`) import the helpers and re-export
+`CachePolicy` / `CacheMissingError` for notebook ergonomics.
+
+## `weather.py` — output schema
+
+File path: `<cache_dir>/weather.parquet` where `<cache_dir>` defaults to
+`${BRISTOL_ML_CACHE_DIR:-./data/raw/weather}`. **Long-form**: one row per
+station × hour. The national aggregate is computed downstream in
+`bristol_ml.features.weather.national_aggregate` — never persisted by
+the ingester.
+
+| Column                | Parquet type               | Notes                                                             |
+|-----------------------|----------------------------|-------------------------------------------------------------------|
+| `timestamp_utc`       | `timestamp[us, tz=UTC]`    | Canonical. Open-Meteo returns UTC natively; no DST algebra.       |
+| `station`             | `string`                   | Lowercase snake-case name, matches `WeatherStation.name`.         |
+| `temperature_2m`      | `float32`                  | °C. Open-Meteo reports to 0.1 °C; float32 is ample.               |
+| `dew_point_2m`        | `float32`                  | °C.                                                               |
+| `wind_speed_10m`      | `float32`                  | km/h (API default unit).                                          |
+| `cloud_cover`         | `int8`                     | %, 0–100.                                                         |
+| `shortwave_radiation` | `float32`                  | W/m².                                                             |
+| `retrieved_at_utc`    | `timestamp[us, tz=UTC]`    | Per-fetch provenance (§2.1.6).                                    |
+
+Primary key: `(timestamp_utc, station)` unique; sorted by
+`timestamp_utc ASC, station ASC`.
+
+### Data model caveat
+
+Open-Meteo's archive endpoint serves **ERA5 / ERA5-Land / CERRA** reanalyses
+at ~9–11 km, **not** the UKMO UKV 2 km model claimed in DESIGN §4.2. The UKV
+archive is reachable only via the separate `historical-forecast-api` and
+only from 2022-03-01 — incompatible with the Stage 1 training window.
+Stage 2 pins `era5_seamless` (the archive default) and defers the DESIGN
+§4.2 correction to a human-approved main-session edit.
+
+### Cache staleness
+
+A station added to `conf/ingestion/weather.yaml` does **not** trigger a
+partial re-fetch on the next `AUTO` call — the user must re-run with
+`REFRESH` to rebuild the cache from all configured stations. Staleness
+detection is a Stage 19 (orchestration) concern.
+
 ## Fixtures
 
-Cassettes live at `tests/fixtures/neso/cassettes/` via
+Cassettes live at `tests/fixtures/<source>/cassettes/` via
 [`pytest-recording`](https://pypi.org/project/pytest-recording/). CI runs
 with `--record-mode=none`; developers re-record with `--record-mode=once`
 after deleting the cassette directory. Sensitive headers
@@ -117,4 +167,6 @@ for future authenticated feeds.
 
 NESO Historic Demand Data is published under NESO Open Data / OGL v3. The
 licence is acknowledged in the project `README.md`; we do not replicate
-licence metadata into the parquet file.
+licence metadata into the parquet file. Open-Meteo historical data is
+released under CC BY 4.0 — citation lives in the project `README.md`
+alongside the NESO acknowledgement.

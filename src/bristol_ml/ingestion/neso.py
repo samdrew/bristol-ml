@@ -28,13 +28,10 @@ CKAN notes:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import time
 import warnings
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 
 import httpx
@@ -42,37 +39,32 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from loguru import logger
-from tenacity import (
-    RetryError,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
+from bristol_ml.ingestion._common import (
+    CacheMissingError,
+    CachePolicy,
+    _atomic_write,
+    _cache_path,
+    _respect_rate_limit,
+    _retrying_get,
+)
 from conf._schemas import NesoIngestionConfig
 
 # ---------------------------------------------------------------------------
-# Public surface
+# Public surface — ``CachePolicy`` and ``CacheMissingError`` are re-exported
+# from ``_common`` so ``from bristol_ml.ingestion.neso import CachePolicy``
+# (the Stage 1 public API) keeps working unchanged after the extraction.
 # ---------------------------------------------------------------------------
 
 
-class CachePolicy(StrEnum):
-    """How ``fetch`` treats the local cache.
-
-    - ``AUTO``: use cache if present, fetch if not. Notebook-friendly default.
-    - ``REFRESH``: always fetch; overwrite cache atomically.
-    - ``OFFLINE``: never touch the network; raise ``CacheMissingError`` if the
-      cache file is absent. The CI-safe choice.
-    """
-
-    AUTO = "auto"
-    REFRESH = "refresh"
-    OFFLINE = "offline"
-
-
-class CacheMissingError(FileNotFoundError):
-    """Raised when ``CachePolicy.OFFLINE`` is requested without a cache file."""
+__all__ = [
+    "OUTPUT_SCHEMA",
+    "REQUIRED_RAW_COLUMNS",
+    "CacheMissingError",
+    "CachePolicy",
+    "fetch",
+    "load",
+]
 
 
 # Canonical ordered raw-column expectations ----------------------------------
@@ -188,34 +180,11 @@ def load(path: Path) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Private helpers — kept module-private per the layer architecture's
-# "no shared _common.py in Stage 1" rule.
+# Private helpers — NESO-specific. Generic retry/rate-limit/atomic-write
+# helpers (``_atomic_write``, ``_cache_path``, ``_respect_rate_limit``,
+# ``_retrying_get``) live in ``bristol_ml.ingestion._common``; this module
+# keeps only the settlement-period and CKAN-schema logic.
 # ---------------------------------------------------------------------------
-
-
-def _cache_path(config: NesoIngestionConfig) -> Path:
-    """Resolve the absolute cache path and ensure the parent directory exists."""
-    cache_dir = Path(config.cache_dir).expanduser().resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / config.cache_filename
-
-
-def _respect_rate_limit(last_request_at: float | None, min_gap_seconds: float) -> float:
-    """Sleep so that calls are separated by at least ``min_gap_seconds``.
-
-    Returns the wall-clock timestamp (from ``time.monotonic``) at which the
-    caller is now free to issue a request. Takes a ``None`` previous stamp on
-    the first call and skips the sleep.
-    """
-    now = time.monotonic()
-    if last_request_at is not None and min_gap_seconds > 0:
-        elapsed = now - last_request_at
-        remaining = min_gap_seconds - elapsed
-        if remaining > 0:
-            logger.debug("NESO rate-limit sleep: {:.2f}s", remaining)
-            time.sleep(remaining)
-            now = time.monotonic()
-    return now
 
 
 def _fetch_year(
@@ -273,51 +242,6 @@ def _fetch_year(
     return df
 
 
-class _RetryableStatusError(Exception):
-    """Internal signal that a 5xx or 429 response should be retried."""
-
-
-def _retrying_get(
-    client: httpx.Client,
-    url: str,
-    params: dict[str, object],
-    config: NesoIngestionConfig,
-) -> httpx.Response:
-    """GET with tenacity retry on transient errors only.
-
-    Retries on ``httpx.ConnectError``, ``httpx.ReadTimeout``, and HTTP 5xx/429.
-    Never retries non-429 4xx — those are caller errors and should fail loudly.
-    On final failure the raised error names the URL and attempt count.
-    """
-
-    @retry(
-        stop=stop_after_attempt(config.max_attempts),
-        wait=wait_exponential(
-            multiplier=config.backoff_base_seconds,
-            max=config.backoff_cap_seconds,
-        ),
-        retry=retry_if_exception_type(
-            (httpx.ConnectError, httpx.ReadTimeout, _RetryableStatusError)
-        ),
-        reraise=True,
-    )
-    def _do_get() -> httpx.Response:
-        response = client.get(url, params=params)
-        if response.status_code >= 500 or response.status_code == 429:
-            raise _RetryableStatusError(
-                f"NESO CKAN returned {response.status_code} for {response.request.url}"
-            )
-        response.raise_for_status()
-        return response
-
-    try:
-        return _do_get()
-    except RetryError as exc:  # pragma: no cover — reraise=True replaces this path
-        raise RuntimeError(
-            f"NESO CKAN call to {url} failed after {config.max_attempts} attempts: {exc}"
-        ) from exc
-
-
 def _assert_schema(df: pd.DataFrame, year: int) -> pd.DataFrame:
     """Validate the raw dataframe: required columns present; unknown columns warned + dropped.
 
@@ -368,7 +292,7 @@ def _parse_settlement_date(raw: pd.Series) -> pd.Series:
     sample = next((v for v in raw if pd.notna(v)), None)
     if sample is None:
         return raw
-    for fmt in ("%d-%b-%y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
         try:
             parsed = pd.to_datetime(raw, format=fmt).dt.date
             return parsed
@@ -529,18 +453,6 @@ def _to_arrow(df: pd.DataFrame) -> pa.Table:
     # match the documented contract, regardless of pandas' inference.
     cast = table.cast(OUTPUT_SCHEMA, safe=True)
     return cast
-
-
-def _atomic_write(table: pa.Table, path: Path) -> None:
-    """Write ``table`` to ``path`` via a tmp file + ``os.replace``.
-
-    ``os.replace`` is the portable Python atomic-rename primitive (atomic on
-    POSIX and NTFS). PyArrow has no built-in atomic mode.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    pq.write_table(table, tmp)
-    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------

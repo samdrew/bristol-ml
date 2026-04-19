@@ -1,0 +1,91 @@
+# @package ingestion.weather
+#
+# Open-Meteo historical weather archive — per-station point queries for ten
+# UK population centres. Drives Stage 2's ``features.weather.national_aggregate``
+# (population-weighted national signal).
+#
+# The archive endpoint serves ERA5 / ERA5-Land / CERRA reanalyses — NOT the
+# UKMO UKV 2 km model (flagged as a DESIGN §4.2 drift; the UKV archive only
+# begins 2022-03-01 and is served via historical-forecast-api, not archive-api).
+# Coordinates are city-hall references to three decimals; ±0.05° jitter is
+# analytically irrelevant inside the ~11 km ERA5-Land cell.
+#
+# Weights are 2011 Census Built-Up Area populations — the most recent
+# UK-wide comparable series (Scotland 2022 + NI 2021 + E&W 2021 are not yet
+# published as a harmonised urban-area table as of 2026).
+# Source: https://en.wikipedia.org/wiki/List_of_urban_areas_in_the_United_Kingdom
+# (ONS 2011 Census figures for BUAs).
+
+base_url: https://archive-api.open-meteo.com/v1/archive
+# Defaults to ``data/raw/weather`` relative to the current working directory;
+# override with ``BRISTOL_ML_CACHE_DIR`` for portable caches.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/weather}
+cache_filename: weather.parquet
+# Stage 2 training window: start of NESO data (Stage 1) to current best-quality.
+start_date: 2018-01-01
+# end_date omitted → Open-Meteo serves up to its ~5-day-delayed present.
+# Archive endpoint defaults to ``timezone=GMT`` = UTC; we request UTC explicitly.
+timezone: UTC
+variables:
+  - temperature_2m
+  - dew_point_2m
+  - wind_speed_10m
+  - cloud_cover
+  - shortwave_radiation
+request_timeout_seconds: 30.0
+max_attempts: 3
+backoff_base_seconds: 1.0
+backoff_cap_seconds: 10.0
+# Conservative well under Open-Meteo's 600/min free-tier cap.
+min_inter_request_seconds: 0.25
+stations:
+  - name: london
+    latitude: 51.5074
+    longitude: -0.1278
+    weight: 9787426
+    weight_source: "ONS 2011 Census, Greater London BUA"
+  - name: birmingham
+    latitude: 52.4862
+    longitude: -1.8904
+    weight: 2440986
+    weight_source: "ONS 2011 Census, West Midlands BUA"
+  - name: manchester
+    latitude: 53.4808
+    longitude: -2.2426
+    weight: 2553379
+    weight_source: "ONS 2011 Census, Greater Manchester BUA"
+  - name: leeds
+    latitude: 53.8008
+    longitude: -1.5491
+    weight: 1777934
+    weight_source: "ONS 2011 Census, West Yorkshire BUA"
+  - name: newcastle
+    latitude: 54.9784
+    longitude: -1.6174
+    weight: 774891
+    weight_source: "ONS 2011 Census, Tyneside BUA"
+  - name: sheffield
+    latitude: 53.3811
+    longitude: -1.4701
+    weight: 685368
+    weight_source: "ONS 2011 Census, Sheffield BUA"
+  - name: bristol
+    latitude: 51.4545
+    longitude: -2.5879
+    weight: 617280
+    weight_source: "ONS 2011 Census, Bristol BUA"
+  - name: liverpool
+    latitude: 53.4084
+    longitude: -2.9916
+    weight: 864122
+    weight_source: "ONS 2011 Census, Liverpool BUA"
+  - name: glasgow
+    latitude: 55.8642
+    longitude: -4.2518
+    weight: 957620
+    weight_source: "ONS 2011 Census, Greater Glasgow BUA"
+  - name: edinburgh
+    latitude: 55.9533
+    longitude: -3.1883
+    weight: 482270
+    weight_source: "ONS 2011 Census, Edinburgh BUA"
