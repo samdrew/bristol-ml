@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from bristol_ml.config import load_config
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
-    from bristol_ml.ingestion.neso import CacheMissingError, CachePolicy
+    from bristol_ml.ingestion._common import CacheMissingError, CachePolicy
 
 try:
     __version__ = version("bristol_ml")
@@ -25,10 +25,12 @@ def __getattr__(name: str) -> object:
     (``from bristol_ml import CachePolicy``) but pulling them eagerly would
     make ``python -m bristol_ml`` pay a pandas-import cost on every Hydra
     invocation and would re-introduce the runpy "module-already-loaded"
-    warning on ``python -m bristol_ml.ingestion.neso``.
+    warning on ``python -m bristol_ml.ingestion.<source>``. Stage 2 moved
+    the resolution target from ``neso`` to ``_common`` so per-source
+    submodules are never imported for the enum.
     """
     if name in {"CachePolicy", "CacheMissingError"}:
-        from bristol_ml.ingestion import neso as _neso
+        from bristol_ml.ingestion import _common
 
-        return getattr(_neso, name)
+        return getattr(_common, name)
     raise AttributeError(f"module 'bristol_ml' has no attribute {name!r}")

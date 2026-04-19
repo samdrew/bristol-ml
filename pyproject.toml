@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow>=16,<22",
     "pandas>=2.2,<3",
     "loguru>=0.7,<1",
+    "statsmodels>=0.14,<1",
 ]
 
 [dependency-groups]

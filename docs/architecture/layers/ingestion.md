@@ -1,8 +1,8 @@
 # Ingestion — layer architecture
 
-- **Status:** Provisional — exercised by Stage 1 only. Revisit after Stage 2 (weather) introduces a second concrete caller, and again after Stage 13 (REMIT) which brings bi-temporal storage.
+- **Status:** Provisional — exercised by Stage 1 (NESO demand, shipped) and Stage 2 (weather, designed). Revisit again after Stage 13 (REMIT), which brings bi-temporal storage.
 - **Canonical overview:** [`DESIGN.md` §3.2](../../intent/DESIGN.md#32-layer-responsibilities) (ingestion paragraph).
-- **First concrete instance:** [Stage 1 LLD](../../lld/ingestion/neso.md); [research note](../../lld/research/01-neso-ingestion.md).
+- **Concrete instances:** [Stage 1 LLD](../../lld/ingestion/neso.md), [Stage 2 LLD](../../lld/ingestion/weather.md). Research: [NESO](../../lld/research/01-neso-ingestion.md), [weather](../../lld/research/02-weather-ingestion.md).
 - **Related principles:** §2.1.1 (standalone), §2.1.2 (typed narrow interfaces), §2.1.3 (stub-first), §2.1.5 (idempotence), §2.1.6 (provenance), §2.1.7 (tests at boundaries).
 
 ---
@@ -29,7 +29,7 @@ Seven concrete ingestion modules land across the stage plan: NESO demand, NESO d
 | Schema assertion on raw records | ✓ | — |
 | Settlement-period → UTC conversion | ✓ | — |
 | Calendar features, lags, joins | — | features layer |
-| Derived aggregates (hourly from half-hourly, weighted weather mean) | — | features layer |
+| Derived aggregates (hourly from half-hourly, population-weighted national weather) | — | features layer (Stage 2 seeds `features/weather.py`) |
 | Holding state beyond the cache file | — | not anywhere |
 
 The split is enforced by the `fetch`/`load` public interface (below): a module that reaches outside those two callables is doing something that does not belong here.
@@ -73,6 +73,7 @@ The enum is tri-valued deliberately — a boolean `force_refresh` collapses two 
 - **Integer types:** sized to the data — `int32` for MW values (GB peak ≈ 60 000), `int8` for settlement period (1–50), `int16` for year. No `int64` by default.
 - **Atomic writes:** `tmp = path.with_suffix(path.suffix + ".tmp"); pq.write_table(table, tmp); os.replace(tmp, path)`. PyArrow has no built-in atomic mode; `os.replace` is the portable Python-3.3+ primitive (atomic on POSIX and NTFS).
 - **Partitioning:** flat single file until the dataset crosses ~1 GB, then partition by year via `pyarrow.dataset.write_dataset`. Retrofittable without changing the public interface.
+- **Multi-endpoint sources:** a single source with a list of endpoints (Stage 2's ten weather stations; Stage 17's multiple Elexon routes) still writes one canonical parquet under `<source>/`. A `station` / `resource` discriminator column identifies rows; raw per-endpoint files, if kept, are an internal staging concern and never the `fetch` return value. `load(path)` always returns the combined frame.
 - **Provenance:** every written row carries `retrieved_at_utc` (§2.1.6). Per-fetch, not per-row, so byte-equal idempotence is achievable within a single run.
 
 ### 4. Schema assertion at ingest
@@ -106,30 +107,31 @@ Each of these is swappable without touching downstream code. The `fetch`/`load`/
 
 ## Module inventory
 
-| Module | Source | Stage | Target column(s) | LLD | Notes |
-|--------|--------|-------|------------------|-----|-----|
-| `neso.py` (demand) | NESO CKAN | 1 | `ND`, `TSD` | [`lld/ingestion/neso.md`](../../lld/ingestion/neso.md) | Sets the template. |
-| `neso_forecast.py` | NESO CKAN | 4 | `FORECASTDEMAND` | — | Reuses Stage 1 scaffolding. |
-| `weather.py` | Open-Meteo | 2 | multi-station `temperature_2m` etc. | — | Adds weighted aggregation in features layer. |
-| `holidays.py` | gov.uk | 5 | three-division bank holidays | — | Annual refresh cadence. |
-| `elexon_prices.py` | Elexon BMRS | 17 | MID price | — | — |
-| `elexon_generation.py` | Elexon BMRS | 17 | generation by fuel | — | — |
-| `remit.py` | Elexon BMRS | 13 | bi-temporal event stream | — | **Forces revisit of storage conventions** — first module with `published_at`/`effective_from`/`effective_to`. |
+| Module | Source | Stage | Target column(s) | LLD | Status | Notes |
+|--------|--------|-------|------------------|-----|--------|-----|
+| `neso.py` (demand) | NESO CKAN | 1 | `ND`, `TSD` | [`lld/ingestion/neso.md`](../../lld/ingestion/neso.md) | Shipped | Sets the template. |
+| `weather.py` | Open-Meteo | 2 | `temperature_2m`, `dew_point_2m`, `wind_speed_10m`, `cloud_cover`, `shortwave_radiation` | [`lld/ingestion/weather.md`](../../lld/ingestion/weather.md) | Designed | First multi-endpoint ingester (ten UK stations); seeds the features layer for the national weighted aggregate. |
+| `neso_forecast.py` | NESO CKAN | 4 | `FORECASTDEMAND` | — | Planning | Reuses Stage 1 scaffolding. |
+| `holidays.py` | gov.uk | 5 | three-division bank holidays | — | Planning | Annual refresh cadence. |
+| `remit.py` | Elexon BMRS | 13 | bi-temporal event stream | — | Planning | **Forces revisit of storage conventions** — first module with `published_at`/`effective_from`/`effective_to`. |
+| `elexon_prices.py` | Elexon BMRS | 17 | MID price | — | Planning | — |
+| `elexon_generation.py` | Elexon BMRS | 17 | generation by fuel | — | Planning | — |
 
 ## Open questions
 
-- **Shared `ingestion/_common.py`.** Seven modules will each repeat the atomic-write, retry wrapper, and cassette-fixture harness. A shared helper arrives when there are two concrete callers (Stage 2), not one. Extracting too early risks an abstraction that fits the first feed and fights every other.
+- **Shared `ingestion/_common.py` — trigger now met.** Stage 1 shipped with its atomic-write, retry wrapper, rate-limit helper, and cassette harness inlined. Stage 2 repeats all four. The extraction should happen *during* Stage 2 rather than speculatively before — two concrete callers is the threshold, and the candidate symbols are visible (`_atomic_write`, `_retrying_get`, `_RetryableStatusError`, `_respect_rate_limit`, a pytest-recording cassette fixture). Stage 2 LLD §11 records the extraction plan; Stage 13 is where bi-temporal storage may force further reshaping.
 - **Bi-temporal storage (Stage 13).** REMIT events carry (published_at, effective_from, effective_to); the single-timestamp convention above is insufficient. Options: extend the base schema with three nullable timestamp columns; isolate REMIT in a separate `remit` layer; treat bi-temporality as a features-layer concern. Decide at Stage 13, not now.
 - **Schema-discovery mode.** CKAN `package_show` and Elexon swagger both let a client enumerate resources at runtime. Today, year → UUID mapping for NESO is hand-maintained in `conf/ingestion/neso.yaml`. An opt-in discovery mode would remove the maintenance toil but adds complexity and runtime network dependence on metadata endpoints — not currently earned.
-- **Client-side throttling.** NESO's advertised 2 req/min on the datastore is unusually strict; whether enforced server-side is unclear. Stage 1 inserts a conservative inter-request delay. Whether this becomes a shared concern depends on Stage 17 (Elexon) — Elexon has no comparable documented limit.
+- **Client-side throttling.** NESO's advertised 2 req/min on the datastore is unusually strict; whether enforced server-side is unclear. Stage 1 inserts a conservative inter-request delay. Open-Meteo's 600/min free-tier limit is never approached at Stage 2's ten-station scale. Whether this becomes a shared concern depends on Stage 17 (Elexon) — Elexon has no comparable documented limit.
+- **Multi-endpoint fetch concurrency.** Stage 2 issues ~10 independent station requests. Serial httpx calls are fine at this scale and keep retry accounting simple; `httpx.AsyncClient` gains concurrency at the cost of an async call tree. Deferred until a source has many endpoints and a live-demo delay is observable.
 - **Cache portability.** A portable cache archive (one machine seeds another) is flagged in the Stage 1 intent as a plausible follow-up but not a requirement. If it ever lands, the `CachePolicy` enum is the natural place to extend.
 
 ## References
 
 - [`DESIGN.md` §2.1](../../intent/DESIGN.md#21-architectural) (principles), [§3.2](../../intent/DESIGN.md#32-layer-responsibilities) (layer responsibilities), [§4](../../intent/DESIGN.md#4-data-sources) (sources), [§7](../../intent/DESIGN.md#7-configuration-and-extensibility) (configuration).
-- [`docs/intent/01-neso-demand-ingestion.md`](../../intent/01-neso-demand-ingestion.md) — the first concrete intent.
-- [`docs/lld/ingestion/neso.md`](../../lld/ingestion/neso.md) — Stage 1 LLD applying this architecture.
-- [`docs/lld/research/01-neso-ingestion.md`](../../lld/research/01-neso-ingestion.md) — empirical inputs behind the claims above.
-- [CKAN datastore docs](https://docs.ckan.org/en/2.9/maintaining/datastore.html).
+- [`docs/intent/01-neso-demand-ingestion.md`](../../intent/01-neso-demand-ingestion.md), [`docs/intent/02-weather-ingestion.md`](../../intent/02-weather-ingestion.md) — concrete intents.
+- [`docs/lld/ingestion/neso.md`](../../lld/ingestion/neso.md), [`docs/lld/ingestion/weather.md`](../../lld/ingestion/weather.md) — per-stage LLDs applying this architecture.
+- [`docs/lld/research/01-neso-ingestion.md`](../../lld/research/01-neso-ingestion.md), [`docs/lld/research/02-weather-ingestion.md`](../../lld/research/02-weather-ingestion.md) — empirical inputs behind the claims above.
+- [CKAN datastore docs](https://docs.ckan.org/en/2.9/maintaining/datastore.html); [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api).
 - [PyArrow Parquet docs](https://arrow.apache.org/docs/python/parquet.html).
 - [tenacity](https://github.com/jd/tenacity); [pytest-recording](https://pypi.org/project/pytest-recording/).

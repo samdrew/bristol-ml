@@ -1,6 +1,7 @@
 defaults:
   - _self_
   - ingestion/neso@ingestion.neso
+  - ingestion/weather@ingestion.weather
 
 project:
   name: bristol_ml
