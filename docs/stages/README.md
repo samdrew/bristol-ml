@@ -29,7 +29,7 @@ Stages 2-19 are intentionally `planning` — briefs land when each stage becomes
 | 0 | Project foundation | `shipped` | [intent](../intent/00-foundation.md) | [brief](./00-foundation.md) | — | — | [retro](../lld/stages/00-foundation.md) |
 | 1 | NESO demand ingestion | `shipped` | [intent](../intent/01-neso-demand-ingestion.md) | [brief](./01-neso-demand-ingestion.md) | [ingestion](../architecture/layers/ingestion.md) | [lld](../lld/ingestion/neso.md) | [retro](../lld/stages/01-neso-demand-ingestion.md) |
 | 2 | Weather ingestion | `shipped` | [intent](../intent/02-weather-ingestion.md) | [brief](./02-weather-ingestion.md) | [ingestion](../architecture/layers/ingestion.md) | [lld](../lld/ingestion/weather.md) | [retro](../lld/stages/02-weather-ingestion.md) |
-| 3 | Feature assembler + split | `planning` | [intent](../intent/03-feature-assembler.md) | — | — | — | — |
+| 3 | Feature assembler + split | `shipped` | [intent](../intent/03-feature-assembler.md) | [plan](../plans/completed/03-feature-assembler.md) | [features](../architecture/layers/features.md) · [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/03-feature-assembler.md) |
 | 4 | Linear baseline + eval harness | `planning` | [intent](../intent/04-linear-baseline.md) | — | — | — | — |
 | 5 | Calendar features | `planning` | [intent](../intent/05-calendar-features.md) | — | — | — | — |
 | 6 | Enhanced evaluation & viz | `planning` | [intent](../intent/06-enhanced-evaluation.md) | — | — | — | — |
