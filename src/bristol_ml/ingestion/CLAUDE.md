@@ -110,10 +110,23 @@ Stage 2 extracted `CachePolicy`, `CacheMissingError`, `_atomic_write`,
 `_RetryableStatusError` from `neso.py` into `_common.py`. The retry /
 rate-limit / cache-path helpers accept any config that satisfies the
 structural `Protocol` types declared in `_common` (`RetryConfig`,
-`RateLimitConfig`, `CachePathConfig`) — so `NesoIngestionConfig` and
-`WeatherIngestionConfig` both work without a shared base class. Per-source
-modules (`neso.py`, `weather.py`) import the helpers and re-export
+`RateLimitConfig`, `CachePathConfig`) — so `NesoIngestionConfig`,
+`NesoForecastIngestionConfig`, and `WeatherIngestionConfig` all work
+without a shared base class. Per-source modules (`neso.py`,
+`neso_forecast.py`, `weather.py`) import the helpers and re-export
 `CachePolicy` / `CacheMissingError` for notebook ergonomics.
+
+### Stage 4 follow-up
+
+Stage 4 added `neso_forecast.py`, a second NESO-flavoured ingester
+that duplicates `neso.py`'s settlement-period → UTC algebra (the
+autumn-fallback / spring-forward shifts plus the ambiguity mask for
+`tz_localize`). The duplication is deliberate for Stage 4 — lifting
+the helpers into `_common.py` would touch the Stage 1 public surface
+and is out of scope for a baseline-modelling stage. The second-caller
+trigger is acknowledged here so a future refactor can factor it out
+(candidate: `bristol_ml.ingestion._neso_dst` with three functions —
+`_autumn_fallback_dates`, `_spring_forward_dates`, `_settlement_to_utc`).
 
 ## `weather.py` — output schema
 

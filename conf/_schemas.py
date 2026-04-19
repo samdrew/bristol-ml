@@ -149,10 +149,16 @@ class NesoForecastIngestionConfig(BaseModel):
     # Subset of the forecast resource's columns we cache locally. Default
     # covers the demand forecast, outturn, and published APE — enough for the
     # three-way benchmark comparison without persisting extraneous columns.
+    # Names are the CKAN-native casing as returned by
+    # ``datastore_search`` on resource ``08e41551-80f8-4e28-a416-ea473a695db9``
+    # (verified 2026-04 via the NESO API package-show metadata): the identity
+    # columns ``Date`` / ``Settlement_Period`` / ``Datetime`` are always
+    # fetched and converted; this list picks which measurement columns are
+    # persisted alongside them.
     columns: list[str] = Field(
         default_factory=lambda: [
-            "FORECASTDEMAND",
-            "OUTTURN",
+            "Demand_Forecast",
+            "Demand_Outturn",
             "APE",
         ]
     )

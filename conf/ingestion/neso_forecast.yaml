@@ -32,7 +32,11 @@ backoff_cap_seconds: 10.0
 # NESO rate-limit guidance (documented in the demand ingester's CLAUDE.md):
 # two requests per minute.  Shared across all NESO resources on the host.
 min_inter_request_seconds: 30.0
+# CKAN-native casing for resource 08e41551-80f8-4e28-a416-ea473a695db9.
+# Identity columns (Date, Settlement_Period, Datetime) are always fetched
+# and converted by the ingester; this list names the measurement columns
+# to persist locally.
 columns:
-  - FORECASTDEMAND
-  - OUTTURN
+  - Demand_Forecast
+  - Demand_Outturn
   - APE
