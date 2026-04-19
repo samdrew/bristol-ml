@@ -1,5 +1,7 @@
 # Stages — per-stage entry point
 
+This should now be redundant, as it has been superseded by plans/ directory.
+
 To work on a stage, open the per-stage brief below. It names every other document to read, in order, with one line on what each contributes. That brief is the canonical entry point — not this README.
 
 This tree is navigational only. Each brief points at four other trees without duplicating their content:
