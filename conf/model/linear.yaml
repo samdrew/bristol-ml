@@ -1,0 +1,22 @@
+# @package model
+#
+# Linear regression (statsmodels OLS) model (Stage 4).  One of two alternatives
+# under the ``model`` Hydra group; select at the CLI with
+#   python -m bristol_ml.train model=linear
+#
+# This is the default model in ``conf/config.yaml``.  Per plan D2 the estimator
+# is ``statsmodels.regression.linear_model.OLS``: its ``.summary()`` (with
+# coefficients, standard errors, t-stats, R², AIC/BIC, and residual diagnostics)
+# is the notebook demo payoff — sklearn's ``LinearRegression`` hides all of that.
+#
+# ``feature_columns: null`` means "use every weather column from the Stage 3
+# feature-table ``OUTPUT_SCHEMA``" — resolved at fit-time so the regressor set
+# stays in sync with the feature-table contract.  Override with an explicit
+# tuple (e.g. ``model.feature_columns=[temperature_2m]``) for ablation runs.
+
+type: linear
+target_column: nd_mw
+feature_columns: null
+# statsmodels' OLS does not add an intercept column automatically; keep ``true``
+# unless the feature set already carries a constant column.
+fit_intercept: true

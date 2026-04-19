@@ -2,8 +2,12 @@ defaults:
   - _self_
   - ingestion/neso@ingestion.neso
   - ingestion/weather@ingestion.weather
+  - ingestion/neso_forecast@ingestion.neso_forecast
   - features/weather_only@features.weather_only
   - evaluation/rolling_origin@evaluation.rolling_origin
+  - evaluation/metrics@evaluation.metrics
+  - evaluation/benchmark@evaluation.benchmark
+  - model: linear
 
 project:
   name: bristol_ml

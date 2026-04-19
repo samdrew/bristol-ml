@@ -7,7 +7,7 @@ here and a field on `AppConfig`.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -118,6 +118,46 @@ class WeatherIngestionConfig(BaseModel):
         return self
 
 
+class NesoForecastIngestionConfig(BaseModel):
+    """Configuration for the NESO day-ahead demand forecast archive (Stage 4).
+
+    Target CKAN resource: the *Day Ahead Half Hourly Demand Forecast Performance*
+    dataset (resource UUID ``08e41551-80f8-4e28-a416-ea473a695db9``), which
+    publishes the half-hourly day-ahead forecast alongside outturn and APE
+    from April 2021 onwards.  Stage 4's benchmark comparison aggregates this
+    half-hourly series to hourly per ``NesoBenchmarkConfig.aggregation``.
+
+    Retry/rate-limit fields mirror ``NesoIngestionConfig`` structurally so the
+    shared helpers in ``bristol_ml.ingestion._common`` accept both configs via
+    their structural ``Protocol`` types.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_url: HttpUrl = Field(default=HttpUrl("https://api.neso.energy/api/3/action/"))
+    # Single-resource archive (unlike NesoIngestionConfig's per-year list): the
+    # Day Ahead HH Demand Forecast Performance dataset is one CKAN resource.
+    resource_id: UUID
+    cache_dir: Path
+    cache_filename: str = "neso_forecast.parquet"
+    page_size: int = Field(default=32_000, ge=1, le=32_000)
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    backoff_base_seconds: float = Field(default=1.0, gt=0)
+    backoff_cap_seconds: float = Field(default=10.0, gt=0)
+    min_inter_request_seconds: float = Field(default=30.0, ge=0)
+    # Subset of the forecast resource's columns we cache locally. Default
+    # covers the demand forecast, outturn, and published APE — enough for the
+    # three-way benchmark comparison without persisting extraneous columns.
+    columns: list[str] = Field(
+        default_factory=lambda: [
+            "FORECASTDEMAND",
+            "OUTTURN",
+            "APE",
+        ]
+    )
+
+
 class IngestionGroup(BaseModel):
     """Container for per-source ingestion configs.
 
@@ -130,6 +170,7 @@ class IngestionGroup(BaseModel):
 
     neso: NesoIngestionConfig | None = None
     weather: WeatherIngestionConfig | None = None
+    neso_forecast: NesoForecastIngestionConfig | None = None
 
 
 class FeatureSetConfig(BaseModel):
@@ -188,15 +229,134 @@ class SplitterConfig(BaseModel):
     fixed_window: bool = False
 
 
-class EvaluationGroup(BaseModel):
-    """Container for evaluation-side configs (splitters; metrics land Stage 4).
+class MetricsConfig(BaseModel):
+    """Named metric functions the Stage 4 evaluator harness should compute.
 
-    Each field is optional so pre-Stage-3 configs still validate.
+    Names refer to the pure functions in ``bristol_ml.evaluation.metrics``
+    (``mae``, ``mape``, ``rmse``, ``wape`` per DESIGN §5.3).  The default
+    enumerates all four so the stdout metric table is complete out of the
+    box; override (e.g. ``evaluation.metrics.names=[mae,rmse]``) to shorten
+    the table for notebook fluency.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    names: tuple[Literal["mae", "mape", "rmse", "wape"], ...] = (
+        "mae",
+        "mape",
+        "rmse",
+        "wape",
+    )
+
+
+class NesoBenchmarkConfig(BaseModel):
+    """Three-way benchmark comparison configuration (Stage 4).
+
+    The NESO day-ahead forecast is published at half-hourly resolution; the
+    Stage 3 feature table and this project's models run at hourly resolution.
+    ``aggregation`` selects the hour-align rule; per D4 the default ``mean``
+    preserves the MW unit and matches Stage 3 D1 (the assembler aggregates the
+    ND outturn identically).  ``holdout_start`` / ``holdout_end`` bracket the
+    test period over which the three-way metric table is computed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # D4 (plan §1): mean preserves MW scale; 'first' takes the first settlement
+    # period of each hour (loses information but avoids averaging a forecasted
+    # value).  Omit 'sum' — unit-wrong for an MW rate series.
+    aggregation: Literal["mean", "first"] = "mean"
+    holdout_start: datetime
+    holdout_end: datetime
+
+    @model_validator(mode="after")
+    def _validate_holdout(self) -> NesoBenchmarkConfig:
+        """Enforce ``holdout_start < holdout_end`` and tz-awareness (UTC-aware)."""
+        if self.holdout_end <= self.holdout_start:
+            raise ValueError(
+                f"holdout_end {self.holdout_end} must strictly follow "
+                f"holdout_start {self.holdout_start}."
+            )
+        for name, value in (
+            ("holdout_start", self.holdout_start),
+            ("holdout_end", self.holdout_end),
+        ):
+            if value.tzinfo is None:
+                raise ValueError(f"{name} must be tz-aware (UTC); got naive datetime {value!r}.")
+        return self
+
+
+class EvaluationGroup(BaseModel):
+    """Container for evaluation-side configs.
+
+    Each field is optional so pre-Stage-3 configs still validate.  Stage 3
+    shipped ``rolling_origin``; Stage 4 adds ``metrics`` (named point-forecast
+    metrics) and ``benchmark`` (three-way NESO comparison).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     rolling_origin: SplitterConfig | None = None
+    metrics: MetricsConfig | None = None
+    benchmark: NesoBenchmarkConfig | None = None
+
+
+class NaiveConfig(BaseModel):
+    """Configuration for the seasonal-naive baseline model (Stage 4).
+
+    The naive model is a look-up into training-time actuals.  ``strategy``
+    chooses the lag: per D1 the default ``same_hour_last_week`` (``y_{t-168}``)
+    captures the dominant weekly seasonality of GB electricity demand and is
+    the credible-but-beatable floor against which the linear OLS must fight.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union; literal
+    # value matches the Hydra group filename (``conf/model/naive.yaml``).
+    type: Literal["naive"] = "naive"
+    # D1 (plan §1): 'same_hour_last_week' (lag=168) is the default seasonal
+    # naive definition; 'same_hour_yesterday' (lag=24) is easier to beat;
+    # 'same_hour_same_weekday' picks the most recent matching (hour, weekday)
+    # pair.  All three preserve the no-training-loop invariant of intent AC-2.
+    strategy: Literal[
+        "same_hour_yesterday",
+        "same_hour_last_week",
+        "same_hour_same_weekday",
+    ] = "same_hour_last_week"
+    # Target column on the Stage 3 feature table; default matches the assembler's
+    # ``OUTPUT_SCHEMA`` name for national demand in MW.
+    target_column: str = "nd_mw"
+
+
+class LinearConfig(BaseModel):
+    """Configuration for the linear (OLS) regression model (Stage 4).
+
+    Per D2 the estimator is ``statsmodels.regression.linear_model.OLS``; sklearn
+    is not a declared dependency.  ``feature_columns=None`` (the default) means
+    "use every weather column from the Stage 3 ``assembler.OUTPUT_SCHEMA``";
+    an explicit tuple narrows the regressor set for ablation experiments.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union.
+    type: Literal["linear"] = "linear"
+    # Target column on the Stage 3 feature table.
+    target_column: str = "nd_mw"
+    # ``None`` means "all float32 weather columns from the assembler schema"
+    # (enumerated at fit-time to stay in sync with the feature-table contract);
+    # an explicit tuple narrows the regressor set.
+    feature_columns: tuple[str, ...] | None = None
+    # statsmodels' ``OLS`` does not add an intercept column automatically;
+    # ``LinearModel.fit()`` calls ``sm.add_constant`` iff this is True.
+    fit_intercept: bool = True
+
+
+# ``AppConfig.model`` is a Pydantic discriminated union: exactly one of the
+# model variants is active per run (matching Hydra group-override semantics).
+# The ``type`` discriminator is written into the YAML by each Hydra group file.
+ModelConfig = NaiveConfig | LinearConfig
 
 
 class AppConfig(BaseModel):
@@ -206,3 +366,8 @@ class AppConfig(BaseModel):
     ingestion: IngestionGroup = Field(default_factory=IngestionGroup)
     features: FeaturesGroup = Field(default_factory=FeaturesGroup)
     evaluation: EvaluationGroup = Field(default_factory=EvaluationGroup)
+    # ``None`` keeps pre-Stage-4 programmatic ``AppConfig(...)`` construction
+    # valid (e.g. in ``tests/unit/features/test_assembler_cli.py``).  The
+    # defaults list in ``conf/config.yaml`` always selects one variant when
+    # composed via ``load_config()``.
+    model: ModelConfig | None = Field(default=None, discriminator="type")

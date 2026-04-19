@@ -1,0 +1,38 @@
+# @package ingestion.neso_forecast
+#
+# NESO Day Ahead Half Hourly Demand Forecast Performance archive (Stage 4).
+#
+# Single CKAN resource covering April 2021+ at half-hourly resolution, with
+# both forecast and outturn plus published APE.  This is the benchmark source
+# for the Stage 4 three-way comparison (naive / linear / NESO).  Research
+# R6 fixed on this resource rather than the cardinal-point forecast
+# (``9847e7bb-986e-49be-8138-717b25933fbb``) because the half-hourly version
+# is directly comparable to the model's hourly output after a D4 ``mean``
+# aggregation to hourly.
+#
+# Coverage note: the archive begins April 2021.  The benchmark comparison
+# window (``evaluation.benchmark.holdout_start/end``) must sit inside that
+# range; earlier test periods fall back to a two-way naive-vs-linear table.
+#
+# Retry/rate-limit knobs mirror ``conf/ingestion/neso.yaml`` so the shared
+# helpers in ``bristol_ml.ingestion._common`` accept this config structurally.
+
+base_url: https://api.neso.energy/api/3/action/
+# Defaults to ``data/raw/neso_forecast`` relative to the current working
+# directory; override with ``BRISTOL_ML_CACHE_DIR`` for portable caches.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/neso_forecast}
+cache_filename: neso_forecast.parquet
+# Pinned per plan D4 / research R6: Day Ahead HH Demand Forecast Performance.
+resource_id: 08e41551-80f8-4e28-a416-ea473a695db9
+page_size: 32000
+request_timeout_seconds: 30.0
+max_attempts: 3
+backoff_base_seconds: 1.0
+backoff_cap_seconds: 10.0
+# NESO rate-limit guidance (documented in the demand ingester's CLAUDE.md):
+# two requests per minute.  Shared across all NESO resources on the host.
+min_inter_request_seconds: 30.0
+columns:
+  - FORECASTDEMAND
+  - OUTTURN
+  - APE
