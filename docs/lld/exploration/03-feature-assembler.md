@@ -10,7 +10,7 @@
 
 ### Stage 1 output — NESO demand
 
-**Path:** `${BRISTOL_ML_CACHE_DIR:-data/raw/neso}/neso_demand.parquet`  
+**Path:** `${BRISTOL_ML_CACHE_DIR:-data/raw/neso}/neso_demand.parquet`
 Config source: `conf/ingestion/neso.yaml` line 15 — `cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/neso}`.
 
 **How to read:**
@@ -34,14 +34,14 @@ df = neso.load(path)   # asserts OUTPUT_SCHEMA, returns pd.DataFrame
 | `source_year` | `int16` | NESO annual resource. |
 | `retrieved_at_utc` | `timestamp[us, tz=UTC]` | Per-fetch provenance. |
 
-Primary key: `timestamp_utc` unique, sorted ascending.  
+Primary key: `timestamp_utc` unique, sorted ascending.
 Date range: 2018-01-01 onwards (from `conf/ingestion/neso.yaml`).
 
 **Cadence note:** half-hourly (48 rows per normal day; 46 on spring-forward, 50 on autumn-fallback). The assembler must aggregate to hourly.
 
 ### Stage 2 output — weather
 
-**Path:** `${BRISTOL_ML_CACHE_DIR:-data/raw/weather}/weather.parquet`  
+**Path:** `${BRISTOL_ML_CACHE_DIR:-data/raw/weather}/weather.parquet`
 Config source: `conf/ingestion/weather.yaml` line 22.
 
 **How to read:**
@@ -65,14 +65,14 @@ df = weather.load(path)   # long-form; asserts OUTPUT_SCHEMA
 | `shortwave_radiation` | `float32` | W/m² |
 | `retrieved_at_utc` | `timestamp[us, tz=UTC]` | Per-fetch provenance. |
 
-Primary key: `(timestamp_utc, station)` unique, sorted `timestamp_utc ASC, station ASC`.  
-Date range: `start_date: 2018-01-01` (`conf/ingestion/weather.yaml` line 26), end omitted → today.  
+Primary key: `(timestamp_utc, station)` unique, sorted `timestamp_utc ASC, station ASC`.
+Date range: `start_date: 2018-01-01` (`conf/ingestion/weather.yaml` line 26), end omitted → today.
 Ten stations; long-form (one row per station per hour).
 
-**National aggregate intermediate** (not persisted, computed on demand):  
-`bristol_ml.features.weather.national_aggregate(df, weights) -> pd.DataFrame`  
-Returns wide-form frame, index = `timestamp_utc`, one column per weather variable.  
-Source: `src/bristol_ml/features/weather.py:39`.  
+**National aggregate intermediate** (not persisted, computed on demand):
+`bristol_ml.features.weather.national_aggregate(df, weights) -> pd.DataFrame`
+Returns wide-form frame, index = `timestamp_utc`, one column per weather variable.
+Source: `src/bristol_ml/features/weather.py:39`.
 Weights from: `{s.name: s.weight for s in cfg.ingestion.weather.stations}` — see CLI at `src/bristol_ml/features/weather.py:192`.
 
 **NaN policy:** NaN at one station drops that station from that `(hour, variable)` group; remaining weights renormalise. All-NaN propagates NaN. Documented at `src/bristol_ml/features/weather.py:64`.
@@ -154,8 +154,8 @@ Current models (all at `conf/_schemas.py`):
 | `IngestionGroup` | `neso: NesoIngestionConfig | None`, `weather: WeatherIngestionConfig | None` |
 | `AppConfig` | `project: ProjectConfig`, `ingestion: IngestionGroup` |
 
-All models use `model_config = ConfigDict(extra="forbid", frozen=True)`.  
-`IngestionGroup` makes each field `| None = None` so Stage 0 configs still validate — Stage 3 should add `FeaturesGroup` and `EvaluationGroup` with the same optional-defaulting pattern.  
+All models use `model_config = ConfigDict(extra="forbid", frozen=True)`.
+`IngestionGroup` makes each field `| None = None` so Stage 0 configs still validate — Stage 3 should add `FeaturesGroup` and `EvaluationGroup` with the same optional-defaulting pattern.
 `AppConfig` adds `features: FeaturesGroup = Field(default_factory=FeaturesGroup)` and `evaluation: EvaluationGroup = Field(default_factory=EvaluationGroup)`.
 
 ### Parquet schema enforcement
@@ -208,7 +208,7 @@ The `@package` directive pattern is established at `conf/ingestion/neso.yaml:1` 
 
 ### `src/bristol_ml/__init__.py`
 
-Currently re-exports: `__version__`, `load_config`, `CachePolicy` (lazy), `CacheMissingError` (lazy).  
+Currently re-exports: `__version__`, `load_config`, `CachePolicy` (lazy), `CacheMissingError` (lazy).
 Source: `src/bristol_ml/__init__.py:18`.
 
 Stage 3 expected additions (follow the existing `__getattr__` lazy pattern): none are strictly mandated by convention, but if the assembler or splitter are likely to be imported from notebooks, add lazy re-exports in the same style. The features layer already has its own `__getattr__` in `src/bristol_ml/features/__init__.py:25`.
@@ -219,7 +219,7 @@ No change needed. It calls `bristol_ml.cli.main` which is Hydra's entry point an
 
 ### `CHANGELOG.md`
 
-Current structure: `## [Unreleased]` with `### Added` and `### Changed` sub-sections. Stage 3 adds bullets in the same format as the Stage 2 entries (one bullet per shipped artefact: module, config group, CLI, notebook, tests, fixtures).  
+Current structure: `## [Unreleased]` with `### Added` and `### Changed` sub-sections. Stage 3 adds bullets in the same format as the Stage 2 entries (one bullet per shipped artefact: module, config group, CLI, notebook, tests, fixtures).
 See `CHANGELOG.md:9`.
 
 ### Stage hygiene checklist (from `CLAUDE.md`)

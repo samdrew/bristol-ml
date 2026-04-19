@@ -36,6 +36,8 @@ exists, not what's planned.
 | Layer | Doc |
 |-------|-----|
 | Ingestion | [`layers/ingestion.md`](./layers/ingestion.md) |
+| Features | [`layers/features.md`](./layers/features.md) |
+| Evaluation | [`layers/evaluation.md`](./layers/evaluation.md) |
 
 ## Cross-cutting concerns
 

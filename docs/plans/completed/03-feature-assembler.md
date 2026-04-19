@@ -1,6 +1,6 @@
 # Plan — Stage 3: Feature assembler + train/test split
 
-**Status:** `approved` — all eight decisions resolved 2026-04-19; Phase 2 (implementation) in progress.
+**Status:** `shipped` — all six tasks (T1-T6) landed; retrospective at [`docs/lld/stages/03-feature-assembler.md`](../../lld/stages/03-feature-assembler.md).
 **Intent:** [`docs/intent/03-feature-assembler.md`](../../intent/03-feature-assembler.md)
 **Upstream stages shipped:** Stage 0 (foundation), Stage 1 (NESO demand), Stage 2 (weather + national aggregate).
 **Downstream consumers:** Stage 4 (linear baseline), Stage 5 (calendar features extends this assembler), every subsequent modelling stage.

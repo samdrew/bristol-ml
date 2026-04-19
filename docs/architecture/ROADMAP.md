@@ -19,32 +19,20 @@ written. The questions are prompts for the Phase 1 plan that
 introduces the layer — not commitments, not open questions against
 current architecture.
 
-### Features
-*First realised by [Stage 3](../intent/DESIGN.md#9-stage-plan).*
-
-Owns derivations from raw parquet. Questions for the layer doc:
-
-- Feature-table schema contract — column naming conventions, index
-  semantics, how new features are added without breaking downstream
-  consumers.
-- Lag and rolling-window handling — where the cutoff between
-  "ingestion writes a time series" and "features computes lags" sits.
-- Weather aggregation — the population-weighting rule is specified in
-  DESIGN.md §4.2 but its home (ingestion or features) is not.
-
-### Models and Evaluation
+### Models
 *First realised by [Stage 4](../intent/DESIGN.md#9-stage-plan).*
 
-Introduces the `Model` protocol (DESIGN.md §7.3) and the rolling-origin
-evaluator (§5.1). Questions for the layer docs:
+Introduces the `Model` protocol (DESIGN.md §7.3) — the contract every
+model (linear baseline, SARIMAX, SciPy parametric, two NNs) implements
+so the evaluation harness and registry can treat them uniformly.
+Questions for the layer doc:
 
 - `Model.metadata` contents — what must be present for a registry
   entry to be reproducible and comparable.
-- Rolling-origin evaluator as library vs service — DESIGN.md §3.2 is
-  explicit it's a library consumed by models, but the boundary with
-  per-model backtesting code is not yet drawn.
-- Where benchmark comparison (NESO forecast) lives — evaluation layer
-  or a separate `benchmarks` module.
+- Where `model.fit`/`predict`/`save`/`load` live per-family — a single
+  base class, a Protocol, or a registry of adapter functions.
+- How hyperparameter tuning composes with the rolling-origin harness
+  without nested cross-validation becoming the happy path.
 
 ### Registry
 *First realised by [Stage 9](../intent/DESIGN.md#9-stage-plan).*
