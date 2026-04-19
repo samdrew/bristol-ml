@@ -90,7 +90,7 @@ is expensive when misapplied.
 
 ## Constraints
 
-  - Do not skip human plan review between Phase 1 and Phase 2, 
+  - Do not skip human plan review between Phase 1 and Phase 2,
     without prompting to do so.
   - Never edit `docs/intent/**`. If the work contradicts intent,
     surface it and stop.
@@ -98,3 +98,5 @@ is expensive when misapplied.
     without the human explicitly asking for that change.
   - Plan updates happen in-place: if the plan is wrong, fix the
     plan, re-surface for review, then continue.
+  - Only prompt for human input between Phase 1 and 2, and immediately
+    prior to merge.

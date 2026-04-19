@@ -35,7 +35,7 @@ What to avoid:
   - Coverage padding. This project values behavioural clarity over
     coverage numbers (DESIGN.md §2.1.7).
   - Any attempts to modify production code. Test failures should be evaluated
-    against the spec, not the implementation. 
+    against the spec, not the implementation.
 
 Before returning, run the scoped test suite (`pytest tests/<module>`)
 and report pass/fail. If any test fails, return the failure output
