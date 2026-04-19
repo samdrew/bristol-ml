@@ -38,6 +38,7 @@ exists, not what's planned.
 | Ingestion | [`layers/ingestion.md`](./layers/ingestion.md) |
 | Features | [`layers/features.md`](./layers/features.md) |
 | Evaluation | [`layers/evaluation.md`](./layers/evaluation.md) |
+| Models | [`layers/models.md`](./layers/models.md) |
 
 ## Cross-cutting concerns
 
@@ -61,6 +62,7 @@ Append-only by convention — supersede older ADRs rather than editing.
 
 - [`0001-use-hydra-plus-pydantic.md`](./decisions/0001-use-hydra-plus-pydantic.md) — config framework.
 - [`0002-filesystem-registry-first.md`](./decisions/0002-filesystem-registry-first.md) — registry storage before Stage 9 builds it.
+- [`0003-protocol-for-model-interface.md`](./decisions/0003-protocol-for-model-interface.md) — `typing.Protocol` over `abc.ABC` for the `Model` interface.
 
 ## Changing the architecture
 
