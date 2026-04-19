@@ -9,9 +9,10 @@ invocation) stays cheap. Import by name::
 
     from bristol_ml.evaluation import splitter
 
-or resolve the top-level alias lazily via ``__getattr__``::
+or resolve a top-level alias lazily via ``__getattr__``::
 
     from bristol_ml.evaluation import rolling_origin_split
+    from bristol_ml.evaluation import rolling_origin_split_from_config
 """
 
 from __future__ import annotations
@@ -19,15 +20,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
-    from bristol_ml.evaluation.splitter import rolling_origin_split
+    from bristol_ml.evaluation.splitter import (
+        rolling_origin_split,
+        rolling_origin_split_from_config,
+    )
 
-__all__ = ["rolling_origin_split"]
+__all__ = ["rolling_origin_split", "rolling_origin_split_from_config"]
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-export of ``rolling_origin_split`` from the splitter submodule."""
-    if name == "rolling_origin_split":
+    """Lazy re-export of public splitter symbols from the splitter submodule."""
+    if name in {"rolling_origin_split", "rolling_origin_split_from_config"}:
         from bristol_ml.evaluation import splitter as _splitter
 
-        return _splitter.rolling_origin_split
+        return getattr(_splitter, name)
     raise AttributeError(f"module 'bristol_ml.evaluation' has no attribute {name!r}")
