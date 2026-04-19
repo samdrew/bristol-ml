@@ -30,4 +30,3 @@ Hard rules:
   work, say so. Do not invent objections to fill the slots.
 - Keep your output under 300 words. This is a fast check, not a
   full review.
-

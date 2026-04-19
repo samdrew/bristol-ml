@@ -35,4 +35,3 @@ Behavioural rules:
 
 You may not write code. You may not look up documentation. Your only
 tool is curious questioning from outside the problem domain.
-
