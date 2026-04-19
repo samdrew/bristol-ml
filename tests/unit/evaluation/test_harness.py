@@ -1,0 +1,494 @@
+"""Spec-derived acceptance and regression tests for the rolling-origin evaluation harness.
+
+Stage 4, Task T6.
+Plan: ``docs/plans/active/04-linear-baseline.md`` §6 Task T6.
+Plan tag H-1: UTC-index guard — raise ``ValueError`` on non-UTC tz-aware index.
+
+Every test is derived from the plan acceptance criteria, contract corners
+documented in Task T6, or the H-1 housekeeping carry-over from Stage 3.
+
+No production code is modified here.  If a test fails, the failure
+indicates a deviation from the spec; surface it to the implementer rather
+than weakening the assertion.
+
+Conventions
+-----------
+- British English in docstrings.
+- Each test docstring cites the plan clause, plan tag, or contract section
+  it guards.
+- ``np.random.default_rng(seed=42)`` for all synthetic data.
+- ``pytest.approx`` for float comparisons.
+- The ``loguru_caplog`` fixture from ``tests/conftest.py`` is used for all
+  log-capture assertions (Stage 4 harness is the planned second caller of
+  this adapter, per the conftest comment).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from bristol_ml.evaluation.harness import evaluate
+from bristol_ml.evaluation.metrics import mae, mape, rmse, wape
+from bristol_ml.evaluation.splitter import rolling_origin_split_from_config
+from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
+from bristol_ml.models.linear import LinearModel
+from conf._schemas import LinearConfig, SplitterConfig
+
+# ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+_N_ROWS = 500
+_SPLIT_CFG = SplitterConfig(
+    min_train_periods=200,
+    test_len=48,
+    step=48,
+    gap=0,
+    fixed_window=False,
+)
+# Pre-verified: 6 folds for n=500 with the above config.
+_EXPECTED_FOLD_COUNT = 6
+
+_WEATHER_COLS = [name for name, _ in WEATHER_VARIABLE_COLUMNS]
+_ALL_METRICS = [mae, mape, rmse, wape]
+
+
+# ---------------------------------------------------------------------------
+# Shared fixture helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_df(n: int = _N_ROWS, tz: str | None = "UTC", seed: int = 42) -> pd.DataFrame:
+    """Build a synthetic hourly DataFrame with weather columns and ``nd_mw``.
+
+    Parameters
+    ----------
+    n:
+        Number of rows.
+    tz:
+        Timezone string for the DatetimeIndex, or ``None`` for tz-naive.
+    seed:
+        RNG seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: all five weather variable columns (float32) + ``nd_mw``
+        (float64).  Index: hourly DatetimeIndex.
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range(start="2024-01-01 00:00", periods=n, freq="h", tz=tz)
+    data: dict[str, np.ndarray] = {
+        col: rng.uniform(0.0, 30.0, n).astype("float32") for col in _WEATHER_COLS
+    }
+    # nd_mw must be strictly positive to avoid MAPE/WAPE zero-denominator guards.
+    data["nd_mw"] = rng.uniform(20_000.0, 50_000.0, n).astype("float64")
+    return pd.DataFrame(data, index=idx)
+
+
+def _linear_model() -> LinearModel:
+    """Return a fresh ``LinearModel`` with default weather-column fallback."""
+    return LinearModel(LinearConfig(type="linear", target_column="nd_mw"))
+
+
+# ---------------------------------------------------------------------------
+# Plan-named test 1: test_harness_rejects_non_utc_index (H-1)
+# ---------------------------------------------------------------------------
+
+
+def test_harness_rejects_non_utc_index() -> None:
+    """Plan H-1: a tz-aware but non-UTC index must raise ``ValueError``.
+
+    The harness carries the UTC-index guard from Stage 3 review item H-1.
+    The guard lives in ``evaluate()`` (not in the splitter) because the
+    splitter receives only ``n_rows`` and should remain data-structure-
+    agnostic (codebase-map §D).
+
+    The error message must contain the substring ``"UTC"`` so callers can
+    diagnose the issue without reading source code.
+
+    Plan clause: Task T6 / plan H-1 / harness.py ``_validate_inputs`` H-1
+    block.
+    """
+    df = _make_df(tz="Europe/London")
+    model = _linear_model()
+
+    with pytest.raises(ValueError, match="UTC"):
+        evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+
+# ---------------------------------------------------------------------------
+# Plan-named test 2: test_harness_accepts_naive_index
+# ---------------------------------------------------------------------------
+
+
+def test_harness_accepts_naive_index() -> None:
+    """Plan T6 / H-1: a tz-naive DatetimeIndex must be accepted without raising.
+
+    The spec permits tz-naive indices (the splitter is tz-agnostic; forcing
+    UTC awareness on all callers would add a conversion burden with no
+    analytical benefit when working with synthetic or already-normalised
+    test data).
+
+    Assert that ``evaluate`` returns a non-empty DataFrame without
+    raising any exception.
+
+    Plan clause: Task T6 named test / harness.py module docstring ("tz-naive
+    or UTC-aware only").
+    """
+    df = _make_df(tz=None)
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    assert isinstance(result, pd.DataFrame), (
+        "evaluate() on a tz-naive index must return a DataFrame (plan T6 / H-1)."
+    )
+    assert len(result) > 0, (
+        "evaluate() on a tz-naive index must return at least one fold row (plan T6 / H-1)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan-named test 3: test_harness_returns_one_row_per_fold
+# ---------------------------------------------------------------------------
+
+
+def test_harness_returns_one_row_per_fold() -> None:
+    """Plan T6: the returned DataFrame must have exactly one row per fold.
+
+    The expected fold count is derived independently via
+    ``rolling_origin_split_from_config`` — not from ``evaluate`` itself —
+    so this test would fail if the harness skipped or duplicated folds.
+
+    Plan clause: Task T6 named test / evaluate() return docstring ("One row
+    per fold").
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    expected_fold_count = len(list(rolling_origin_split_from_config(len(df), _SPLIT_CFG)))
+    assert expected_fold_count == _EXPECTED_FOLD_COUNT, (
+        f"Pre-condition: expected fold count must be {_EXPECTED_FOLD_COUNT}; "
+        f"got {expected_fold_count}."
+    )
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    assert len(result) == expected_fold_count, (
+        f"evaluate() must return one row per fold; "
+        f"expected {expected_fold_count} rows, got {len(result)} (plan T6 named test)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan-named test 4: test_harness_per_fold_metrics_match_direct_computation
+# ---------------------------------------------------------------------------
+
+
+def test_harness_per_fold_metrics_match_direct_computation() -> None:
+    """Plan T6: per-fold metric values must equal direct manual computation.
+
+    Selects fold 0 (the first fold).  After ``evaluate`` returns, re-fits a
+    fresh ``LinearModel`` on the same training slice and predicts on the
+    same test slice.  Computes ``mae`` directly and asserts that
+    ``result["mae"].iloc[0]`` equals the hand-computed value under
+    ``pytest.approx``.
+
+    This guards against harness bugs such as: metric applied to the wrong
+    slice, prediction/target mismatch, or wrong fold index.
+
+    Plan clause: Task T6 named test / evaluate() contract.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    # Re-derive fold 0 indices independently.
+    folds = list(rolling_origin_split_from_config(len(df), _SPLIT_CFG))
+    train_idx, test_idx = folds[0]
+
+    # Fit a fresh model on the same training slice.
+    fresh_model = _linear_model()
+    X_train = df[_WEATHER_COLS].iloc[train_idx]
+    y_train = df["nd_mw"].iloc[train_idx]
+    X_test = df[_WEATHER_COLS].iloc[test_idx]
+    y_test = df["nd_mw"].iloc[test_idx]
+
+    fresh_model.fit(X_train, y_train)
+    y_pred = fresh_model.predict(X_test)
+
+    expected_mae = mae(y_test, y_pred)
+    harness_mae = result["mae"].iloc[0]
+
+    assert harness_mae == pytest.approx(expected_mae, rel=1e-9), (
+        f"Harness mae for fold 0 ({harness_mae!r}) must equal direct computation "
+        f"({expected_mae!r}) under pytest.approx (plan T6 named test)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan-named test 5: test_harness_logs_summary
+# ---------------------------------------------------------------------------
+
+
+def test_harness_logs_summary(loguru_caplog: pytest.LogCaptureFixture) -> None:
+    """Plan T6: a completion INFO line naming ``total_folds=`` must be emitted.
+
+    Uses the repo-wide ``loguru_caplog`` fixture (``tests/conftest.py``)
+    which routes loguru records into pytest's ``caplog`` at INFO and above.
+
+    Assert that at least one captured message contains both the
+    ``"Evaluator complete"`` prefix (matching ``harness.py``'s summary log
+    call) and the ``"total_folds="`` field.
+
+    Plan clause: Task T6 named test / harness.py module docstring ("one
+    summary INFO line on completion … total folds, elapsed wall time,
+    per-metric mean ± std").
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    with loguru_caplog.at_level("INFO"):
+        evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    messages = [r.getMessage() for r in loguru_caplog.records]
+    summary_lines = [m for m in messages if "Evaluator complete" in m and "total_folds=" in m]
+
+    assert len(summary_lines) >= 1, (
+        f"Expected at least one INFO message containing 'Evaluator complete' "
+        f"and 'total_folds='; captured messages were: {messages!r} (plan T6 named test)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validation corners — section 6 of the task brief
+# ---------------------------------------------------------------------------
+
+
+def test_harness_rejects_non_datetimeindex() -> None:
+    """Contract corner 6: a ``RangeIndex`` must raise ``TypeError`` naming 'DatetimeIndex'.
+
+    ``evaluate()`` documents ``TypeError`` when ``df.index`` is not a
+    ``pandas.DatetimeIndex``.  The error message must contain 'DatetimeIndex'
+    so the caller can diagnose the issue.
+
+    Plan clause: Task T6 contract corners / harness.py ``_validate_inputs``
+    TypeError block.
+    """
+    df = _make_df()
+    df = df.reset_index(drop=True)  # Converts the DatetimeIndex to a RangeIndex.
+    assert isinstance(df.index, pd.RangeIndex)
+
+    model = _linear_model()
+
+    with pytest.raises(TypeError, match="DatetimeIndex"):
+        evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+
+def test_harness_rejects_empty_metrics() -> None:
+    """Contract corner 7: an empty ``metrics`` sequence must raise ``ValueError``.
+
+    An evaluation run with zero metrics is a configuration error, not a
+    reasonable input.  The error message must contain 'metric' or 'empty'
+    so the caller understands the cause.
+
+    Plan clause: Task T6 contract corners / harness.py ``_validate_inputs``
+    "metrics must be non-empty" block.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    with pytest.raises(ValueError, match=r"(?i)(metric|empty)"):
+        evaluate(model, df, _SPLIT_CFG, [])
+
+
+def test_harness_rejects_missing_target_column() -> None:
+    """Contract corner 8: a missing target column must raise ``ValueError`` naming the column.
+
+    Drop ``nd_mw`` from the DataFrame and confirm the error message names the
+    missing column so callers can diagnose schema mismatches immediately.
+
+    Plan clause: Task T6 contract corners / harness.py ``_validate_inputs``
+    "target_column missing" block.
+    """
+    df = _make_df().drop(columns=["nd_mw"])
+    model = _linear_model()
+
+    with pytest.raises(ValueError, match="nd_mw"):
+        evaluate(model, df, _SPLIT_CFG, _ALL_METRICS, target_column="nd_mw")
+
+
+def test_harness_rejects_missing_feature_column() -> None:
+    """Contract corner 9: explicit missing ``feature_columns`` must raise ``ValueError``.
+
+    Pass ``feature_columns=("does_not_exist",)`` and confirm ``ValueError``
+    listing the missing column name.
+
+    Plan clause: Task T6 contract corners / harness.py
+    ``_resolve_feature_columns`` missing-column block.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    with pytest.raises(ValueError, match="does_not_exist"):
+        evaluate(
+            model,
+            df,
+            _SPLIT_CFG,
+            _ALL_METRICS,
+            feature_columns=("does_not_exist",),
+        )
+
+
+def test_harness_feature_columns_fallback_to_weather_defaults() -> None:
+    """Contract corner 10: ``feature_columns=None`` must use the weather-column fallback.
+
+    Build a DataFrame carrying only the five weather columns and ``nd_mw``
+    (the minimal assembler output shape) with ``feature_columns=None``.
+    ``evaluate()`` must succeed and return a positive metric value.
+
+    Plan clause: Task T6 contract corners / harness.py
+    ``_resolve_feature_columns`` fallback path.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, [mae], feature_columns=None)
+
+    assert len(result) > 0, (
+        "evaluate() with feature_columns=None must return at least one fold row "
+        "(plan T6 contract corner 10)."
+    )
+    assert result["mae"].iloc[0] > 0.0, (
+        f"Expected a positive mae on the first fold; got {result['mae'].iloc[0]!r} "
+        "(plan T6 contract corner 10 — fallback path)."
+    )
+
+
+def test_harness_column_order_and_dtypes() -> None:
+    """Contract corner 11: output columns must be in documented order with correct dtypes.
+
+    Expected column list (plan T6 return contract):
+      ``["fold_index", "train_end", "test_start", "test_end", "mae", "rmse", "mape", "wape"]``
+
+    Expected dtypes:
+    - ``fold_index``: ``int64``
+    - ``train_end``, ``test_start``, ``test_end``: datetime (UTC-aware for
+      UTC-indexed input)
+    - ``mae``, ``rmse``, ``mape``, ``wape``: ``float64``
+
+    Plan clause: Task T6 contract corners / evaluate() return docstring.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    expected_columns = [
+        "fold_index",
+        "train_end",
+        "test_start",
+        "test_end",
+        "mae",
+        "mape",
+        "rmse",
+        "wape",
+    ]
+    assert list(result.columns) == expected_columns, (
+        f"Column order must be exactly {expected_columns!r}; "
+        f"got {list(result.columns)!r} (plan T6 contract corner 11)."
+    )
+
+    # fold_index must be integer.
+    assert result["fold_index"].dtype == np.dtype("int64"), (
+        f"fold_index dtype must be int64; got {result['fold_index'].dtype} "
+        "(plan T6 contract corner 11)."
+    )
+
+    # Timestamp columns must be datetime (tz-aware because input was UTC).
+    for ts_col in ("train_end", "test_start", "test_end"):
+        assert pd.api.types.is_datetime64_any_dtype(result[ts_col]), (
+            f"Column '{ts_col}' must have a datetime dtype; "
+            f"got {result[ts_col].dtype} (plan T6 contract corner 11)."
+        )
+        assert result[ts_col].dt.tz is not None, (
+            f"Column '{ts_col}' must be tz-aware when the input index was UTC; "
+            f"got tz=None (plan T6 contract corner 11)."
+        )
+
+    # Metric columns must be float64.
+    for metric_col in ("mae", "rmse", "mape", "wape"):
+        assert result[metric_col].dtype == np.dtype("float64"), (
+            f"Metric column '{metric_col}' dtype must be float64; "
+            f"got {result[metric_col].dtype} (plan T6 contract corner 11)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Additional smoke tests on the public re-export
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_importable_from_evaluation_namespace() -> None:
+    """Smoke: ``evaluate`` must be importable from ``bristol_ml.evaluation``.
+
+    The plan directs that ``evaluate`` be re-exported via
+    ``evaluation/__init__.py``.  An ``ImportError`` here means the re-export
+    wiring is absent.
+
+    Plan clause: Task T6 / H-3 re-export pattern / evaluation/__init__.py.
+    """
+    from bristol_ml.evaluation import evaluate as evaluate_from_ns
+
+    assert callable(evaluate_from_ns), (
+        "evaluate imported from bristol_ml.evaluation must be callable."
+    )
+
+
+def test_harness_fold_index_column_is_zero_based() -> None:
+    """Smoke: ``fold_index`` must run 0, 1, 2, … without gaps or repeats.
+
+    Ensures the harness enumerates folds in order and that the column records
+    the correct positional index rather than being reset or omitted.
+
+    Plan clause: evaluate() return docstring ("Ordered by fold_index").
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, [mae])
+
+    expected_indices = list(range(len(result)))
+    actual_indices = result["fold_index"].tolist()
+
+    assert actual_indices == expected_indices, (
+        f"fold_index column must be [0, 1, ..., {len(result) - 1}]; "
+        f"got {actual_indices!r} (harness fold-order contract)."
+    )
+
+
+def test_harness_train_end_before_test_start() -> None:
+    """Invariant: for every fold, ``train_end`` timestamp is strictly before ``test_start``.
+
+    This guards the fundamental no-leakage invariant carried from the
+    splitter: the training window never overlaps the test window.  In terms
+    of timestamps, the last training timestamp must precede the first test
+    timestamp.
+
+    Plan clause: evaluation/CLAUDE.md invariant "max(train_idx) < min(test_idx)".
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, [mae])
+
+    for _, row in result.iterrows():
+        assert row["train_end"] < row["test_start"], (
+            f"fold {row['fold_index']}: train_end ({row['train_end']}) "
+            f"must be strictly before test_start ({row['test_start']}) "
+            "(no-leakage invariant)."
+        )
