@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
@@ -357,6 +357,50 @@ class LinearConfig(BaseModel):
 # model variants is active per run (matching Hydra group-override semantics).
 # The ``type`` discriminator is written into the YAML by each Hydra group file.
 ModelConfig = NaiveConfig | LinearConfig
+
+
+class ModelMetadata(BaseModel):
+    """Immutable provenance record attached to a fitted model (Stage 4+).
+
+    ``ModelMetadata`` is *not* a Hydra config group — it is a lightweight record
+    carried as the ``.metadata`` property of every ``Model`` protocol implementor
+    (see ``bristol_ml.models.protocol``).  It captures the minimum information
+    needed to reason about a serialised artefact without re-loading the model's
+    heavy state: which estimator produced it, which features it expects, when
+    it was fit, and under which commit.
+
+    The shape is deliberately minimal.  Per plan §10 risk register, Stage 9
+    (registry) may extend this contract; the ``hyperparameters: dict[str, Any]``
+    escape hatch absorbs future additions so the other fields can stay stable.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Human-readable identifier; unique within a stage (e.g.
+    # ``"naive-same-hour-last-week"``, ``"linear-ols-weather-only"``).
+    name: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
+    # The ordered tuple of feature-column names the model was fit on.  Stored
+    # as a tuple (not a list) so the metadata stays hashable and immutable.
+    feature_columns: tuple[str, ...]
+    # UTC timestamp at which ``fit()`` completed; ``None`` before fitting.  The
+    # ``model_validator`` below enforces tz-awareness when present.
+    fit_utc: datetime | None = None
+    # Short Git SHA recorded at fit time; ``None`` when the fit happens outside
+    # a Git working tree (e.g. pip-installed wheels).
+    git_sha: str | None = None
+    # Free-form bag for estimator-specific state (coefficients, R², strategy).
+    # ``dict[str, Any]`` is unavoidable here — the whole point is extensibility
+    # without ABI churn on this schema.
+    hyperparameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_fit_utc(self) -> ModelMetadata:
+        """Reject naive ``fit_utc`` values: we only store tz-aware UTC times."""
+        if self.fit_utc is not None and self.fit_utc.tzinfo is None:
+            raise ValueError(
+                f"fit_utc must be tz-aware (UTC); got naive datetime {self.fit_utc!r}."
+            )
+        return self
 
 
 class AppConfig(BaseModel):
