@@ -1,0 +1,22 @@
+# @package features.weather_only
+#
+# Weather-only feature set (Stage 3). Joins NESO half-hourly demand (aggregated
+# to hourly via ``demand_aggregation``) with the population-weighted national
+# weather aggregate (Stage 2 ``features.weather.national_aggregate``).
+#
+# Stage 5 will ship ``conf/features/weather_calendar.yaml`` alongside this file
+# so the without/with-calendar comparison is a single ``+features=...`` override
+# rather than a code change.
+
+name: weather_only
+# D1 (plan §1): ``mean`` of the two half-hourly NESO rows per UTC hour is the
+# default. Override to ``max`` at the CLI (``features.weather_only.demand_aggregation=max``)
+# for a peak-demand framing.
+demand_aggregation: mean
+# D6 (plan §1): derived artefact; regenerable; lives outside ``data/raw`` to
+# keep the raw-vs-derived distinction legible.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/features}
+cache_filename: weather_only.parquet
+# D5 (plan §1): forward-fill short weather gaps up to this many hours; longer
+# gaps propagate NaN and the row is dropped with an INFO-level log entry.
+forward_fill_hours: 3
