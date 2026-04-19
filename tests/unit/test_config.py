@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,12 @@ from conf._schemas import (
     EvaluationGroup,
     FeatureSetConfig,
     FeaturesGroup,
+    LinearConfig,
+    MetricsConfig,
+    NaiveConfig,
+    NesoBenchmarkConfig,
+    NesoForecastIngestionConfig,
+    ProjectConfig,
     SplitterConfig,
 )
 
@@ -297,3 +304,340 @@ def test_evaluation_group_defaults_to_none_fields() -> None:
     """
     eg = EvaluationGroup()
     assert eg.rolling_origin is None
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — config group tests
+# ---------------------------------------------------------------------------
+
+
+def test_app_config_populates_model_linear_from_defaults() -> None:
+    """Guards AC-6 / F-9: ``conf/config.yaml`` defaults list selects ``model: linear``.
+
+    The ``- model: linear`` entry in ``conf/config.yaml`` must compose
+    ``conf/model/linear.yaml`` into ``AppConfig.model`` without any CLI override.
+    After defaults-only ``load_config()`` the resolved object must be a
+    ``LinearConfig`` with the plan D2-mandated defaults: ``type="linear"``,
+    ``target_column="nd_mw"``, ``feature_columns is None`` (meaning "all weather
+    columns from the assembler schema"), and ``fit_intercept=True``.
+    """
+    cfg = load_config()
+
+    assert cfg.model is not None, "AppConfig.model must not be None after defaults-only load."
+    assert isinstance(cfg.model, LinearConfig), (
+        f"AC-6/F-9: expected LinearConfig from defaults; got {type(cfg.model).__name__!r}."
+    )
+    assert cfg.model.type == "linear", (
+        f"AC-6: discriminator tag must be 'linear'; got {cfg.model.type!r}."
+    )
+    assert cfg.model.target_column == "nd_mw", (
+        f"F-9: target_column default must be 'nd_mw'; got {cfg.model.target_column!r}."
+    )
+    assert cfg.model.feature_columns is None, (
+        "F-9: feature_columns default must be None (all weather columns resolved at fit-time)."
+    )
+    assert cfg.model.fit_intercept is True, (
+        "F-9: fit_intercept default must be True (statsmodels OLS requires explicit constant)."
+    )
+
+
+def test_app_config_populates_evaluation_metrics_from_defaults() -> None:
+    """Guards F-4: all four DESIGN §5.3 metrics are present after defaults-only load.
+
+    ``conf/evaluation/metrics.yaml`` must compose into ``AppConfig.evaluation.metrics``
+    with the full tuple ``("mae", "mape", "rmse", "wape")`` so that the harness
+    computes every point-forecast metric out of the box.
+    """
+    cfg = load_config()
+
+    assert cfg.evaluation is not None
+    assert cfg.evaluation.metrics is not None, (
+        "F-4: cfg.evaluation.metrics must be populated from the defaults list."
+    )
+    assert isinstance(cfg.evaluation.metrics, MetricsConfig)
+    assert cfg.evaluation.metrics.names == ("mae", "mape", "rmse", "wape"), (
+        f"F-4: default metric names must be ('mae','mape','rmse','wape'); "
+        f"got {cfg.evaluation.metrics.names!r}."
+    )
+
+
+def test_app_config_populates_evaluation_benchmark_from_defaults() -> None:
+    """Guards F-7: benchmark config defaults compose correctly from ``evaluation/benchmark.yaml``.
+
+    Per D4 (plan §1) ``aggregation`` defaults to ``"mean"`` (preserves the MW
+    scale).  Both ``holdout_start`` and ``holdout_end`` must be tz-aware UTC
+    datetimes so the ``NesoBenchmarkConfig._validate_holdout`` validator does not
+    fire.
+    """
+    cfg = load_config()
+
+    assert cfg.evaluation is not None
+    assert cfg.evaluation.benchmark is not None, (
+        "F-7: cfg.evaluation.benchmark must be populated from the defaults list."
+    )
+    bench = cfg.evaluation.benchmark
+    assert bench.aggregation == "mean", (
+        f"D4: aggregation default must be 'mean'; got {bench.aggregation!r}."
+    )
+    assert bench.holdout_start.tzinfo is not None, (
+        "F-7: holdout_start must be tz-aware; got naive datetime."
+    )
+    assert bench.holdout_end.tzinfo is not None, (
+        "F-7: holdout_end must be tz-aware; got naive datetime."
+    )
+    # Confirm UTC specifically (offset == 0).
+    assert bench.holdout_start.utcoffset().total_seconds() == 0, (  # type: ignore[union-attr]
+        "F-7: holdout_start must be UTC (offset == 0)."
+    )
+    assert bench.holdout_end.utcoffset().total_seconds() == 0, (  # type: ignore[union-attr]
+        "F-7: holdout_end must be UTC (offset == 0)."
+    )
+
+
+def test_app_config_populates_neso_forecast_from_defaults() -> None:
+    """Guards F-6: ``ingestion.neso_forecast.resource_id`` is the pinned CKAN UUID.
+
+    Research R6 fixed the resource on ``08e41551-80f8-4e28-a416-ea473a695db9``
+    (Day Ahead HH Demand Forecast Performance, Apr 2021+).  The YAML must pin
+    this UUID so stage-4 benchmark runs do not accidentally hit the wrong
+    dataset.
+    """
+    from uuid import UUID
+
+    cfg = load_config()
+
+    assert cfg.ingestion is not None
+    assert cfg.ingestion.neso_forecast is not None, (
+        "F-6: cfg.ingestion.neso_forecast must be populated from the defaults list."
+    )
+    assert isinstance(cfg.ingestion.neso_forecast, NesoForecastIngestionConfig)
+    expected = UUID("08e41551-80f8-4e28-a416-ea473a695db9")
+    assert cfg.ingestion.neso_forecast.resource_id == expected, (
+        f"F-6/R6: resource_id must be {expected}; got {cfg.ingestion.neso_forecast.resource_id!r}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — model-swap tests (Hydra group override)
+# ---------------------------------------------------------------------------
+
+
+def test_model_swap_to_naive_via_override() -> None:
+    """Guards US-3 / F-9: ``model=naive`` override swaps the model variant.
+
+    This is the "demo-moment" swap from the plan: a single CLI word changes
+    which model runs without any code change.  After ``load_config(overrides=
+    ['model=naive'])``, ``AppConfig.model`` must be a ``NaiveConfig`` with
+    ``type="naive"`` and ``strategy="same_hour_last_week"`` (D1 default).
+    """
+    cfg = load_config(overrides=["model=naive"])
+
+    assert cfg.model is not None, "cfg.model must not be None after model=naive override."
+    assert isinstance(cfg.model, NaiveConfig), (
+        f"US-3/F-9: expected NaiveConfig after model=naive; got {type(cfg.model).__name__!r}."
+    )
+    assert cfg.model.type == "naive", (
+        f"US-3: discriminator tag must be 'naive'; got {cfg.model.type!r}."
+    )
+    assert cfg.model.strategy == "same_hour_last_week", (
+        f"D1: default strategy must be 'same_hour_last_week'; got {cfg.model.strategy!r}."
+    )
+
+
+def test_model_swap_preserves_discriminator() -> None:
+    """Guards D3 invariant: the discriminated union always resolves to the correct concrete type.
+
+    After ``model=naive``, ``isinstance(cfg.model, NaiveConfig)`` must be
+    ``True`` and ``cfg.model.type`` must be ``"naive"``.  After ``model=linear``
+    (the default), ``isinstance(cfg.model, LinearConfig)`` must be ``True``.
+    This invariant is load-bearing: every downstream consumer that branches on
+    ``cfg.model.type`` depends on it.
+    """
+    naive_cfg = load_config(overrides=["model=naive"])
+    assert isinstance(naive_cfg.model, NaiveConfig), (
+        "D3: model=naive must resolve to NaiveConfig instance."
+    )
+    assert naive_cfg.model.type == "naive"
+
+    linear_cfg = load_config(overrides=["model=linear"])
+    assert isinstance(linear_cfg.model, LinearConfig), (
+        "D3: model=linear must resolve to LinearConfig instance."
+    )
+    assert linear_cfg.model.type == "linear"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — field-level override tests
+# ---------------------------------------------------------------------------
+
+
+def test_naive_config_accepts_strategy_override_same_hour_yesterday() -> None:
+    """Guards D1 Literal: ``same_hour_yesterday`` is a valid ``NaiveConfig.strategy`` value.
+
+    The Literal type on ``strategy`` must admit all three declared values;
+    this test exercises the non-default ``same_hour_yesterday`` path via a
+    Hydra override so the full round-trip (YAML → DictConfig → Pydantic) is
+    confirmed.
+    """
+    cfg = load_config(overrides=["model=naive", "model.strategy=same_hour_yesterday"])
+
+    assert cfg.model is not None
+    assert isinstance(cfg.model, NaiveConfig)
+    assert cfg.model.strategy == "same_hour_yesterday", (
+        "D1: 'same_hour_yesterday' must be accepted as a valid strategy override."
+    )
+
+
+def test_linear_config_accepts_feature_columns_override() -> None:
+    """Guards ``LinearConfig.feature_columns``: explicit column list replaces the None default.
+
+    A single-column ablation (``model.feature_columns=[temperature_2m]``) must
+    produce a ``LinearConfig`` with ``feature_columns == ("temperature_2m",)``
+    so the harness can narrow the regressor set without code changes.
+    """
+    cfg = load_config(overrides=["model=linear", "model.feature_columns=[temperature_2m]"])
+
+    assert cfg.model is not None
+    assert isinstance(cfg.model, LinearConfig)
+    assert cfg.model.feature_columns == ("temperature_2m",), (
+        f"feature_columns override must yield ('temperature_2m',); "
+        f"got {cfg.model.feature_columns!r}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — negative / validator tests
+# ---------------------------------------------------------------------------
+
+
+def test_naive_config_rejects_unknown_strategy() -> None:
+    """Guards D1 Literal narrowing: values outside the three declared strategies raise.
+
+    ``NaiveConfig.strategy`` is typed as
+    ``Literal["same_hour_yesterday", "same_hour_last_week", "same_hour_same_weekday"]``.
+    Any other string (e.g. ``"same_hour_next_month"``) must cause a
+    ``ValidationError`` so mis-typed strategies fail fast rather than silently
+    producing nonsense predictions.
+    """
+    with pytest.raises((ValidationError, Exception)):
+        load_config(overrides=["model=naive", "model.strategy=same_hour_next_month"])
+
+
+def test_linear_config_rejects_extra_keys() -> None:
+    """Guards ``ConfigDict(extra='forbid')`` on ``LinearConfig``.
+
+    An unknown key injected via ``+model.bogus=1`` must be rejected at the
+    Pydantic validation step rather than silently accepted.  This prevents
+    silent config drift.
+    """
+    with pytest.raises((ValidationError, Exception)):
+        load_config(overrides=["model=linear", "+model.bogus=1"])
+
+
+def test_metrics_config_rejects_unknown_metric_name() -> None:
+    """Guards ``MetricsConfig.names`` Literal narrowing: unknown metric names raise.
+
+    The ``names`` field is typed as
+    ``tuple[Literal["mae", "mape", "rmse", "wape"], ...]``; any metric name
+    outside this set (e.g. ``"fantasy_score"``) must be rejected so the harness
+    never tries to look up a non-existent metric function.
+    """
+    with pytest.raises((ValidationError, Exception)):
+        load_config(overrides=["evaluation.metrics.names=[mae,fantasy_score]"])
+
+
+def test_benchmark_config_rejects_end_before_start() -> None:
+    """Guards ``NesoBenchmarkConfig._validate_holdout``: ``holdout_end <= holdout_start`` raises.
+
+    The holdout window must be a positive-duration interval; an inverted or
+    zero-duration window is meaningless and the ``_validate_holdout``
+    ``model_validator`` must raise ``ValidationError`` for it.
+    """
+    start = datetime(2023, 10, 1, tzinfo=UTC)
+    end = datetime(2023, 9, 1, tzinfo=UTC)  # before start
+
+    with pytest.raises(ValidationError):
+        NesoBenchmarkConfig(aggregation="mean", holdout_start=start, holdout_end=end)
+
+
+def test_benchmark_config_rejects_naive_datetime() -> None:
+    """Guards ``NesoBenchmarkConfig._validate_holdout``: naive (tz-none) datetimes raise.
+
+    The NESO forecast archive uses UTC timestamps; a naive datetime would
+    introduce ambiguity in the holdout window alignment and must be rejected
+    by the ``_validate_holdout`` validator.
+    """
+    naive_start = datetime(2023, 10, 1)  # no tzinfo
+    naive_end = datetime(2024, 1, 1)  # no tzinfo
+
+    with pytest.raises(ValidationError):
+        NesoBenchmarkConfig(aggregation="mean", holdout_start=naive_start, holdout_end=naive_end)
+
+
+def test_neso_forecast_config_rejects_extra_keys() -> None:
+    """Guards ``ConfigDict(extra='forbid')`` on ``NesoForecastIngestionConfig``.
+
+    An unknown key (e.g. ``bogus_field``) must be rejected at construction
+    time rather than silently accepted so config drift is caught early.
+    """
+    from pathlib import Path
+    from uuid import UUID
+
+    with pytest.raises(ValidationError):
+        NesoForecastIngestionConfig(
+            resource_id=UUID("08e41551-80f8-4e28-a416-ea473a695db9"),
+            cache_dir=Path("/tmp/neso_forecast"),
+            bogus_field="should_fail",  # type: ignore[call-arg]  # testing extra="forbid"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — discriminated-union direct construction tests
+# ---------------------------------------------------------------------------
+
+
+def test_model_config_discriminates_on_type_tag() -> None:
+    """Guards D3: Pydantic resolves the discriminated union on the ``type`` tag.
+
+    Constructing an ``AppConfig`` with a raw dict payload whose ``type`` is
+    ``"naive"`` must yield a ``NaiveConfig`` instance under ``AppConfig.model``
+    — not a ``LinearConfig``.  This round-trip confirms the discriminator wiring
+    without going through Hydra, so it tests Pydantic schema correctness in
+    isolation.
+    """
+    app = AppConfig.model_validate(
+        {
+            "project": {"name": "bristol_ml", "seed": 0},
+            "model": {
+                "type": "naive",
+                "strategy": "same_hour_last_week",
+                "target_column": "nd_mw",
+            },
+        }
+    )
+
+    assert isinstance(app.model, NaiveConfig), (
+        f"D3: type='naive' payload must resolve to NaiveConfig; got {type(app.model).__name__!r}."
+    )
+    assert app.model.type == "naive"
+    assert app.model.strategy == "same_hour_last_week"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 T1 — backwards-compatibility tests
+# ---------------------------------------------------------------------------
+
+
+def test_app_config_model_field_defaults_to_none() -> None:
+    """Guards backwards compatibility: programmatic ``AppConfig(...)`` without ``model`` is valid.
+
+    Pre-Stage-4 call sites (e.g. ``tests/unit/features/test_assembler_cli.py``
+    ``_make_app_config()``) construct ``AppConfig`` without passing a ``model``
+    argument.  The ``model: ModelConfig | None = None`` default must preserve
+    this pattern so those tests do not break when Stage 4 schemas land.
+    """
+    app = AppConfig(project=ProjectConfig(name="bristol_ml", seed=0))
+
+    assert app.model is None, (
+        "Backwards-compat: AppConfig constructed without model= must have model=None."
+    )
