@@ -178,8 +178,11 @@ class SplitterConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Minimum training rows before the first test origin — e.g. 8760 = one year of hourly data.
     min_train_periods: int = Field(ge=1)
+    # Length of each fold's test window, in rows (e.g. 24 = one day of hourly data).
     test_len: int = Field(ge=1)
+    # Row count the origin advances between folds (e.g. 24 = non-overlapping daily folds).
     step: int = Field(ge=1)
     gap: int = Field(default=0, ge=0)
     fixed_window: bool = False

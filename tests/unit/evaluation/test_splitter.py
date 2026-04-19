@@ -736,6 +736,80 @@ class TestFromConfigEquivalence:
 
 
 # ---------------------------------------------------------------------------
+# Namespace re-export contract (Stage 4 T0 — H-3)
+# ---------------------------------------------------------------------------
+
+
+class TestNamespaceReExports:
+    """Both public splitter symbols must resolve from ``bristol_ml.evaluation``.
+
+    Stage 3 shipped only ``rolling_origin_split`` in ``__all__``.  Stage 4 T0
+    extends the lazy ``__getattr__`` so that ``rolling_origin_split_from_config``
+    — the config-driven entry point downstream evaluator code uses — also
+    resolves from the package namespace, matching the existing pattern.
+    """
+
+    def test_rolling_origin_split_importable_from_namespace(self) -> None:
+        """Guards H-3: ``rolling_origin_split`` re-export remains intact.
+
+        Regression guard: adding a new symbol to ``__all__`` must not drop the
+        existing one.
+        """
+        from bristol_ml.evaluation import rolling_origin_split
+        from bristol_ml.evaluation import splitter as _splitter
+
+        assert rolling_origin_split is _splitter.rolling_origin_split, (
+            "Namespace-level ``rolling_origin_split`` must be the same object "
+            "as the submodule-level symbol."
+        )
+
+    def test_rolling_origin_split_from_config_importable_from_namespace(self) -> None:
+        """Guards H-3: the config-driven entry point also resolves from the namespace.
+
+        The Stage 3 Phase 3 review noted that ``rolling_origin_split_from_config``
+        was exported from ``splitter.__all__`` but not re-exported from
+        ``bristol_ml.evaluation.__all__``.  The Stage 4 evaluator harness and
+        every downstream modelling stage consumes the config-driven entry point;
+        treating it as first-class in the namespace makes the evaluation layer's
+        published surface match what callers actually use.
+        """
+        from bristol_ml.evaluation import rolling_origin_split_from_config
+        from bristol_ml.evaluation import splitter as _splitter
+
+        assert rolling_origin_split_from_config is _splitter.rolling_origin_split_from_config, (
+            "Namespace-level ``rolling_origin_split_from_config`` must be the same "
+            "object as the submodule-level symbol."
+        )
+
+    def test_namespace_all_enumerates_both_symbols(self) -> None:
+        """Guards H-3: ``__all__`` is the declared public surface of the module.
+
+        Both splitter entry points must appear in ``bristol_ml.evaluation.__all__``
+        so tooling (Sphinx autodoc, IDEs) and human readers see the full contract.
+        """
+        import bristol_ml.evaluation as _evaluation
+
+        assert "rolling_origin_split" in _evaluation.__all__, (
+            "``rolling_origin_split`` must be in the evaluation namespace's __all__."
+        )
+        assert "rolling_origin_split_from_config" in _evaluation.__all__, (
+            "``rolling_origin_split_from_config`` must be in the evaluation "
+            "namespace's __all__ after Stage 4 T0 (H-3)."
+        )
+
+    def test_namespace_rejects_unknown_attribute(self) -> None:
+        """Guards the ``__getattr__`` fallback: unknown attributes still raise.
+
+        The lazy loader must only resolve declared symbols; everything else
+        raises ``AttributeError`` as Python expects.
+        """
+        import bristol_ml.evaluation as _evaluation
+
+        with pytest.raises(AttributeError, match="has no attribute 'definitely_not_a_symbol'"):
+            getattr(_evaluation, "definitely_not_a_symbol")  # noqa: B009 — exercise module __getattr__
+
+
+# ---------------------------------------------------------------------------
 # CLI smoke test
 # ---------------------------------------------------------------------------
 
