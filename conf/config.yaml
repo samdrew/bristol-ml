@@ -14,6 +14,11 @@ defaults:
   - evaluation/rolling_origin@evaluation.rolling_origin
   - evaluation/metrics@evaluation.metrics
   - evaluation/benchmark@evaluation.benchmark
+  # Stage 6 D5: plots-group defaults (figsize, DPI, display_tz, ACF lags).
+  # PlotsConfig carries Python-side defaults too, so the group is convenience
+  # rather than strictly required; absence still validates thanks to
+  # default_factory=PlotsConfig on EvaluationGroup.plots.
+  - evaluation/plots@evaluation.plots
   - model: linear
 
 project:
