@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -33,8 +34,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from bristol_ml.features.assembler import OUTPUT_SCHEMA, WEATHER_VARIABLE_COLUMNS
-from bristol_ml.train import _cli_main
+from bristol_ml.features.assembler import (
+    CALENDAR_OUTPUT_SCHEMA,
+    CALENDAR_VARIABLE_COLUMNS,
+    OUTPUT_SCHEMA,
+    WEATHER_VARIABLE_COLUMNS,
+)
+from bristol_ml.train import _cli_main, _resolve_feature_set
 
 # ---------------------------------------------------------------------------
 # Shared synthetic feature-table fixture
@@ -247,3 +253,404 @@ def test_train_cli_help_exits_zero_via_subprocess() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "Train and evaluate" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 T5 - _resolve_feature_set unit tests
+# Plan: docs/plans/active/05-calendar-features.md lines 330-335
+# ---------------------------------------------------------------------------
+
+# Minimal AppConfig construction for resolver tests — bypasses Hydra.
+# Only cfg.features needs to be populated; the resolver does not inspect
+# ingestion, evaluation, or model sections.
+
+
+def _make_minimal_app_config_weather_only(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """Construct an AppConfig with weather_only populated, weather_calendar=None."""
+
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeatureSetConfig,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+    )
+
+    return AppConfig(
+        project=ProjectConfig(name="test_wo", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            weather_only=FeatureSetConfig(
+                name="weather_only",
+                cache_dir=tmp_path,
+                cache_filename="weather_only.parquet",
+            ),
+            weather_calendar=None,
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+
+def _make_minimal_app_config_weather_calendar(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """Construct an AppConfig with weather_calendar populated, weather_only=None."""
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeatureSetConfig,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+    )
+
+    return AppConfig(
+        project=ProjectConfig(name="test_wc", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            weather_only=None,
+            weather_calendar=FeatureSetConfig(
+                name="weather_calendar",
+                cache_dir=tmp_path,
+                cache_filename="weather_calendar.parquet",
+            ),
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+
+# --- Resolver tests ---------------------------------------------------------
+
+
+def test_resolve_feature_set_weather_only(tmp_path: Path) -> None:
+    """Plan T5 line 330: default-config path returns weather_only config and loader.
+
+    Asserts:
+    - Returned config is the same weather_only FeatureSetConfig object.
+    - Returned loader is assembler.load (identity check).
+    - Returned column names tuple == the 5 WEATHER_VARIABLE_COLUMNS names, in order.
+    """
+    from bristol_ml.features import assembler
+
+    cfg = _make_minimal_app_config_weather_only(tmp_path)
+    fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
+
+    assert fset_cfg is cfg.features.weather_only, (
+        "_resolve_feature_set must return the same weather_only config object."
+    )
+    assert load_fn is assembler.load, (
+        "_resolve_feature_set must return assembler.load for the weather_only path."
+    )
+    expected_names = tuple(name for name, _ in WEATHER_VARIABLE_COLUMNS)
+    assert col_names == expected_names, (
+        f"Weather-only column names must be exactly {expected_names!r}; got {col_names!r}."
+    )
+    assert len(col_names) == 5, f"WEATHER_VARIABLE_COLUMNS has 5 entries; got {len(col_names)}."
+
+
+def test_resolve_feature_set_weather_calendar(tmp_path: Path) -> None:
+    """Plan T5 line 331: features=weather_calendar override path.
+
+    Asserts:
+    - Returned config is the same weather_calendar FeatureSetConfig object.
+    - Returned loader is assembler.load_calendar (identity check).
+    - Returned column names tuple == (weather_names..., calendar_names...) with length 49.
+    """
+    from bristol_ml.features import assembler
+
+    cfg = _make_minimal_app_config_weather_calendar(tmp_path)
+    fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
+
+    assert fset_cfg is cfg.features.weather_calendar, (
+        "_resolve_feature_set must return the same weather_calendar config object."
+    )
+    assert load_fn is assembler.load_calendar, (
+        "_resolve_feature_set must return assembler.load_calendar for the calendar path."
+    )
+    weather_names = tuple(name for name, _ in WEATHER_VARIABLE_COLUMNS)
+    calendar_names = tuple(name for name, _ in CALENDAR_VARIABLE_COLUMNS)
+    expected_names = weather_names + calendar_names
+    assert col_names == expected_names, (
+        "Calendar column names must be weather_names + calendar_names; mismatch at first "
+        "differing position."
+    )
+    assert len(col_names) == 49, (
+        f"weather_calendar feature set must have 49 columns (5 weather + 44 calendar); "
+        f"got {len(col_names)}."
+    )
+
+
+def test_resolve_feature_set_both_populated_raises(tmp_path: Path) -> None:
+    """Plan T5 line 332: both feature sets populated raises ValueError.
+
+    The error message must contain 'Exactly one of' and 'features=<name>'
+    (the Hydra override hint).
+    """
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeatureSetConfig,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+    )
+
+    cfg = AppConfig(
+        project=ProjectConfig(name="test_both", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            weather_only=FeatureSetConfig(
+                name="weather_only",
+                cache_dir=tmp_path,
+                cache_filename="weather_only.parquet",
+            ),
+            weather_calendar=FeatureSetConfig(
+                name="weather_calendar",
+                cache_dir=tmp_path,
+                cache_filename="weather_calendar.parquet",
+            ),
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _resolve_feature_set(cfg)
+
+    msg = str(exc_info.value)
+    assert "Exactly one of" in msg, (
+        f"ValueError message must contain 'Exactly one of'; got: {msg!r}"
+    )
+    assert "features=" in msg, (
+        f"ValueError message must contain the Hydra override hint 'features='; got: {msg!r}"
+    )
+
+
+def test_resolve_feature_set_neither_populated_raises(tmp_path: Path) -> None:
+    """Plan T5 line 333: neither feature set populated raises ValueError.
+
+    Same ValueError pattern as the both-populated case.
+    """
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+    )
+
+    cfg = AppConfig(
+        project=ProjectConfig(name="test_neither", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            weather_only=None,
+            weather_calendar=None,
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _resolve_feature_set(cfg)
+
+    msg = str(exc_info.value)
+    assert "Exactly one of" in msg, (
+        f"ValueError message must contain 'Exactly one of'; got: {msg!r}"
+    )
+    assert "features=" in msg, (
+        f"ValueError message must contain the Hydra override hint 'features='; got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 T5 — calendar-cache helper and fixtures
+# ---------------------------------------------------------------------------
+
+
+def _write_calendar_feature_cache(path: Path, n_hours: int = 24 * 50, seed: int = 99) -> Path:
+    """Write a minimal calendar feature-table parquet matching CALENDAR_OUTPUT_SCHEMA.
+
+    Synthetic but schema-conformant: n_hours of hourly UTC timestamps starting
+    at 2023-01-02 (a bank holiday date so is_bank_holiday_ew fires on some rows),
+    demand with a daily sine + noise, Gaussian weather, and calendar columns
+    derived via derive_calendar from a hand-crafted holidays frame.
+
+    We use a 50-day window (1200 rows) so min_train_periods=720 is satisfiable
+    with at least one fold of test_len=168 remaining.
+    """
+    from bristol_ml.features.calendar import derive_calendar
+    from bristol_ml.ingestion.holidays import OUTPUT_SCHEMA as HOL_SCHEMA
+
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2023-01-02", periods=n_hours, freq="1h", tz="UTC")
+    nd = (
+        30_000 + 500 * np.sin(2 * np.pi * np.arange(n_hours) / 24) + rng.normal(0, 200, n_hours)
+    ).astype("int32")
+    tsd = (nd + 3_000).astype("int32")
+    weather = {
+        name: rng.normal(loc=10, scale=3, size=n_hours).astype("float32")
+        for name, _ in WEATHER_VARIABLE_COLUMNS
+    }
+    retrieved_at = pd.Timestamp("2024-01-01T00:00:00Z")
+    weather_frame = pd.DataFrame(
+        {
+            "timestamp_utc": idx,
+            "nd_mw": nd,
+            "tsd_mw": tsd,
+            **weather,
+            "neso_retrieved_at_utc": [retrieved_at] * n_hours,
+            "weather_retrieved_at_utc": [retrieved_at] * n_hours,
+        }
+    )
+
+    # Build a minimal holidays DataFrame using the ingestion OUTPUT_SCHEMA.
+    # Cover the 2023 window with a representative set of entries so that the
+    # is_bank_holiday_ew and related columns fire correctly on the data range.
+    holidays_retrieved = pd.Timestamp("2023-12-01T00:00:00Z")
+    holidays_rows = [
+        {
+            "date": date(2023, 1, 2),
+            "division": "england-and-wales",
+            "title": "New Year's Day (substitute day)",
+            "notes": "",
+            "bunting": True,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+        {
+            "date": date(2023, 1, 2),
+            "division": "scotland",
+            "title": "2nd January",
+            "notes": "",
+            "bunting": True,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+        {
+            "date": date(2023, 1, 2),
+            "division": "northern-ireland",
+            "title": "New Year's Day (substitute day)",
+            "notes": "",
+            "bunting": True,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+        {
+            "date": date(2023, 4, 7),
+            "division": "england-and-wales",
+            "title": "Good Friday",
+            "notes": "",
+            "bunting": False,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+        {
+            "date": date(2023, 4, 7),
+            "division": "scotland",
+            "title": "Good Friday",
+            "notes": "",
+            "bunting": False,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+        {
+            "date": date(2023, 4, 7),
+            "division": "northern-ireland",
+            "title": "Good Friday",
+            "notes": "",
+            "bunting": False,
+            "retrieved_at_utc": holidays_retrieved,
+        },
+    ]
+    holidays_df = pd.DataFrame(holidays_rows)
+    hol_table = pa.Table.from_pandas(holidays_df, preserve_index=False).cast(HOL_SCHEMA, safe=True)
+    holidays_df = hol_table.to_pandas()
+
+    # derive_calendar appends the 44 calendar columns to the weather frame.
+    cal_frame = derive_calendar(weather_frame, holidays_df)
+
+    # Append the holidays_retrieved_at_utc provenance scalar.
+    cal_frame["holidays_retrieved_at_utc"] = holidays_retrieved
+
+    # Cast to the canonical CALENDAR_OUTPUT_SCHEMA.
+    table = pa.Table.from_pandas(cal_frame, preserve_index=False).cast(
+        CALENDAR_OUTPUT_SCHEMA, safe=True
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)
+    return path
+
+
+@pytest.fixture()
+def warm_calendar_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Populate a warm calendar feature-table cache and point Hydra at it.
+
+    Mirrors the ``warm_feature_cache`` fixture for the weather_only schema.
+    The parquet lands at ``tmp_path/weather_calendar.parquet`` (matching the
+    default ``cache_filename`` for the weather_calendar feature set).
+    """
+    monkeypatch.setenv("BRISTOL_ML_CACHE_DIR", str(tmp_path))
+    _write_calendar_feature_cache(tmp_path / "weather_calendar.parquet")
+    return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 T5 - CLI integration tests
+# Plan: docs/plans/active/05-calendar-features.md lines 334-335
+# ---------------------------------------------------------------------------
+
+
+def test_train_cli_features_override_swaps_feature_set(
+    warm_calendar_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plan T5 line 334: features=weather_calendar swaps the feature set in the CLI.
+
+    Runs _cli_main in-process with the calendar cache warm.  Asserts:
+    - Exit code is 0.
+    - Stdout contains the per-fold metrics header ("Per-fold metrics for model=linear").
+    - Stdout contains "weather-calendar" (the metadata.name substring that signals
+      the calendar feature set was selected and _NamedLinearModel applied the
+      correct override).
+    """
+    exit_code = _cli_main(
+        [
+            "features=weather_calendar",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=168",
+            "evaluation.rolling_origin.step=168",
+        ]
+    )
+
+    assert exit_code == 0, f"CLI must exit 0 on a warm calendar cache; got {exit_code}."
+    out = capsys.readouterr().out
+    assert "Per-fold metrics for model=linear" in out, (
+        "Per-fold header must appear in stdout when features=weather_calendar."
+    )
+    assert "weather-calendar" in out, (
+        "metadata.name must include 'weather-calendar' when features=weather_calendar is set; "
+        f"stdout was:\n{out}"
+    )
+
+
+def test_train_cli_weather_only_still_works(
+    warm_feature_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plan T5 line 335: regression guard — plain _cli_main([]) still works after T5 changes.
+
+    Uses the existing warm_feature_cache fixture (weather_only schema).  Asserts:
+    - Exit code is 0.
+    - Stdout contains "Per-fold metrics for model=linear".
+    - Stdout contains "weather-only" (the metadata.name substring confirms
+      _NamedLinearModel applies "linear-ols-weather-only" for the default path).
+    """
+    exit_code = _cli_main(
+        [
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=168",
+            "evaluation.rolling_origin.step=168",
+        ]
+    )
+
+    assert exit_code == 0, f"CLI must exit 0 on a warm weather-only cache; got {exit_code}."
+    out = capsys.readouterr().out
+    assert "Per-fold metrics for model=linear" in out, (
+        "Per-fold header must appear in stdout for the default weather_only path."
+    )
+    assert "weather-only" in out, (
+        "metadata.name must include 'weather-only' for the default feature-set path; "
+        f"stdout was:\n{out}"
+    )
