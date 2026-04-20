@@ -74,7 +74,7 @@ Cross-references:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import matplotlib.axes
@@ -580,9 +580,57 @@ def forecast_overlay(
 ) -> matplotlib.figure.Figure:
     """Actual-vs-prediction line plot with one line per named forecast.
 
-    Implementation scaffolded in T2; body in T4.
+    Renders the ``actual`` series as a solid line plus one line per entry
+    in ``predictions_by_name``, each taking successive Okabe-Ito colours
+    (index 1 onwards — index 0 is reserved for the actual).  Legend is
+    placed lower-right to match the Stage 4 notebook Cell 11 convention.
+
+    Parameters
+    ----------
+    actual:
+        Observed series indexed by a tz-aware ``DatetimeIndex``.
+    predictions_by_name:
+        Ordered mapping of ``label -> predicted series``.  Each prediction
+        must share ``actual``'s index (or a subset — unaligned rows are
+        dropped via positional intersection).
+    display_tz:
+        IANA timezone for the x-axis.
+    title:
+        Figure title.
+    ax:
+        Optional existing axes to draw on.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the overlay plot.
     """
-    raise NotImplementedError("forecast_overlay body is implemented in Stage 6 T4")
+    idx = _require_tz_aware_datetime_index(actual, name="actual")
+    local_idx = idx.tz_convert(display_tz)
+    fig, axes = _ensure_axes(ax)
+
+    axes.plot(local_idx, actual.values, linewidth=1.6, color=OKABE_ITO[2], label="Actual")
+    palette = OKABE_ITO[1:] + OKABE_ITO[3:]  # skip OKABE_ITO[0] (black) and OKABE_ITO[2] (actual)
+    for offset, (label, pred) in enumerate(predictions_by_name.items()):
+        colour = palette[offset % len(palette)]
+        # Align the prediction to the actual's index positionally — the helper
+        # does not own alignment semantics, it just plots what it is given.
+        pred_idx = _require_tz_aware_datetime_index(pred, name=f"predictions_by_name[{label!r}]")
+        axes.plot(
+            pred_idx.tz_convert(display_tz),
+            pred.values,
+            linewidth=1.4,
+            color=colour,
+            label=label,
+        )
+
+    axes.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%H:%M"))
+    axes.set_xlabel(f"Time ({display_tz})")
+    axes.set_ylabel("Demand (MW)")
+    axes.set_title(title)
+    axes.grid(True, alpha=0.3)
+    axes.legend(loc="lower right")
+    return fig
 
 
 def forecast_overlay_with_band(
@@ -597,17 +645,94 @@ def forecast_overlay_with_band(
 ) -> matplotlib.figure.Figure:
     """Forecast overlay with an empirical-quantile uncertainty band.
 
-    The band derives from ``per_fold_errors`` via the quantile method
-    (Stage 6 D8, plan §1); ``per_fold_errors`` is the frame emitted by
-    ``evaluate(..., return_predictions=True)`` (D9).
+    Computes per-horizon quantiles of ``per_fold_errors["error"]`` (the
+    signed ``y_true - y_pred`` residuals emitted by
+    ``evaluate(..., return_predictions=True)`` — Stage 6 D9) and shades the
+    band ``[point - q_hi, point - q_lo]`` around ``point_prediction``.  The
+    band is non-parametric and model-agnostic (plan D8).
 
-    Implementation scaffolded in T2; body in T4.
+    Parameters
+    ----------
+    actual:
+        Observed series indexed by a tz-aware ``DatetimeIndex``.
+    point_prediction:
+        Single-model forecast series (same index as ``actual``).
+    per_fold_errors:
+        Long-form error frame with columns ``horizon_h`` (int) and
+        ``error`` (float).  Raises ``ValueError`` if ``horizon_h`` is
+        absent (plan T4 error-handling contract).
+    quantiles:
+        ``(lo, hi)`` quantile pair used to build the band; default
+        ``(0.1, 0.9)`` → 80% empirical interval.
+    display_tz:
+        IANA timezone for the x-axis.
+    title:
+        Figure title.
+    ax:
+        Optional existing axes to draw on.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure.
+
+    Raises
+    ------
+    ValueError
+        If ``per_fold_errors`` lacks a ``horizon_h`` column.
     """
-    raise NotImplementedError("forecast_overlay_with_band body is implemented in Stage 6 T4")
+    if "horizon_h" not in per_fold_errors.columns:
+        raise ValueError(
+            "per_fold_errors must have 'horizon_h' column — "
+            "run evaluate(..., return_predictions=True)"
+        )
+    q_lo_val, q_hi_val = float(quantiles[0]), float(quantiles[1])
+    band = per_fold_errors.groupby("horizon_h")["error"].quantile([q_lo_val, q_hi_val]).unstack()
+    # Positional join: use the first len(point_prediction) horizons.
+    n = min(len(point_prediction), band.shape[0])
+    q_lo_series = band.iloc[:n, 0].to_numpy(dtype=np.float64)
+    q_hi_series = band.iloc[:n, 1].to_numpy(dtype=np.float64)
+
+    idx = _require_tz_aware_datetime_index(actual, name="actual")
+    local_idx = idx.tz_convert(display_tz)
+    point_arr = np.asarray(point_prediction.values, dtype=np.float64)[:n]
+    actual_arr = np.asarray(actual.values, dtype=np.float64)[:n]
+    local_idx = local_idx[:n]
+
+    fig, axes = _ensure_axes(ax)
+    axes.fill_between(
+        local_idx,
+        point_arr - q_hi_series,
+        point_arr - q_lo_series,
+        alpha=0.25,
+        color=OKABE_ITO[1],
+        label=f"q{int(q_lo_val * 100)}-q{int(q_hi_val * 100)} empirical band",
+    )
+    axes.plot(local_idx, actual_arr, linewidth=1.6, color=OKABE_ITO[2], label="Actual")
+    axes.plot(local_idx, point_arr, linewidth=1.4, color=OKABE_ITO[1], label="Forecast")
+
+    axes.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%H:%M"))
+    axes.set_xlabel(f"Time ({display_tz})")
+    axes.set_ylabel("Demand (MW)")
+    axes.set_title(title)
+    axes.grid(True, alpha=0.3)
+    axes.legend(loc="lower right")
+    return fig
+
+
+#: Unit suffix per metric name for axis labels on the benchmark bar chart.
+#: MAE/RMSE are in MW; MAPE/WAPE are fractions.  Unknown metric names get
+#: an empty suffix.
+_METRIC_UNIT_LABEL: dict[str, str] = {
+    "mae": "(MW)",
+    "rmse": "(MW)",
+    "mape": "(fraction)",
+    "wape": "(fraction)",
+}
 
 
 def benchmark_holdout_bar(
-    candidates: dict[str, Model],
+    candidates: Mapping[str, Model],
     neso_forecast: pd.DataFrame,
     features: pd.DataFrame,
     metrics: Sequence[MetricFn],
@@ -615,16 +740,135 @@ def benchmark_holdout_bar(
     holdout_start: pd.Timestamp,
     holdout_end: pd.Timestamp,
     ax: matplotlib.axes.Axes | None = None,
+    title: str = "Holdout-window benchmark (NESO three-way comparison)",
 ) -> matplotlib.figure.Figure:
     """Fixed-window NESO three-way benchmark bar chart (Stage 6 D10).
 
     Wires up the latent ``NesoBenchmarkConfig.holdout_start/_end`` fields
-    added at Stage 4 by slicing ``features`` to the configured window and
-    computing one bar per (model, metric) plus a "neso" row.
+    added at Stage 4 by building a single-fold
+    :class:`~conf._schemas.SplitterConfig` that covers ``[holdout_start,
+    holdout_end]`` and delegating to
+    :func:`bristol_ml.evaluation.benchmarks.compare_on_holdout` for the
+    scoring.  The helper then renders one grouped bar per metric, with
+    ``len(candidates) + 1`` bars per group (the ``+1`` is the NESO row).
 
-    Implementation scaffolded in T2; body in T4.
+    Parameters
+    ----------
+    candidates:
+        Name → :class:`~bristol_ml.models.protocol.Model` mapping; passed
+        straight through to ``compare_on_holdout``.
+    neso_forecast:
+        Half-hourly NESO forecast archive
+        (:func:`bristol_ml.ingestion.neso_forecast.load` output).
+    features:
+        Hourly feature table (Stage 3 assembler shape; must carry either
+        a UTC-aware ``DatetimeIndex`` or a ``timestamp_utc`` column).
+    metrics:
+        Metric callables (see :mod:`bristol_ml.evaluation.metrics`).
+    holdout_start, holdout_end:
+        Inclusive bounds of the holdout window (UTC-aware timestamps).
+    ax:
+        Optional existing axes.
+    title:
+        Figure title.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the grouped bar chart.
+
+    Raises
+    ------
+    ValueError
+        If ``candidates`` is empty; if the holdout window is empty or
+        out of bounds; if ``metrics`` is empty.
     """
-    raise NotImplementedError("benchmark_holdout_bar body is implemented in Stage 6 T4")
+    if not candidates:
+        raise ValueError("benchmark_holdout_bar: 'candidates' is empty.")
+    if not metrics:
+        raise ValueError("benchmark_holdout_bar: 'metrics' is empty.")
+
+    # Import lazily to avoid a circular import between plots <-> benchmarks.
+    from bristol_ml.evaluation.benchmarks import compare_on_holdout
+    from conf._schemas import SplitterConfig
+
+    # Promote the feature frame to a UTC-aware DatetimeIndex if it carries
+    # the conventional ``timestamp_utc`` column, so positional arithmetic
+    # against holdout_start/_end works uniformly.
+    df = features
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "timestamp_utc" not in df.columns:
+            raise ValueError(
+                "benchmark_holdout_bar: 'features' must carry a UTC-aware "
+                "DatetimeIndex or a 'timestamp_utc' column."
+            )
+        df = df.set_index("timestamp_utc")
+
+    start_ts = pd.Timestamp(holdout_start)
+    end_ts = pd.Timestamp(holdout_end)
+    train_mask = df.index < start_ts
+    test_mask = (df.index >= start_ts) & (df.index <= end_ts)
+    min_train = int(train_mask.sum())
+    test_len = int(test_mask.sum())
+    if test_len == 0:
+        raise ValueError(
+            f"benchmark_holdout_bar: holdout window [{start_ts}, {end_ts}] "
+            f"selects zero rows from features.index."
+        )
+    if min_train == 0:
+        raise ValueError(
+            f"benchmark_holdout_bar: no rows precede holdout_start={start_ts}; "
+            f"a fixed-window splitter needs min_train_periods >= 1."
+        )
+    splitter_cfg = SplitterConfig(
+        min_train_periods=min_train,
+        test_len=test_len,
+        step=test_len,
+        gap=0,
+        fixed_window=True,
+    )
+
+    table = compare_on_holdout(
+        candidates,
+        df,
+        neso_forecast,
+        splitter_cfg,
+        metrics,
+    )
+
+    # Grouped bar chart: one bar group per metric, one bar per model
+    # (including the NESO benchmark row).
+    fig, axes = _ensure_axes(ax)
+    metric_names = [m.__name__ for m in metrics]
+    row_labels = list(table.index)
+    n_groups = len(metric_names)
+    n_rows = len(row_labels)
+    bar_width = 0.8 / max(n_rows, 1)
+    x_positions = np.arange(n_groups, dtype=np.float64)
+
+    for offset, row_label in enumerate(row_labels):
+        values = table.loc[row_label, metric_names].to_numpy(dtype=np.float64)
+        colour = OKABE_ITO[(offset + 1) % len(OKABE_ITO)]
+        axes.bar(
+            x_positions + offset * bar_width,
+            values,
+            width=bar_width,
+            color=colour,
+            label=row_label,
+            edgecolor="black",
+            linewidth=0.5,
+        )
+
+    axes.set_xticks(x_positions + bar_width * (n_rows - 1) / 2.0)
+    axes.set_xticklabels(
+        [f"{name} {_METRIC_UNIT_LABEL.get(name, '')}".strip() for name in metric_names]
+    )
+    axes.set_xlabel("Metric")
+    axes.set_ylabel("Score")
+    axes.set_title(title)
+    axes.grid(True, axis="y", alpha=0.3)
+    axes.legend(title="Model", loc="best")
+    return fig
 
 
 # ---------------------------------------------------------------------------
