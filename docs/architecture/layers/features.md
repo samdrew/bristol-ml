@@ -1,8 +1,8 @@
 # Features — layer architecture
 
-- **Status:** Provisional — realised by Stage 2 (national weather aggregate, shipped) and Stage 3 (feature assembler, shipped). Revisit at Stage 5 (calendar features) and Stage 16 (REMIT features), each of which extends the layer in a way that will stress these conventions.
+- **Status:** Stable — realised by Stage 2 (national weather aggregate, shipped), Stage 3 (feature assembler, shipped), and Stage 5 (calendar features, shipped). Revisit at Stage 16 (REMIT features), which extends the layer in a way that will stress the forward-fill-cap / multi-horizon conventions.
 - **Canonical overview:** [`DESIGN.md` §3.2](../../intent/DESIGN.md#32-layer-responsibilities) (features paragraph).
-- **Concrete instances:** Stage 2 retro [`lld/stages/02-weather-ingestion.md`](../../lld/stages/02-weather-ingestion.md) (the `national_aggregate` function); Stage 3 retro [`lld/stages/03-feature-assembler.md`](../../lld/stages/03-feature-assembler.md) (the assembler).
+- **Concrete instances:** Stage 2 retro [`lld/stages/02-weather-ingestion.md`](../../lld/stages/02-weather-ingestion.md) (the `national_aggregate` function); Stage 3 retro [`lld/stages/03-feature-assembler.md`](../../lld/stages/03-feature-assembler.md) (the `weather_only` assembler); Stage 5 retro [`lld/stages/05-calendar-features.md`](../../lld/stages/05-calendar-features.md) (the `weather_calendar` extension plus `features/calendar.py`).
 - **Related principles:** §2.1.1 (standalone), §2.1.2 (typed narrow interfaces), §2.1.4 (config outside code), §2.1.6 (provenance), §2.1.7 (tests at boundaries), §2.1.8 (notebook thinness).
 
 ---
@@ -119,13 +119,17 @@ Each of these is swappable without touching downstream code. The `OUTPUT_SCHEMA`
 |--------|-------------|-------|--------|-----|
 | `features/weather.py::national_aggregate` | — (helper) | 2 | Shipped | Pure derivation; no on-disk output. |
 | `features/assembler.py` | `weather_only` | 3 | Shipped | First assembled feature set; ten-column `OUTPUT_SCHEMA`; notebook 03 is the demo surface. |
-| `features/assembler.py` | `weather_calendar` | 5 | Planning | Extends the same module with a calendar join step; with-without comparison becomes a config swap. |
+| `features/calendar.py::derive_calendar` | — (helper) | 5 | Shipped | Pure 44-column calendar derivation (hour-of-day / day-of-week / month / holiday). Owns `CALENDAR_VARIABLE_COLUMNS`; no I/O. |
+| `features/assembler.py` | `weather_calendar` | 5 | Shipped | Extends the same module with a second schema (`CALENDAR_OUTPUT_SCHEMA`, 55 cols) plus `assemble_calendar` / `load_calendar`; with-without comparison is a `features=weather_calendar` Hydra group-swap. |
+| `ingestion/holidays.py` (ingestion-layer companion) | — | 5 | Shipped | gov.uk bank-holidays feed; consumed by `features/calendar.py` but persisted under `ingestion/`. |
 | `features/lags.py` (tentative name) | — (helper) | 7 | Planning | Lag-feature derivation for SARIMAX and beyond. |
 | `features/remit.py` (tentative name) | `with_remit` | 16 | Planning | REMIT bi-temporal features collapsed to the hourly grid. |
 
 ## Open questions
 
 - **Feature-set naming convention.** `weather_only` / `weather_calendar` / `with_remit` follow no explicit rule beyond "describe the columns". A prefix / suffix convention would prevent drift when Stages 16+ add more sets. Decide if / when the third set lands.
+- **~~Feature-table schema contract for Stage 5~~** — Resolved at Stage 5. The assembler exposes two `pa.Schema` constants (`OUTPUT_SCHEMA`, `CALENDAR_OUTPUT_SCHEMA`); the calendar schema is an exact prefix-extension of the weather-only schema. Each feature set carries its own `load` / `load_calendar` schema-validating reader. See [`lld/stages/05-calendar-features.md`](../../lld/stages/05-calendar-features.md) §"Design choices made here".
+- **~~Population-weighting home~~** — Resolved at Stage 5. Stays in `features/weather.py::national_aggregate` (Stage 2's placement); `features/calendar.py` reads aggregated hourly weather, so no Stage 5 reorganisation of the weighting function was needed. The calendar set inherits the aggregate unchanged via the shared `build()` prefix.
 - **Lag-feature placement.** The line between "features/lags.py computes a lag" and "a model's own preprocessing step adds the lag" is not yet drawn — SARIMAX wants integrated lags, linear wants them as columns, neural may want either. Revisit at Stage 7 when the first lag-hungry model lands.
 - **Multi-horizon feature tables.** Every feature row keys on a single `timestamp_utc`. Day-ahead-only forecasting is fine; week-ahead would either need a horizon column or a separate feature set per horizon. Deferred until a week-ahead model is actually in scope.
 - **Feature-table partitioning.** Flat single-file parquet will cross GB when REMIT arrives at Stage 16. `pyarrow.dataset.write_dataset` with year partitioning is the natural move; retrofittable without changing the public interface.
