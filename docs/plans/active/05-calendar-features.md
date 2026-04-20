@@ -314,7 +314,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 ### Task T5 — Train CLI feature-set selector
 *(Depends on T1, T4.)*
 
-- [ ] Extend `src/bristol_ml/train.py`:
+- [x] Extend `src/bristol_ml/train.py`:
   - Add `_resolve_feature_set(cfg: AppConfig) -> tuple[FeatureSetConfig, LoadFn, tuple[str, ...]]`:
     - If `cfg.features.weather_only is not None and cfg.features.weather_calendar is None` → returns `(cfg.features.weather_only, assembler.load, tuple(name for name, _ in WEATHER_VARIABLE_COLUMNS))`.
     - If `cfg.features.weather_calendar is not None and cfg.features.weather_only is None` → returns `(cfg.features.weather_calendar, assembler.load_calendar, tuple(weather + calendar names))`.
@@ -324,7 +324,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
   - Pass the resolved `feature_column_names` to `harness.evaluate(..., feature_columns=...)` so the harness does not silently fall back to the weather-only default.
   - Pass the resolved `feature_column_names` to `LinearModel`'s config at instantiation time (or, if `LinearConfig.feature_columns` is explicitly set via Hydra, respect that and log the override). The metadata `name` on the fitted model should reflect the feature set — `"linear-ols-weather-calendar"` vs `"linear-ols-weather-only"`. Two paths: (a) make `LinearModel` derive its metadata name from `config.feature_columns` content, (b) let `train.py` override `LinearConfig.feature_columns` + name at instantiation. Pick (b) because it keeps `LinearModel` unchanged.
   - Exit-code contract unchanged: `0` success, `2` missing config/cache, `3` unknown variant.
-- [ ] Extend `README.md` with the `python -m bristol_ml.train features=weather_calendar` invocation and link the Stage 5 notebook.
+- [x] Extend `README.md` with the `python -m bristol_ml.train features=weather_calendar` invocation and link the Stage 5 notebook.
 - **Acceptance:** AC-1, AC-9.
 - **Tests (spec + implementation-derived):**
   - `test_resolve_feature_set_weather_only` — default-config path.
