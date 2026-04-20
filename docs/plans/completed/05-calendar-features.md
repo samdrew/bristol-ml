@@ -354,13 +354,13 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 ### Task T7 — Stage hygiene
 *(Depends on T1–T6.)*
 
-- [ ] `CHANGELOG.md` under `[Unreleased]`: `### Added` bullets for `bristol_ml.ingestion.holidays`, `bristol_ml.features.calendar`, `assembler.assemble_calendar` / `load_calendar` / `CALENDAR_OUTPUT_SCHEMA` / `CALENDAR_VARIABLE_COLUMNS`, `train._resolve_feature_set`, new Hydra groups, notebook, tests. `### Changed` bullet noting the `train` CLI now supports `features=weather_calendar`.
-- [ ] `docs/lld/stages/05-calendar-features.md` — retrospective following `docs/lld/stages/00-foundation.md` / `04-linear-baseline.md` template. Document any deviations from this plan; cite the R4 empirical evidence driving D-3; cite the R5 `is_weekend` collinearity guard implemented in `derive_calendar`.
-- [ ] `docs/stages/README.md` — flip Stage 5 status cell to `shipped`; link brief → plan, layer → features, retro → `05-calendar-features.md`.
-- [ ] `docs/architecture/layers/features.md` — extend module inventory with `calendar.py` (Shipped) and `assembler.py` gaining the `weather_calendar` schema (Shipped); update the `Open questions` section to mark the "feature-table schema contract for Stage 5" and "population-weighting home" questions resolved with a back-reference (per **H-4**).
-- [ ] `docs/architecture/ROADMAP.md` — drop the "Features" entry since the layer is now fully realised (per **H-4**).
-- [ ] Move this plan from `docs/plans/active/` to `docs/plans/completed/` **as part of the final commit only**.
-- [ ] **Not** touching `docs/intent/DESIGN.md §6`; deny-tier for the lead. At PR merge, surface **H-3** to the human so §6 can be batched-updated covering Stages 1–5 in one main-session edit.
+- [x] `CHANGELOG.md` under `[Unreleased]`: `### Added` bullets for `bristol_ml.ingestion.holidays`, `bristol_ml.features.calendar`, `assembler.assemble_calendar` / `load_calendar` / `CALENDAR_OUTPUT_SCHEMA` / `CALENDAR_VARIABLE_COLUMNS`, `train._resolve_feature_set`, new Hydra groups, notebook, tests. `### Changed` bullet noting the `train` CLI now supports `features=weather_calendar`.
+- [x] `docs/lld/stages/05-calendar-features.md` — retrospective following `docs/lld/stages/00-foundation.md` / `04-linear-baseline.md` template. Document any deviations from this plan; cite the R4 empirical evidence driving D-3; cite the R5 `is_weekend` collinearity guard implemented in `derive_calendar`.
+- [x] `docs/stages/README.md` — flip Stage 5 status cell to `shipped`; link brief → plan, layer → features, retro → `05-calendar-features.md`.
+- [x] `docs/architecture/layers/features.md` — extend module inventory with `calendar.py` (Shipped) and `assembler.py` gaining the `weather_calendar` schema (Shipped); update the `Open questions` section to mark the "feature-table schema contract for Stage 5" and "population-weighting home" questions resolved with a back-reference (per **H-4**).
+- [x] `docs/architecture/ROADMAP.md` — drop the "Features" entry since the layer is now fully realised (per **H-4**). *(Already dropped in Stage 4 per `docs/lld/stages/04-linear-baseline.md` §"What was built" — verified no Features entry present at Stage 5.)*
+- [x] Move this plan from `docs/plans/active/` to `docs/plans/completed/` **as part of the final commit only**.
+- [x] **Not** touching `docs/intent/DESIGN.md §6`; deny-tier for the lead. At PR merge, surface **H-3** to the human so §6 can be batched-updated covering Stages 1–5 in one main-session edit.
 - **Acceptance:** AC-8, AC-9, AC-10, AC-11.
 
 ---

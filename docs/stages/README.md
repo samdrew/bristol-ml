@@ -31,7 +31,7 @@ Stages 2-19 are intentionally `planning` — briefs land when each stage becomes
 | 2 | Weather ingestion | `shipped` | [intent](../intent/02-weather-ingestion.md) | [brief](./02-weather-ingestion.md) | [ingestion](../architecture/layers/ingestion.md) | [lld](../lld/ingestion/weather.md) | [retro](../lld/stages/02-weather-ingestion.md) |
 | 3 | Feature assembler + split | `shipped` | [intent](../intent/03-feature-assembler.md) | [plan](../plans/completed/03-feature-assembler.md) | [features](../architecture/layers/features.md) · [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/03-feature-assembler.md) |
 | 4 | Linear baseline + eval harness | `shipped` | [intent](../intent/04-linear-baseline.md) | [plan](../plans/completed/04-linear-baseline.md) | [models](../architecture/layers/models.md) · [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/04-linear-baseline.md) |
-| 5 | Calendar features | `planning` | [intent](../intent/05-calendar-features.md) | — | — | — | — |
+| 5 | Calendar features | `shipped` | [intent](../intent/05-calendar-features.md) | [plan](../plans/completed/05-calendar-features.md) | [features](../architecture/layers/features.md) · [ingestion](../architecture/layers/ingestion.md) | — | [retro](../lld/stages/05-calendar-features.md) |
 | 6 | Enhanced evaluation & viz | `planning` | [intent](../intent/06-enhanced-evaluation.md) | — | — | — | — |
 | 7 | SARIMAX | `planning` | [intent](../intent/07-sarimax.md) | — | — | — | — |
 | 8 | SciPy parametric | `planning` | [intent](../intent/08-scipy-parametric.md) | — | — | — | — |
