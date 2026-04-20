@@ -78,11 +78,15 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import matplotlib.axes
+import matplotlib.dates as mdates
 import matplotlib.figure
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import seaborn as sns
 from cycler import cycler
 from loguru import logger
+from statsmodels.graphics.tsaplots import plot_acf
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
     from bristol_ml.evaluation.metrics import MetricFn
@@ -207,6 +211,53 @@ def _ensure_axes(
 # ---------------------------------------------------------------------------
 
 
+#: Minimum series span (days) above which the x-axis switches from "day + month"
+#: to "month + year" tick-format.  Chosen so a 24-hour overlay (Stage 4 notebook
+#: Cell 11 convention) uses "%d %b" and a 3-year test horizon uses "%b %Y".
+_LONG_SPAN_THRESHOLD_DAYS: int = 180
+
+
+def _require_tz_aware_datetime_index(
+    series_or_index: pd.Series | pd.DatetimeIndex,
+    *,
+    name: str,
+) -> pd.DatetimeIndex:
+    """Return the DatetimeIndex of ``series_or_index`` or raise ``ValueError``.
+
+    Load-bearing for the D6 ``display_tz`` contract: every helper that maps a
+    timestamp to local wall-clock time (``residuals_vs_time``,
+    ``error_heatmap_hour_weekday``, ``forecast_overlay``) requires a tz-aware
+    index.  A tz-naive index is ambiguous across DST transitions and is
+    rejected at the boundary to keep downstream code honest.
+    """
+    idx = series_or_index.index if isinstance(series_or_index, pd.Series) else series_or_index
+    if not isinstance(idx, pd.DatetimeIndex):
+        raise ValueError(f"{name}.index must be a DatetimeIndex; got {type(idx).__name__!r}.")
+    if idx.tz is None:
+        raise ValueError(
+            f"{name}.index must be tz-aware so display_tz conversion is unambiguous; "
+            f"got a tz-naive DatetimeIndex.  Attach tz=UTC via "
+            f'``series.tz_localize("UTC")`` or pass UTC-aware timestamps upstream.'
+        )
+    return idx
+
+
+def _apply_time_axis_formatter(ax: matplotlib.axes.Axes, local_index: pd.DatetimeIndex) -> None:
+    """Set an mdates locator + formatter appropriate to the series span.
+
+    Series >= 180 days: ``MonthLocator(interval=2)`` + ``%b %Y``.  Shorter:
+    ``%d %b`` (with a line break + ``%H:%M`` for the sub-day overlay; plan T4).
+    """
+    if len(local_index) == 0:
+        return
+    span_days = (local_index.max() - local_index.min()).total_seconds() / 86400.0
+    if span_days >= _LONG_SPAN_THRESHOLD_DAYS:
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+
+
 def residuals_vs_time(
     residuals: pd.Series,
     *,
@@ -217,30 +268,57 @@ def residuals_vs_time(
     """Line plot of forecast residuals over time.
 
     Renders ``residuals`` as a single-line time-series plot on a local-time
-    x-axis (``display_tz`` default ``"Europe/London"``).  A thin horizontal
-    zero line highlights where the model is unbiased.
-
-    The body of this helper is implemented in T3; T2 ships only the
-    signature and docstring scaffold.
+    x-axis (``display_tz`` default ``"Europe/London"``, Stage 6 D6 with DST
+    verification gate).  A thin horizontal zero line highlights where the
+    model is unbiased.
 
     Parameters
     ----------
     residuals:
         Signed residuals (``actual - predicted``) indexed by a tz-aware
-        ``DatetimeIndex``.
+        ``DatetimeIndex``.  A tz-naive index raises ``ValueError``.
     display_tz:
         IANA timezone for the x-axis (default: ``"Europe/London"``).
     title:
         Figure title (British English).
     ax:
-        Optional existing axes to draw on.
+        Optional existing axes to draw on.  When ``None`` a new figure is
+        created at the ``plt.rcParams["figure.figsize"]`` default.
 
     Returns
     -------
     :class:`matplotlib.figure.Figure`
         The matplotlib figure containing the plot.
+
+    Raises
+    ------
+    ValueError
+        If ``residuals.index`` is not a tz-aware ``DatetimeIndex``.
     """
-    raise NotImplementedError("residuals_vs_time body is implemented in Stage 6 T3")
+    idx = _require_tz_aware_datetime_index(residuals, name="residuals")
+    local_idx = idx.tz_convert(display_tz)
+    fig, axes = _ensure_axes(ax)
+
+    axes.plot(local_idx, residuals.values, linewidth=1.2, color=OKABE_ITO[0])
+    axes.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+
+    _apply_time_axis_formatter(axes, local_idx)
+    axes.set_xlabel(f"Time ({display_tz})")
+    axes.set_ylabel("Residual (MW)")
+    axes.set_title(title)
+    axes.grid(True, alpha=0.3)
+    fig.autofmt_xdate()
+    return fig
+
+
+#: Maximum scatter point count before the helper down-samples.  20 000 keeps
+#: rendering responsive on a laptop Jupyter kernel; above this the visual
+#: effect of overplotting saturates anyway.
+_SCATTER_SAMPLE_CAP: int = 20_000
+
+#: Deterministic RNG seed for the scatter down-sample so two consecutive
+#: calls produce byte-identical figures (T3 ``test_helpers_deterministic_on_fixed_seed``).
+_SCATTER_RNG_SEED: int = 42
 
 
 def predicted_vs_actual(
@@ -250,11 +328,113 @@ def predicted_vs_actual(
     title: str = "Predicted vs actual",
     ax: matplotlib.axes.Axes | None = None,
 ) -> matplotlib.figure.Figure:
-    """Scatter plot of predicted against actual, with a 45-degree reference.
+    """Scatter plot of predicted against actual, with a 45-degree reference line.
 
-    Implementation scaffolded in T2; body in T3.
+    Axis convention: x = predicted, y = actual (Gelman 2025, research §R3).
+    A 45-degree reference line spans the combined min/max so points on the
+    line are perfect predictions.
+
+    Parameters
+    ----------
+    y_true:
+        Ground-truth values (plotted on the y-axis).
+    y_pred:
+        Model predictions (plotted on the x-axis).
+    title:
+        Figure title (British English).
+    ax:
+        Optional existing axes to draw on.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the plot.
+
+    Notes
+    -----
+    When the series exceed ``_SCATTER_SAMPLE_CAP`` (20 000) rows the scatter
+    is down-sampled via a seeded ``numpy.random.default_rng(42)`` so two
+    consecutive calls produce byte-identical figures.  A ``logger.info``
+    records the cap hit.
     """
-    raise NotImplementedError("predicted_vs_actual body is implemented in Stage 6 T3")
+    true_arr = np.asarray(y_true, dtype=np.float64)
+    pred_arr = np.asarray(y_pred, dtype=np.float64)
+    if true_arr.shape != pred_arr.shape:
+        raise ValueError(
+            f"y_true and y_pred must share the same shape; "
+            f"got {true_arr.shape!r} vs {pred_arr.shape!r}."
+        )
+
+    n = true_arr.size
+    if n > _SCATTER_SAMPLE_CAP:
+        rng = np.random.default_rng(_SCATTER_RNG_SEED)
+        keep = rng.choice(n, size=_SCATTER_SAMPLE_CAP, replace=False)
+        keep.sort()
+        true_arr = true_arr[keep]
+        pred_arr = pred_arr[keep]
+        logger.info(
+            "predicted_vs_actual: down-sampled {} -> {} rows (cap={}, seed={})",
+            n,
+            _SCATTER_SAMPLE_CAP,
+            _SCATTER_SAMPLE_CAP,
+            _SCATTER_RNG_SEED,
+        )
+
+    fig, axes = _ensure_axes(ax)
+    axes.scatter(pred_arr, true_arr, alpha=0.15, s=4, color=OKABE_ITO[1])
+
+    lo = float(min(true_arr.min(), pred_arr.min()))
+    hi = float(max(true_arr.max(), pred_arr.max()))
+    axes.plot([lo, hi], [lo, hi], color="black", linewidth=0.8, alpha=0.6)
+
+    axes.set_xlabel("Predicted demand (MW)")
+    axes.set_ylabel("Actual demand (MW)")
+    axes.set_title(title)
+    axes.grid(True, alpha=0.3)
+    return fig
+
+
+#: Label text for canonical ACF reference-lag markers.  Keyed by lag in hours
+#: so downstream tests can assert the exact label strings without touching the
+#: helper internals.  Unknown lags fall back to ``"lag (N)"``.
+_ACF_MARKER_LABELS: dict[int, str] = {
+    24: "daily (24)",
+    168: "weekly (168)",
+    336: "fortnightly (336)",
+}
+
+
+def _annotate_acf_markers(
+    ax: matplotlib.axes.Axes,
+    reference_lags: Sequence[int],
+) -> None:
+    """Draw labelled vertical reference markers on an ACF axes.
+
+    Each entry in ``reference_lags`` becomes one :meth:`matplotlib.axes.Axes.axvline`
+    at ``x=lag`` plus one :meth:`matplotlib.axes.Axes.text` label placed
+    upper-inside the line at ``y=0.9 * ax.get_ylim()[1]``.  Markers use
+    ``OKABE_ITO[5]`` (blue) so they sit clearly against the stem-plot black.
+
+    Plan D7 reinforcement (2026-04-20 human mandate): default two markers at
+    lag 24 (daily) and 168 (weekly).  ``reference_lags=()`` disables.
+    """
+    if not reference_lags:
+        return
+    y_top = ax.get_ylim()[1]
+    label_y = 0.9 * y_top
+    for lag in reference_lags:
+        ax.axvline(x=lag, linewidth=1.0, alpha=0.35, color=OKABE_ITO[5])
+        label = _ACF_MARKER_LABELS.get(int(lag), f"lag ({int(lag)})")
+        ax.text(
+            x=lag,
+            y=label_y,
+            s=label,
+            rotation=90,
+            fontsize=10,
+            verticalalignment="top",
+            horizontalalignment="right",
+            color=OKABE_ITO[5],
+        )
 
 
 def acf_residuals(
@@ -268,16 +448,56 @@ def acf_residuals(
 ) -> matplotlib.figure.Figure:
     """ACF of residuals with daily (lag 24) and weekly (lag 168) markers.
 
-    Renders ``statsmodels.graphics.tsaplots.plot_acf`` with ``lags=168``
-    (Stage 6 D7) — enough to show the weekly spike that motivates
-    Stage 7's SARIMAX.  Two labelled vertical reference markers at
-    ``reference_lags`` (default ``(24, 168)``, i.e. daily + weekly) make
-    the periodicity story legible for meetup audiences (D7 reinforcement,
-    2026-04-20 human mandate).
+    Wraps :func:`statsmodels.graphics.tsaplots.plot_acf` with ``lags=168``
+    (Stage 6 D7) — enough to show the weekly spike that motivates Stage 7's
+    SARIMAX.  Two labelled vertical reference markers at ``reference_lags``
+    (default ``(24, 168)`` — daily + weekly) make the periodicity story
+    legible for meetup audiences (D7 reinforcement, 2026-04-20 human
+    mandate).
 
-    Implementation scaffolded in T2; body in T3.
+    Parameters
+    ----------
+    residuals:
+        Signed residual series (real-valued; no NaN).
+    lags:
+        Number of lags to compute; default ``168`` so one full weekly cycle
+        is visible.
+    alpha:
+        Significance level for the confidence band; default ``0.05`` (95%).
+    reference_lags:
+        Lags (in hours) at which to draw labelled vertical markers.  Default
+        ``(24, 168)``.  Pass ``()`` to disable annotation.
+    title:
+        Figure title.
+    ax:
+        Optional existing axes to draw on.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the ACF plot.
     """
-    raise NotImplementedError("acf_residuals body is implemented in Stage 6 T3")
+    fig, axes = _ensure_axes(ax)
+    plot_acf(residuals, lags=lags, alpha=alpha, ax=axes)
+    axes.set_xlabel("Lag (hours)")
+    axes.set_ylabel("Autocorrelation")
+    axes.set_title(title)
+    _annotate_acf_markers(axes, reference_lags)
+    return fig
+
+
+#: British English weekday abbreviations (Monday=0 convention; matches the
+#: Stage 5 calendar-feature ordering).  Load-bearing for the y-axis of
+#: :func:`error_heatmap_hour_weekday`.
+_WEEKDAY_ABBREV_EN_GB: tuple[str, ...] = (
+    "Mon",
+    "Tue",
+    "Wed",
+    "Thu",
+    "Fri",
+    "Sat",
+    "Sun",
+)
 
 
 def error_heatmap_hour_weekday(
@@ -289,9 +509,65 @@ def error_heatmap_hour_weekday(
 ) -> matplotlib.figure.Figure:
     """24 x 7 heatmap of mean signed residual by hour-of-day and weekday.
 
-    Implementation scaffolded in T2; body in T3.
+    Groups ``residuals`` by local-time hour-of-day (columns 0-23) and
+    weekday (rows Mon-Sun) and renders the mean signed residual via
+    ``seaborn.heatmap`` with the diverging ``RdBu_r`` colormap centred at
+    zero.  Red cells are under-forecast (actual > predicted), blue cells
+    are over-forecast.
+
+    Parameters
+    ----------
+    residuals:
+        Signed residual series indexed by a tz-aware ``DatetimeIndex``.
+    display_tz:
+        IANA timezone used for grouping (default: ``"Europe/London"`` —
+        Stage 6 D6).  A tz-naive index raises ``ValueError``.
+    title:
+        Figure title.
+    ax:
+        Optional existing axes to draw on.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the heatmap.
+
+    Raises
+    ------
+    ValueError
+        If ``residuals.index`` is not a tz-aware ``DatetimeIndex``.
     """
-    raise NotImplementedError("error_heatmap_hour_weekday body is implemented in Stage 6 T3")
+    idx = _require_tz_aware_datetime_index(residuals, name="residuals")
+    local_idx = idx.tz_convert(display_tz)
+
+    frame = pd.DataFrame(
+        {
+            "weekday": local_idx.dayofweek,
+            "hour": local_idx.hour,
+            "residual": np.asarray(residuals.values, dtype=np.float64),
+        }
+    )
+    pivot = (
+        frame.groupby(["weekday", "hour"])["residual"]
+        .mean()
+        .unstack("hour")
+        .reindex(index=range(7), columns=range(24))
+    )
+
+    fig, axes = _ensure_axes(ax)
+    sns.heatmap(
+        pivot,
+        cmap=DIVERGING_CMAP,
+        center=0,
+        ax=axes,
+        cbar_kws={"label": "Mean signed residual (MW)"},
+    )
+    axes.set_yticks(np.arange(7) + 0.5)
+    axes.set_yticklabels(_WEEKDAY_ABBREV_EN_GB, rotation=0)
+    axes.set_xlabel("Hour of day (local)")
+    axes.set_ylabel("Weekday")
+    axes.set_title(title)
+    return fig
 
 
 def forecast_overlay(
