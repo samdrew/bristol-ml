@@ -420,7 +420,7 @@ def test_derive_calendar_proximity_christmas_cluster() -> None:
 
 
 def test_derive_calendar_dst_spring_forward() -> None:
-    """DST spring-forward Sunday 2024-03-31: hour 1 is skipped locally (D-7).
+    """DST spring-forward Sunday 2024-03-31: UTC hours are regular; local dates shift (D-7).
 
     Frame: 24 UTC hours on 2024-03-31 (Sunday, last Sunday of March).
     Synthetic bank holiday on 2024-04-01 (following Monday) under both
@@ -430,10 +430,11 @@ def test_derive_calendar_dst_spring_forward() -> None:
     - UTC 00:00 to UTC 22:00 (23 rows) map to local date Sunday 2024-03-31.
     - UTC 23:00 (1 row) maps to local date Monday 2024-04-01 (00:00 BST).
 
-    Assertions (per plan §6 T3, D-7):
+    Assertions (per plan §6 T3, D-7; human mandate 2026-04-20 — hour is UTC):
     - Sunday-local-date rows have is_bank_holiday_ew == 0 (holiday is Monday).
     - Monday-local-date row has is_bank_holiday_ew == 1 (UTC 23:00 = local 00:00 Monday BST).
-    - hour_of_day_01 sums to 0 across all 24 UTC rows (local hour 1 is skipped entirely).
+    - hour_of_day_01 sums to exactly 1 across the 24 UTC rows (UTC timeline is regular —
+      every calendar day has a UTC 01:00 hour, including on spring-forward Sunday).
     - Sunday-local-date rows have day_of_week_6 == 1 (Sunday = column 6 in the one-hot).
 
     Also add a Jan anchor holiday to avoid the D-6 fallback zeroing out the Sunday rows.
@@ -474,10 +475,11 @@ def test_derive_calendar_dst_spring_forward() -> None:
         "Expected is_bank_holiday_ew == 1 on the UTC 23:00 row (local Monday 2024-04-01)"
     )
 
-    # Local hour 1 is skipped on spring-forward day (clocks jump from 01:00 GMT to 02:00 BST).
-    assert derived["hour_of_day_01"].sum() == 0, (
-        "Expected hour_of_day_01 sum == 0 across all 24 UTC rows on spring-forward day "
-        "(local hour 1 is skipped)"
+    # UTC hour 1 is always present — the UTC timeline is regular even on DST-change days.
+    # (Human mandate 2026-04-20: hour_of_day is UTC, not local.)
+    assert derived["hour_of_day_01"].sum() == 1, (
+        "Expected hour_of_day_01 sum == 1 across 24 UTC rows (UTC timeline is regular "
+        "on spring-forward Sunday; hour-of-day is UTC per human mandate 2026-04-20)"
     )
 
     # Sunday is day_of_week_6 in the one-hot (D-4 mapping).

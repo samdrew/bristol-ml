@@ -12,12 +12,13 @@ optional ``WARNING`` line when the D-6 historical-depth fallback fires.
 ## Column catalogue (44 columns total)
 
 1. **``hour_of_day_01`` … ``hour_of_day_23``** (23 cols) — one-hot over
-   the ``Europe/London`` local hour of day.  Hour 0 is the dropped
-   reference category (per plan **D-3**; external research §R4).
-   Local, not UTC: GB demand patterns track the clock humans
-   experience, not UTC; aligning with ``day_of_week`` and ``month``
-   (both local per **D-7**) means all three cyclical encodings move
-   together under DST.
+   the **UTC** hour of day.  Hour 0 is the dropped reference category
+   (per plan **D-3**; external research §R4).  Human mandate
+   2026-04-20: UTC (not local), matching the regular UTC timeline the
+   NESO ingester emits — every calendar day has exactly 24 UTC rows
+   including on DST-change Sundays, so the hour dummies have the same
+   support on every day.  Day-of-week and month still use the
+   ``Europe/London`` local component (both **D-4** / **D-7**).
 2. **``day_of_week_1`` … ``day_of_week_6``** (6 cols) — one-hot over
    the ``Europe/London`` day of week.  **Monday (pandas weekday = 0) is
    the dropped reference category** (plan **D-4** human mandate,
@@ -240,13 +241,14 @@ def derive_calendar(df: pd.DataFrame, holidays_df: pd.DataFrame) -> pd.DataFrame
             )
 
     # --- UTC → Europe/London local components (the D-7 contract) ----------
-    # All cyclical encodings (hour, day-of-week, month) and the holiday
-    # lookup use the Europe/London local component — GB demand follows the
-    # local clock, not UTC, and aligning the three encodings keeps them
-    # consistent across DST transitions.
+    # Hour-of-day uses the UTC hour (human mandate 2026-04-20): every
+    # calendar day has exactly 24 UTC rows and the regular UTC timeline
+    # keeps the hour dummies on a uniform support across DST-change
+    # Sundays.  Day-of-week, month, and the holiday lookup use the
+    # Europe/London local component per D-4 / D-7.
+    utc_hours = timestamps.dt.hour
     local = timestamps.dt.tz_convert("Europe/London")
     local_dates = local.dt.date  # Series[datetime.date]
-    local_hours = local.dt.hour
     local_weekday = local.dt.weekday  # Monday=0..Sunday=6
     local_month = local.dt.month
 
@@ -263,9 +265,9 @@ def derive_calendar(df: pd.DataFrame, holidays_df: pd.DataFrame) -> pd.DataFrame
     # --- Build the 44 columns --------------------------------------------
     derived = df.copy()
 
-    # Hour-of-day one-hot (Europe/London — hour 0 is the dropped reference).
+    # Hour-of-day one-hot (UTC — hour 0 is the dropped reference).
     for h in range(1, 24):
-        derived[f"hour_of_day_{h:02d}"] = (local_hours == h).astype("int8")
+        derived[f"hour_of_day_{h:02d}"] = (utc_hours == h).astype("int8")
 
     # Day-of-week one-hot (Europe/London — Monday = 0 is the dropped reference).
     for d in range(1, 7):
