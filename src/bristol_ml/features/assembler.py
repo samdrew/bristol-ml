@@ -49,12 +49,16 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only imports
     from conf._schemas import AppConfig, FeatureSetConfig
 
 __all__ = [
+    "CALENDAR_OUTPUT_SCHEMA",
+    "CALENDAR_VARIABLE_COLUMNS",
     "DEMAND_COLUMNS",
     "OUTPUT_SCHEMA",
     "WEATHER_VARIABLE_COLUMNS",
     "assemble",
+    "assemble_calendar",
     "build",
     "load",
+    "load_calendar",
 ]
 
 
@@ -98,6 +102,45 @@ OUTPUT_SCHEMA: pa.Schema = pa.schema(
 
 Column order is contractual — downstream code may rely on it. Adding a new
 column is an additive change; renaming or reordering is a breaking one.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 — weather + calendar schema
+# ---------------------------------------------------------------------------
+#
+# ``CALENDAR_VARIABLE_COLUMNS`` is owned by ``features.calendar`` (the
+# derivation module); it is re-exported here so the assembler's public
+# surface carries both schemas without forcing downstream callers to import
+# two submodules for a single feature-table read.
+from bristol_ml.features.calendar import CALENDAR_VARIABLE_COLUMNS  # noqa: E402
+
+CALENDAR_OUTPUT_SCHEMA: pa.Schema = pa.schema(
+    [
+        *OUTPUT_SCHEMA,
+        *CALENDAR_VARIABLE_COLUMNS,
+        ("holidays_retrieved_at_utc", pa.timestamp("us", tz="UTC")),
+    ]
+)
+"""The on-disk parquet schema for a Stage 5 ``weather_calendar`` feature table.
+
+Composition (55 columns total):
+
+- positions 0..9 → ``OUTPUT_SCHEMA.names`` (the 10-column weather-only
+  schema, unchanged — the weather-only frame is a prefix of the calendar
+  frame so downstream code that reads only the weather columns continues
+  to work by column-name selection).
+- positions 10..53 → :data:`CALENDAR_VARIABLE_COLUMNS` (44 ``int8``
+  columns: 23 one-hot hour, 6 one-hot day-of-week, 11 one-hot month, 4
+  holiday flags under plan D-2 / D-5).
+- position 54 → ``holidays_retrieved_at_utc`` (``timestamp[us, tz=UTC]``),
+  the third provenance scalar (plan D-8 continuation — one per upstream
+  ingester; ``neso_retrieved_at_utc`` / ``weather_retrieved_at_utc`` live
+  inside the weather-only prefix at positions 8 / 9).
+
+Column order is contractual; additions are additive (append), renames or
+reorders are breaking.  See plan T4 for the structural invariant pinned by
+``test_calendar_output_schema_is_weather_schema_plus_calendar_plus_provenance``.
 """
 
 
@@ -441,6 +484,47 @@ def load(path: Path) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# load_calendar — schema-validated read for the Stage 5 weather_calendar set
+# ---------------------------------------------------------------------------
+
+
+def load_calendar(path: Path) -> pd.DataFrame:
+    """Read a ``weather_calendar`` feature-table parquet; assert ``CALENDAR_OUTPUT_SCHEMA``.
+
+    Mirrors :func:`load` but on the 55-column Stage 5 schema. Rejects both
+    missing and extra columns: the two feature-table contracts are exact,
+    not permissive — a parquet written under :data:`OUTPUT_SCHEMA`
+    (weather-only) will be rejected here because its calendar columns are
+    absent, and vice versa for a calendar parquet passed to :func:`load`.
+
+    The schema-validated returns carry calendar columns as ``int8`` and
+    the ``holidays_retrieved_at_utc`` column as tz-aware UTC.
+    """
+    table = pq.read_table(path)
+    actual = table.schema
+
+    for field in CALENDAR_OUTPUT_SCHEMA:
+        if field.name not in actual.names:
+            raise ValueError(f"Cached parquet at {path} is missing required column {field.name!r}")
+        actual_field = actual.field(field.name)
+        if actual_field.type != field.type:
+            raise ValueError(
+                f"Column {field.name!r} in {path} has type {actual_field.type}; "
+                f"expected {field.type}"
+            )
+
+    expected_names = {field.name for field in CALENDAR_OUTPUT_SCHEMA}
+    extra = [name for name in actual.names if name not in expected_names]
+    if extra:
+        raise ValueError(
+            f"Cached parquet at {path} has unexpected column(s) {sorted(extra)}; "
+            f"the weather_calendar feature-table schema is exact (Plan AC-3 / AC-7)."
+        )
+
+    return table.to_pandas()
+
+
+# ---------------------------------------------------------------------------
 # assemble — one-shot orchestrator used by the CLI (§6 Task T4)
 # ---------------------------------------------------------------------------
 
@@ -511,6 +595,153 @@ def assemble(cfg: AppConfig, cache: str = "offline") -> Path:
     logger.info(
         "Feature-assembler cache written: {} rows -> {}",
         len(feature_frame),
+        out_path,
+    )
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# assemble_calendar — orchestrator for the Stage 5 weather_calendar set
+# ---------------------------------------------------------------------------
+
+
+def assemble_calendar(cfg: AppConfig, *, cache: str | object = "offline") -> Path:
+    """End-to-end: build weather-only frame, derive calendar, persist.
+
+    Stage 5 T4 orchestrator — composes Stage 3's weather-only join (demand
+    + weather + provenance scalars) with Stage 5's calendar derivation
+    (``features.calendar.derive_calendar``) and the bank-holidays ingester
+    (``ingestion.holidays``), then writes the 55-column
+    :data:`CALENDAR_OUTPUT_SCHEMA` parquet to
+    ``cfg.features.weather_calendar.cache_dir / cache_filename``.
+
+    Parameters
+    ----------
+    cfg
+        Resolved :class:`AppConfig`. ``cfg.features.weather_calendar`` must be
+        populated (the Hydra group-swap arranges this when the user invokes
+        ``features=weather_calendar``); ``cfg.ingestion.neso``,
+        ``cfg.ingestion.weather`` and ``cfg.ingestion.holidays`` must all
+        be populated.
+    cache
+        Cache policy passed through to the three ingesters. Accepts either a
+        :class:`CachePolicy` value or one of the strings ``"auto"``,
+        ``"refresh"``, ``"offline"``. Default is ``"offline"`` — the CI-safe
+        choice.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path the Stage 5 feature table was written to.
+
+    Notes
+    -----
+    **Divergence from the plan's literal wording** (logged as a Phase 2
+    finding in ``docs/plans/active/05-calendar-features.md`` §"Implementation
+    findings"): the plan said this function should "call ``assemble()`` with
+    the weather-only config". Under the Stage 5 T1 Hydra group-swap refactor
+    only one of ``cfg.features.weather_only`` / ``cfg.features.weather_calendar``
+    is populated per run — so when the user invokes ``features=weather_calendar``
+    the ``weather_only`` attribute is ``None`` and ``assemble()``'s own guard
+    would raise before the calendar layer could compose on top. This
+    function instead duplicates the NESO → resample → weather → national-
+    aggregate → :func:`build` composition inline, passing
+    ``cfg.features.weather_calendar`` as the ``FeatureSetConfig`` to
+    :func:`build`. :func:`build` itself is feature-set-agnostic (reads only
+    ``config.forward_fill_hours`` and ``config.name``) so the Stage 3
+    contract is preserved. A future refactor could factor a private
+    ``_compose_weather_only_frame`` helper and share it between both
+    orchestrators.
+    """
+    from bristol_ml.features.calendar import derive_calendar
+    from bristol_ml.features.weather import national_aggregate
+    from bristol_ml.ingestion import holidays as _holidays_ing
+    from bristol_ml.ingestion import neso, weather
+    from bristol_ml.ingestion._common import CachePolicy, _atomic_write, _cache_path
+
+    if cfg.features.weather_calendar is None:
+        raise ValueError(
+            "No weather_calendar feature-set config resolved. Invoke with "
+            "`features=weather_calendar` (Hydra group override) or ensure "
+            "`conf/features/weather_calendar.yaml` is selected in the defaults list."
+        )
+    if cfg.ingestion.neso is None or cfg.ingestion.weather is None:
+        raise ValueError(
+            "Both `ingestion.neso` and `ingestion.weather` must be resolved before "
+            "the calendar assembler runs."
+        )
+    if cfg.ingestion.holidays is None:
+        raise ValueError(
+            "`ingestion.holidays` must be resolved before the calendar assembler "
+            "runs. Ensure `- ingestion/holidays@ingestion.holidays` is in the "
+            "`conf/config.yaml` defaults list."
+        )
+
+    fset = cfg.features.weather_calendar
+    policy = cache if isinstance(cache, CachePolicy) else CachePolicy(cache)
+
+    # --- Weather-only composition (duplicates assemble() — see Notes above) ---
+    neso_path = neso.fetch(cfg.ingestion.neso, cache=policy)
+    neso_df = neso.load(neso_path)
+    demand_hourly = _resample_demand_hourly(
+        neso_df,
+        agg=fset.demand_aggregation,
+    )
+
+    weather_path = weather.fetch(cfg.ingestion.weather, cache=policy)
+    weather_df = weather.load(weather_path)
+    weights = {s.name: s.weight for s in cfg.ingestion.weather.stations}
+    weather_national = national_aggregate(weather_df, weights)
+
+    neso_stamp = (
+        pd.Timestamp(neso_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in neso_df.columns and len(neso_df)
+        else None
+    )
+    weather_stamp = (
+        pd.Timestamp(weather_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in weather_df.columns and len(weather_df)
+        else None
+    )
+
+    weather_frame = build(
+        demand_hourly,
+        weather_national,
+        fset,
+        neso_retrieved_at_utc=neso_stamp,
+        weather_retrieved_at_utc=weather_stamp,
+    )
+
+    # --- Calendar derivation + holidays provenance scalar ---
+    holidays_path = _holidays_ing.fetch(cfg.ingestion.holidays, cache=policy)
+    holidays_df = _holidays_ing.load(holidays_path)
+    calendar_frame = derive_calendar(weather_frame, holidays_df)
+
+    holidays_stamp = (
+        pd.Timestamp(holidays_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in holidays_df.columns and len(holidays_df)
+        else pd.Timestamp.now("UTC").floor("us")
+    )
+    calendar_frame["holidays_retrieved_at_utc"] = holidays_stamp
+
+    # --- Project to CALENDAR_OUTPUT_SCHEMA column order + write ---
+    column_order = [field.name for field in CALENDAR_OUTPUT_SCHEMA]
+    missing = [c for c in column_order if c not in calendar_frame.columns]
+    if missing:
+        raise ValueError(
+            f"assemble_calendar: derived frame missing expected columns {missing}. "
+            "derive_calendar / build contract has regressed."
+        )
+    result = calendar_frame[column_order].copy()
+
+    table = pa.Table.from_pandas(result, preserve_index=False).cast(
+        CALENDAR_OUTPUT_SCHEMA, safe=True
+    )
+    out_path = _cache_path(fset)
+    _atomic_write(table, out_path)
+    logger.info(
+        "Feature-assembler (calendar) cache written: {} rows -> {}",
+        len(result),
         out_path,
     )
     return out_path
