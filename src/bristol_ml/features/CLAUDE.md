@@ -6,7 +6,7 @@ introduces the layer one stage earlier than DESIGN §9 implies, because
 Stage 2 needs a weighted-mean function and the notebook cannot reimplement
 it (§2.1.8 — notebooks are thin).
 
-## Current surface (Stage 3)
+## Current surface (Stage 5)
 
 ### `weather.national_aggregate(df, weights)` (Stage 2)
 
@@ -16,7 +16,7 @@ signal using caller-supplied weights. Honours acceptance criterion 3
 criterion 6 (equal weights on identical inputs yield the identity) —
 the renormalised weighted mean of a constant is the constant.
 
-### `assembler` (Stage 3)
+### `assembler` (Stage 3 + Stage 5)
 
 Public surface (matches `assembler.__all__`):
 
@@ -25,27 +25,76 @@ Public surface (matches `assembler.__all__`):
 - `WEATHER_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]` — the five
   weather aggregate columns and their arrow types. `cloud_cover` is widened
   from `int8` (long-form weather schema) to `float32` here.
-- `OUTPUT_SCHEMA: pa.Schema` — the declared parquet schema. Column order,
-  arrow dtypes and timezone metadata are contractual; downstream models
-  may rely on all three.
+- `CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]` — the 44
+  calendar columns (23 hour-of-day + 6 day-of-week + 11 month + 4 holiday
+  flags; all `int8`). Owned by `features.calendar`; re-exported here so the
+  assembler's public surface covers both schemas. See §"Stage 5 notes".
+- `OUTPUT_SCHEMA: pa.Schema` — the declared parquet schema for the
+  `weather_only` feature set (10 columns). Column order, arrow dtypes and
+  timezone metadata are contractual; downstream models may rely on all
+  three.
+- `CALENDAR_OUTPUT_SCHEMA: pa.Schema` — the declared parquet schema for
+  the `weather_calendar` feature set (55 columns). Structured as
+  `OUTPUT_SCHEMA.names` (10) + `CALENDAR_VARIABLE_COLUMNS` (44) +
+  `holidays_retrieved_at_utc` (1). `OUTPUT_SCHEMA.names` is an exact
+  prefix of `CALENDAR_OUTPUT_SCHEMA.names[:10]` — downstream code that
+  reads only the weather columns continues to work on the calendar frame
+  by column-name selection.
 - `build(demand_hourly, weather_national, config, *, neso_retrieved_at_utc=None,
   weather_retrieved_at_utc=None) -> pd.DataFrame` — inner-join demand with
   national weather, forward-fill weather up to
   `config.forward_fill_hours`, drop remaining NaN rows, project to
   `OUTPUT_SCHEMA` column order. Emits a single structured INFO log line
-  per call (D5) with counts of rows dropped/filled at each step.
-- `load(path: Path) -> pd.DataFrame` — schema-validated read; refuses
-  missing or extra columns. Mirrors `neso.load` / `weather.load`.
+  per call (D5) with counts of rows dropped/filled at each step. Feature-
+  set-agnostic: reads only `config.forward_fill_hours` and `config.name`,
+  so both `weather_only` and `weather_calendar` configs compose.
+- `load(path: Path) -> pd.DataFrame` — schema-validated read for
+  `OUTPUT_SCHEMA`; refuses missing or extra columns. Mirrors `neso.load` /
+  `weather.load`.
+- `load_calendar(path: Path) -> pd.DataFrame` — schema-validated read for
+  `CALENDAR_OUTPUT_SCHEMA`. Accepts 55 columns exactly; rejects both
+  missing and extra columns. A `weather_only` parquet is rejected here
+  because its calendar columns are absent, and vice versa.
 - `assemble(cfg: AppConfig, cache="offline") -> Path` — one-shot
   orchestrator that ties `neso.fetch/load → _resample_demand_hourly →
   weather.fetch/load → national_aggregate → build → _atomic_write`. Used
-  by the CLI.
+  by the CLI. Requires `cfg.features.weather_only` to be populated.
+- `assemble_calendar(cfg: AppConfig, *, cache="offline") -> Path` — Stage 5
+  orchestrator. Composes the weather-only join (duplicating `assemble()`'s
+  NESO/weather/resample/`build` sequence inline — see §"Stage 5 notes"),
+  then calls `holidays.fetch/load → derive_calendar`, appends the
+  `holidays_retrieved_at_utc` scalar, casts to `CALENDAR_OUTPUT_SCHEMA`,
+  and persists via `_atomic_write`. Requires `cfg.features.weather_calendar`,
+  `cfg.ingestion.neso`, `cfg.ingestion.weather`, and `cfg.ingestion.holidays`
+  all to be populated. Accepts either a `CachePolicy` value or one of the
+  three policy strings.
 - `_resample_demand_hourly(df, agg: Literal["mean", "max"] = "mean") ->
   pd.DataFrame` — floor `timestamp_utc` to the hour and aggregate
   `nd_mw` / `tsd_mw`. Module-private; exposed for testing and for the
-  `assemble()` orchestrator. On clock-change days the output is
-  23 rows (spring) or 25 rows (autumn) — the UTC timeline is regular;
-  the NESO ingester has already unwound DST algebra.
+  `assemble()` / `assemble_calendar()` orchestrators. On clock-change days
+  the output is 23 rows (spring) or 25 rows (autumn) — the UTC timeline
+  is regular; the NESO ingester has already unwound DST algebra.
+
+### `calendar` (Stage 5)
+
+Pure derivation of the 44 calendar columns for the `weather_calendar`
+feature set. Public surface:
+
+- `derive_calendar(df, holidays_df) -> pd.DataFrame` — appends the 44
+  `CALENDAR_VARIABLE_COLUMNS` (`int8`) to an hourly UTC frame. Reads
+  `Europe/London` local components for day-of-week / month / holiday
+  lookup (plan D-4 / D-7) and the **UTC hour** for hour-of-day dummies
+  (human mandate 2026-04-20 — every calendar day has exactly 24 UTC rows,
+  including DST-change Sundays). Emits a single structured INFO log line
+  per call, plus a single WARNING when pre-window rows are zero-filled
+  (plan D-6). No I/O, no global state.
+- `CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]` —
+  ordered constant naming all 44 calendar columns and their arrow types.
+  Assembler's `CALENDAR_OUTPUT_SCHEMA` and downstream
+  `LinearConfig.feature_columns` read from this single source of truth.
+- `is_weekend` is **deliberately not emitted** (external research §R5 —
+  perfect collinearity with the day-of-week one-hot). A module-level
+  assertion plus a runtime guard in `derive_calendar` pin the invariant.
 
 ## Invariants (load-bearing for Stage 4 onwards)
 
@@ -67,18 +116,46 @@ The assembler **guarantees** that every `build()` output:
 If a change breaks any of these, fix the test only if the invariant itself
 is wrong — do not weaken the test to make it pass.
 
-## Expected additions (Stage 5)
+## Stage 5 notes
 
-- A second feature set `weather_calendar` alongside `weather_only` so the
-  with/without comparison is a config swap. The assembler grows a calendar
-  join step; the join itself will live beside `build()`.
+**Two schemas, one module.** The assembler exposes both `OUTPUT_SCHEMA`
+(weather-only, 10 cols) and `CALENDAR_OUTPUT_SCHEMA` (weather + calendar,
+55 cols). The weather-only schema is preserved as an exact prefix of the
+calendar schema (positions 0..9), so downstream code that reads only the
+weather columns composes with either frame by column-name selection.
+
+**Hydra group-swap mutual exclusivity.** The Stage 5 T1 refactor flipped
+`- features/weather_only@features.weather_only` (package-override form) to
+`- features: weather_only` (group-swap form) in `conf/config.yaml` defaults,
+so `features=weather_calendar` at the CLI swaps which file loads. At
+runtime exactly one of `cfg.features.weather_only` /
+`cfg.features.weather_calendar` is populated — the other is `None`. This
+drives two behavioural contracts the lead/agents should keep in mind:
+
+- `assemble()` requires `cfg.features.weather_only`; `assemble_calendar()`
+  requires `cfg.features.weather_calendar`. Calling either on the other's
+  config raises with a message naming the missing field and the Hydra
+  override to use.
+- `assemble_calendar()` does **not** delegate to `assemble()` — it
+  duplicates the NESO/weather/resample/`build` composition inline. The
+  plan (§6 Task T4) originally described delegation, but mutual
+  exclusivity makes that impossible. The duplication is acknowledged;
+  factoring a shared `_compose_weather_only_frame(cfg, fset, *, cache)`
+  helper is a candidate future refactor and is noted in the Stage 5
+  retrospective.
+
+**Calendar-column ownership.** `CALENDAR_VARIABLE_COLUMNS` is owned by
+`features.calendar` (the derivation module); `assembler.py` imports and
+re-exports it so the 55-column `CALENDAR_OUTPUT_SCHEMA` has a single
+source of truth for the 44 calendar column names / dtypes.
 
 ## Running standalone
 
-    python -m bristol_ml.features.weather [--head N]
+    python -m bristol_ml.features.weather   [--head N]
+    python -m bristol_ml.features.calendar  [--rows N]
     python -m bristol_ml.features.assembler [--cache {auto,refresh,offline}]
 
-Both CLIs honour Hydra overrides in the trailing positional slot.
+All three CLIs honour Hydra overrides in the trailing positional slot.
 
 ## Extensibility
 
