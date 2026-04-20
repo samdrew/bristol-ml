@@ -338,7 +338,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 ### Task T6 — Demo notebook
 *(Depends on T1–T5.)*
 
-- [ ] Create `notebooks/05_calendar_features.ipynb`:
+- [x] Create `notebooks/05_calendar_features.ipynb`:
   - **Cell 1 (md):** stage goal; note that the same `LinearModel` class + same `SplitterConfig` are used for both runs; the only difference is the feature set.
   - **Cell 2 (code):** `load_config()` with the notebook D7 / D8 override — `evaluation.rolling_origin.min_train_periods=720`, `evaluation.rolling_origin.step=168`; `assembler.load()` and `assembler.load_calendar()` on warm caches; print the two schemas' column counts.
   - **Cell 3 (code):** `weather_only` run — `LinearModel(LinearConfig(feature_columns=<weather_names>))`; `harness.evaluate(...)`; display the per-fold metric table. Print `results.summary()` as the baseline coefficient print-out.
@@ -347,7 +347,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
   - **Cell 6 (code):** three-way benchmark — `compare_on_holdout({"linear_weather_only": ..., "linear_weather_calendar": ...}, ...)` (if the NESO forecast cache is warm); otherwise markdown skip.
   - **Cell 7 (code):** residual-ripple visualisation (AC-5). Select a shared test week (the last week of the final fold); compute residuals for both models on that week; plot both residual series on shared x-axis, one colour per model; legend distinguishes the two. The weekly oscillation should be visible in `weather_only` and largely absent in `weather_calendar`.
   - **Cell 8 (md):** closing narrative — what calendar features added (MAPE improvement quantified); what they did not (Stage 6 interactions teasing; REMIT's role for one-off events; lag features at Stage 7).
-- [ ] Smoke check: `uv run jupyter nbconvert --to notebook --execute notebooks/05_calendar_features.ipynb --output /tmp/05_test_run.ipynb` finishes **under 120 s** with warm caches (per **D8**; AC-12).
+- [x] Smoke check: `uv run jupyter nbconvert --to notebook --execute notebooks/05_calendar_features.ipynb --output /tmp/05_test_run.ipynb` finishes **under 120 s** with warm caches (per **D8**; AC-12).
 - **Acceptance:** AC-4, AC-5, AC-12.
 - **No new tests.** nbconvert smoke is the gate (as in Stage 3 T5, Stage 4 T9).
 
