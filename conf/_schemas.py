@@ -343,12 +343,64 @@ class NesoBenchmarkConfig(BaseModel):
         return self
 
 
+class PlotsConfig(BaseModel):
+    """Configuration for the Stage 6 diagnostic-plot helper library.
+
+    Settings consumed by ``bristol_ml.evaluation.plots``.  Every field matches
+    the module-level default applied at import time; overriding a field here
+    propagates through ``matplotlib.rcParams`` when ``plots`` is imported with
+    a non-default config (the notebook Cell 11+ appendix reads from this group
+    so facilitators can tweak figsize/DPI without touching Python code).
+
+    **Field notes.**
+
+    - ``figsize`` defaults to ``(12.0, 8.0)`` — the projector-legible default
+      mandated by the Stage 6 plan D5 amendment (2026-04-20 human mandate).
+      Wider than matplotlib's 6.4x4.8 baseline for meetup legibility (AC-2);
+      taller than 10x6 so a 2x2 grid in the notebook does not squash.
+    - ``dpi`` defaults to 110 — a middle ground between the 100-dpi default
+      (blurry on HiDPI) and 150-dpi (PNG bloat on github.com).
+    - ``display_tz`` defaults to ``"Europe/London"`` per D6.  T3 includes DST
+      verification gates (spring-forward gap, fall-back duplicate hour); if
+      those fail at implementation time the default swaps to ``"UTC"`` and the
+      regression is documented in the Stage 6 retro.
+    - ``acf_default_lags`` defaults to 168 per D7 — enough lag to cover both
+      the daily (lag 24) and weekly (lag 168) periodicity markers annotated on
+      the ACF plot.
+
+    The palette (Okabe-Ito qualitative, ``cividis`` sequential, ``RdBu_r``
+    diverging) is *not* configurable here — it lives as module constants in
+    ``plots.py`` because changing it silently breaks colourblind-safety
+    guarantees (D2).  Facilitators who want a bespoke palette override
+    ``plt.rcParams`` directly in a notebook cell.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # D5 (human mandate 2026-04-20): projector-friendly default, not 10x6.
+    figsize: tuple[float, float] = (12.0, 8.0)
+    # D5: matches the ``figure.dpi`` rcParam applied at import time.
+    dpi: int = Field(default=110, ge=50, le=400)
+    # D6: gated by the three DST verification tests in T3. ``"UTC"`` is the
+    # documented fallback if the gates fail.
+    display_tz: str = Field(default="Europe/London")
+    # D7: 168 hourly lags = one full week; covers daily (24) and weekly (168)
+    # reference markers on the ACF plot.
+    acf_default_lags: int = Field(default=168, ge=1)
+
+
 class EvaluationGroup(BaseModel):
     """Container for evaluation-side configs.
 
     Each field is optional so pre-Stage-3 configs still validate.  Stage 3
     shipped ``rolling_origin``; Stage 4 adds ``metrics`` (named point-forecast
-    metrics) and ``benchmark`` (three-way NESO comparison).
+    metrics) and ``benchmark`` (three-way NESO comparison); Stage 6 adds
+    ``plots`` (diagnostic-plot defaults).
+
+    ``plots`` is non-optional with a ``default_factory=PlotsConfig`` so that
+    pre-Stage-6 configs (which lack an ``evaluation.plots`` section) still
+    validate and downstream consumers always see a populated ``PlotsConfig``
+    with the documented defaults.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -356,6 +408,10 @@ class EvaluationGroup(BaseModel):
     rolling_origin: SplitterConfig | None = None
     metrics: MetricsConfig | None = None
     benchmark: NesoBenchmarkConfig | None = None
+    # Stage 6 D5: non-optional with Pydantic-populated defaults so construction
+    # without a Hydra file (e.g. programmatic ``EvaluationGroup()``) yields a
+    # ready-to-use ``PlotsConfig`` instance rather than ``None``.
+    plots: PlotsConfig = Field(default_factory=PlotsConfig)
 
 
 class NaiveConfig(BaseModel):

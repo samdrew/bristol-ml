@@ -21,6 +21,12 @@ dependencies = [
     "loguru>=0.7,<1",
     "statsmodels>=0.14,<1",
     "joblib>=1.4,<2",
+    # Stage 6 (D3): matplotlib promoted from dev to runtime so
+    # ``python -m bristol_ml.evaluation.plots --help`` works on non-dev installs
+    # per AC-10 / DESIGN §2.1.1. ``seaborn`` added alongside for the Stage 6
+    # heatmap helper and the ``colorblind`` palette utilities (D1).
+    "matplotlib>=3.8,<4",
+    "seaborn>=0.13,<1",
 ]
 
 [dependency-groups]
@@ -32,7 +38,6 @@ dev = [
     "vcrpy>=6,<8",
     "jupyter>=1,<2",
     "nbconvert>=7,<8",
-    "matplotlib>=3.8,<4",
 ]
 
 [tool.hatch.build.targets.wheel]
