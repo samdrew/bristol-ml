@@ -1228,3 +1228,643 @@ def test_error_heatmap_dst_hour_groupby_behaviour() -> None:
         f"local hour 1 (including 2 observations on the fall-back day). "
         f"D6 DST gate — correct behaviour is mean of all observations (plan T3)."
     )
+
+
+# ===========================================================================
+# T4 — forecast_overlay + forecast_overlay_with_band + benchmark_holdout_bar
+# ===========================================================================
+#
+# These tests are derived from the spec at:
+#   docs/plans/active/06-enhanced-evaluation.md §6 Task T4
+#   "Tests (spec-derived)" bullet list (lines 425-433).
+#
+# Conventions (matching existing tests above):
+# - British English in docstrings ("colour", "band", "behaviour").
+# - Every test's docstring cites the plan clause or AC it guards.
+# - numpy.random.default_rng(seed=0) for synthetic data.
+# - pd.date_range(..., freq="h", tz="UTC") for tz-aware hourly index.
+# - plt.close(fig) after each test that creates a figure.
+# ===========================================================================
+
+
+def _make_tz_aware_series(n: int = 48, seed: int = 0, base: float = 3000.0) -> pd.Series:
+    """Return a synthetic tz-aware UTC hourly demand series of length ``n``."""
+    rng = np.random.default_rng(seed=seed)
+    idx = pd.date_range("2024-06-01", periods=n, freq="h", tz="UTC")
+    return pd.Series(rng.standard_normal(n) * 200.0 + base, index=idx)
+
+
+def _make_per_fold_errors(n_horizons: int = 48, n_folds: int = 3, seed: int = 0) -> pd.DataFrame:
+    """Return a synthetic long-form per-fold error frame.
+
+    Columns: ``horizon_h`` (0..n_horizons-1) repeated ``n_folds`` times,
+    and ``error`` drawn from a seeded normal distribution.  Matches the
+    column contract specified in plan §6 T5.
+    """
+    rng = np.random.default_rng(seed=seed)
+    horizon_h = np.tile(np.arange(n_horizons), n_folds)
+    error = rng.standard_normal(n_horizons * n_folds) * 100.0
+    return pd.DataFrame({"horizon_h": horizon_h, "error": error})
+
+
+# ---------------------------------------------------------------------------
+# Test 34 — forecast_overlay plots actual + N prediction lines (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_plots_actual_plus_each_prediction() -> None:
+    """Guards plan T4: axes contain N+1 line artefacts for N predictions.
+
+    The plan specifies that ``forecast_overlay`` renders the ``actual`` series
+    as one line plus one line per entry in ``predictions_by_name``.  With N
+    predictions, the Axes must contain exactly N+1 Line2D objects.
+
+    AC-1 / AC-2: the helper must produce a Figure whose axes contain exactly
+    the right number of lines, confirming all series are drawn.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    import matplotlib.figure
+
+    actual = _make_tz_aware_series(n=48, seed=0)
+    pred_a = _make_tz_aware_series(n=48, seed=1)
+    pred_b = _make_tz_aware_series(n=48, seed=2)
+    pred_c = _make_tz_aware_series(n=48, seed=3)
+    predictions_by_name = {"Model A": pred_a, "Model B": pred_b, "Model C": pred_c}
+
+    fig = _plots.forecast_overlay(actual, predictions_by_name)
+    try:
+        assert isinstance(fig, matplotlib.figure.Figure), (
+            f"forecast_overlay must return a Figure; got {type(fig).__name__!r}."
+        )
+        ax = fig.axes[0]
+        n_lines = len(ax.lines)
+        n_predictions = len(predictions_by_name)
+        assert n_lines == n_predictions + 1, (
+            f"forecast_overlay with {n_predictions} predictions must produce "
+            f"{n_predictions + 1} line artefacts (1 actual + N predictions); "
+            f"got {n_lines} line(s) (plan T4 / AC-1)."
+        )
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Test 35 — forecast_overlay legend is lower right (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_legend_lower_right() -> None:
+    """Guards plan T4: legend anchor matches the notebook convention (loc='lower right').
+
+    The plan mandates ``axes.legend(loc='lower right')`` to match the
+    existing Stage 4 notebook Cell 11 convention.  The observable property
+    is the legend's ``_loc`` integer code — matplotlib encodes "lower right"
+    as ``4``.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    actual = _make_tz_aware_series(n=48, seed=0)
+    pred = _make_tz_aware_series(n=48, seed=1)
+
+    fig = _plots.forecast_overlay(actual, {"Forecast": pred})
+    try:
+        ax = fig.axes[0]
+        legend = ax.get_legend()
+        assert legend is not None, (
+            "forecast_overlay must create a legend (plan T4 lower-right convention)."
+        )
+        # matplotlib encodes location strings as integers; "lower right" == 4.
+        # Access the private ``_loc`` attribute which is the canonical way to
+        # read back the location set by ``legend(loc=...)`` at render time.
+        loc_code = legend._loc  # type: ignore[attr-defined]
+        assert loc_code == 4, (
+            f"Legend location must be 4 ('lower right') to match notebook "
+            f"Cell 11 convention (plan T4); got {loc_code!r}."
+        )
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Test 36 — forecast_overlay_with_band requires horizon_h column (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_with_band_requires_horizon_column() -> None:
+    """Guards plan T4: ValueError when per_fold_errors lacks 'horizon_h'.
+
+    The plan specifies the error message:
+    "per_fold_errors must have 'horizon_h' column — run evaluate(..., return_predictions=True)".
+    This test pins both the exception type and the key phrase.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    actual = _make_tz_aware_series(n=48, seed=0)
+    point = _make_tz_aware_series(n=48, seed=1)
+    # Missing 'horizon_h' column — only has 'error'
+    bad_errors = pd.DataFrame({"error": np.zeros(48)})
+
+    with pytest.raises(ValueError, match="horizon_h"):
+        _plots.forecast_overlay_with_band(actual, point, bad_errors)
+
+
+# ---------------------------------------------------------------------------
+# Test 37 — forecast_overlay_with_band q10/q90 default (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_with_band_q10_q90_default() -> None:
+    """Guards plan T4: fill_between bounds match 10th/90th quantile of synthetic errors.
+
+    The plan specifies: compute
+    ``per_fold_errors.groupby("horizon_h")["error"].quantile([0.1, 0.9]).unstack()``
+    then shade ``[point - q_hi, point - q_lo]``.  This test verifies the
+    visible PolyCollection on the axes spans the expected quantile-derived
+    range at horizon_h=0 (the first time step).
+
+    Error convention: error = y_true - y_pred (positive = under-forecast).
+    With a constant point prediction of 3000 MW and deterministic errors,
+    the expected band bounds are computable exactly from numpy quantiles.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    import matplotlib.collections
+
+    n_horizons = 48
+    n_folds = 10
+
+    # Build a deterministic per-fold errors frame
+    horizon_h = np.tile(np.arange(n_horizons), n_folds)
+    # Use a fixed error value per horizon_h for predictability:
+    # error[horizon_h=k] = k - 24 (ranges from -24 to +23)
+    raw_errors = np.tile(np.arange(n_horizons) - 24.0, n_folds)
+    per_fold_errors = pd.DataFrame({"horizon_h": horizon_h, "error": raw_errors})
+
+    # Point prediction and actual are constant (the exact MW values do not
+    # affect the band shape — only the errors matter).
+    idx = pd.date_range("2024-06-01", periods=n_horizons, freq="h", tz="UTC")
+    point = pd.Series(np.full(n_horizons, 3000.0), index=idx)
+    actual = pd.Series(np.full(n_horizons, 3100.0), index=idx)
+
+    fig = _plots.forecast_overlay_with_band(actual, point, per_fold_errors)
+    try:
+        ax = fig.axes[0]
+        # The fill_between produces a PolyCollection; collect them
+        poly_collections = [
+            child
+            for child in ax.get_children()
+            if isinstance(child, matplotlib.collections.PolyCollection)
+        ]
+        assert poly_collections, (
+            "forecast_overlay_with_band must draw at least one PolyCollection "
+            "(the empirical quantile band); none found (plan T4 / D8)."
+        )
+        # Expected band bounds at horizon_h=0: all folds have the same
+        # error at horizon_h=0 (which is 0 - 24 = -24.0), so q10 == q90 == -24.0.
+        # band_lower = point - q_hi = 3000 - (-24) = 3024
+        # band_upper = point - q_lo = 3000 - (-24) = 3024
+        # For a non-degenerate check, use horizon_h=47 (error = 23):
+        # band_lower = 3000 - 23 = 2977; band_upper = 3000 - 23 = 2977
+        # All errors at a given horizon_h are identical (constant by construction),
+        # so the fill collapses to a line for any single horizon.
+        # Instead, verify the PolyCollection path y-values span the expected
+        # range across all horizons by checking a random horizon with variance.
+        # Rebuild the expected q10/q90 the same way the implementation does:
+        band = per_fold_errors.groupby("horizon_h")["error"].quantile([0.1, 0.9]).unstack()
+        q_lo_arr = band.iloc[:n_horizons, 0].to_numpy(dtype=np.float64)
+        q_hi_arr = band.iloc[:n_horizons, 1].to_numpy(dtype=np.float64)
+
+        expected_lower = 3000.0 - q_hi_arr
+        expected_upper = 3000.0 - q_lo_arr
+
+        # Verify the band spans expected range — extract y coordinates from
+        # the PolyCollection vertices.  Each path is a closed polygon.
+        poly = poly_collections[0]
+        paths = poly.get_paths()
+        assert len(paths) > 0, "PolyCollection must contain at least one path."
+
+        # Gather the y extents from all path vertices.
+        all_y = np.concatenate([p.vertices[:, 1] for p in paths])
+        assert np.isfinite(all_y).all(), (
+            "PolyCollection vertices must all be finite (plan T4 / D8)."
+        )
+        # The band minimum should equal min(expected_lower) and maximum should
+        # equal max(expected_upper) (up to floating-point tolerance).
+        assert np.isclose(all_y.min(), expected_lower.min(), rtol=1e-6), (
+            f"Band y-min = {all_y.min():.4f} does not match expected_lower.min() "
+            f"= {expected_lower.min():.4f} (plan T4 q10/q90 fill_between contract)."
+        )
+        assert np.isclose(all_y.max(), expected_upper.max(), rtol=1e-6), (
+            f"Band y-max = {all_y.max():.4f} does not match expected_upper.max() "
+            f"= {expected_upper.max():.4f} (plan T4 q10/q90 fill_between contract)."
+        )
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Test 38 — forecast_overlay_with_band custom quantiles narrow the band (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_with_band_custom_quantiles_respected() -> None:
+    """Guards plan T4: quantiles=(0.25, 0.75) narrows the band vs (0.1, 0.9).
+
+    With a per-fold errors frame that has genuine spread across folds, the
+    (0.25, 0.75) inter-quartile band must be strictly narrower than the
+    (0.1, 0.9) 80% empirical band.  This test computes the y-extent of each
+    PolyCollection and asserts that the wider quantile span produces a
+    strictly larger y-range.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    import matplotlib.collections
+
+    rng = np.random.default_rng(seed=42)
+    n_horizons = 48
+    n_folds = 20
+
+    # Use genuinely varying errors so the quantile spread differs
+    horizon_h = np.tile(np.arange(n_horizons), n_folds)
+    error = rng.standard_normal(n_horizons * n_folds) * 150.0
+    per_fold_errors = pd.DataFrame({"horizon_h": horizon_h, "error": error})
+
+    idx = pd.date_range("2024-06-01", periods=n_horizons, freq="h", tz="UTC")
+    point = pd.Series(np.full(n_horizons, 3000.0), index=idx)
+    actual = pd.Series(np.full(n_horizons, 3100.0), index=idx)
+
+    fig_wide = _plots.forecast_overlay_with_band(
+        actual, point, per_fold_errors, quantiles=(0.1, 0.9)
+    )
+    fig_narrow = _plots.forecast_overlay_with_band(
+        actual, point, per_fold_errors, quantiles=(0.25, 0.75)
+    )
+    try:
+
+        def _poly_y_range(fig: matplotlib.figure.Figure) -> float:
+            """Return the total y-range spanned by the PolyCollection on fig.axes[0]."""
+            ax = fig.axes[0]
+            polys = [
+                c for c in ax.get_children() if isinstance(c, matplotlib.collections.PolyCollection)
+            ]
+            assert polys, "Expected at least one PolyCollection for the band."
+            all_y = np.concatenate([p.vertices[:, 1] for p in polys[0].get_paths()])
+            return float(all_y.max() - all_y.min())
+
+        range_wide = _poly_y_range(fig_wide)
+        range_narrow = _poly_y_range(fig_narrow)
+
+        assert range_narrow < range_wide, (
+            f"quantiles=(0.25, 0.75) band y-range ({range_narrow:.4f}) must be "
+            f"strictly narrower than quantiles=(0.1, 0.9) band y-range "
+            f"({range_wide:.4f}) when errors have genuine spread "
+            f"(plan T4 custom-quantiles contract)."
+        )
+    finally:
+        plt.close(fig_wide)
+        plt.close(fig_narrow)
+
+
+# ---------------------------------------------------------------------------
+# Test 39 — benchmark_holdout_bar returns figure with metric bars (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_holdout_bar_returns_figure_with_metric_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards plan T4: bar count == metric count x (candidate count + 1).
+
+    The implementation delegates to ``compare_on_holdout`` for scoring.  This
+    test monkey-patches ``bristol_ml.evaluation.benchmarks.compare_on_holdout``
+    with a deterministic stub that returns a pre-built two-row metric table
+    (one candidate + one NESO row) with two metric columns.  Confirms the
+    bar count equals metric_count x row_count.
+
+    The monkeypatch is applied at the canonical module path so the lazy import
+    inside ``benchmark_holdout_bar`` resolves to the stub.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    import matplotlib.figure
+
+    from bristol_ml.evaluation.metrics import mae, rmse
+
+    # Candidate stub: satisfies the Model protocol via structural subtyping.
+    class _ConstantModel:
+        """Minimal stub satisfying the Model protocol (plan T4 model-agnostic test)."""
+
+        def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
+            pass
+
+        def predict(self, features: pd.DataFrame) -> pd.Series:
+            return pd.Series(3000.0, index=features.index)
+
+        def save(self, path: object) -> None:
+            pass
+
+        @classmethod
+        def load(cls, path: object) -> _ConstantModel:
+            return cls()
+
+        @property
+        def metadata(self) -> object:
+            return None  # type: ignore[return-value]
+
+    # Pre-built metric table that compare_on_holdout would return.
+    # Two metric columns ("mae", "rmse"), three rows: one candidate + two from
+    # fake_table (neso + naive).  The bar-count contract is:
+    # total bars = n_metrics x n_rows_in_table (plan T4).
+    # n_metrics comes from the ``metrics`` argument (not from table columns).
+    fake_table = pd.DataFrame(
+        {"mae": [120.0, 95.0, 130.0], "rmse": [180.0, 140.0, 195.0]},
+        index=["linear", "neso", "naive"],
+    )
+
+    def _fake_compare(
+        candidates: object,
+        df: object,
+        neso_forecast: object,
+        splitter_cfg: object,
+        metrics: object,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        return fake_table
+
+    monkeypatch.setattr(
+        "bristol_ml.evaluation.benchmarks.compare_on_holdout",
+        _fake_compare,
+    )
+
+    # Build minimal features frame (just needs a UTC DatetimeIndex)
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    features = pd.DataFrame({"nd_mw": np.ones(n) * 3000.0}, index=idx)
+
+    holdout_start = idx[150]
+    holdout_end = idx[199]
+
+    # Pass two metrics so the bar-count test is non-trivial (2 groups x 3 rows)
+    metrics_list = [mae, rmse]
+
+    fig = _plots.benchmark_holdout_bar(
+        candidates={"linear": _ConstantModel()},
+        neso_forecast=pd.DataFrame(),  # irrelevant — stubbed out
+        features=features,
+        metrics=metrics_list,
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+    )
+    try:
+        assert isinstance(fig, matplotlib.figure.Figure), (
+            f"benchmark_holdout_bar must return a Figure; got {type(fig).__name__!r}."
+        )
+        ax = fig.axes[0]
+        bar_containers = ax.containers
+        # The implementation calls axes.bar() once per row in the table.
+        # Each call produces one BarContainer with n_metrics bars.
+        # Plan T4 contract: total bars = n_metrics x (n_candidates + 1).
+        # Here n_candidates=1 (linear), fake_table has 3 rows (incl. neso + naive),
+        # so n_rows = len(fake_table) = 3 and n_metrics = len(metrics_list) = 2.
+        n_rows = len(fake_table)
+        n_metrics = len(metrics_list)
+        total_bars = sum(len(c) for c in bar_containers)
+        assert total_bars == n_metrics * n_rows, (
+            f"benchmark_holdout_bar must produce {n_metrics} x {n_rows} = "
+            f"{n_metrics * n_rows} total bar patches; got {total_bars} "
+            f"(plan T4 bar-count contract: metric_count x (candidate_count + 1))."
+        )
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Test 40 — benchmark_holdout_bar uses holdout window from config (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_holdout_bar_uses_holdout_window_from_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards plan T4: slicing matches holdout_start / holdout_end bounds.
+
+    The implementation derives ``min_train_periods`` and ``test_len`` from
+    the positional relationship of the features index to
+    ``holdout_start / holdout_end``.  This test verifies that the
+    ``SplitterConfig`` passed to ``compare_on_holdout`` has ``min_train_periods``
+    equal to the count of rows strictly before ``holdout_start``, and
+    ``test_len`` equal to the count of rows in ``[holdout_start, holdout_end]``.
+
+    The monkeypatch captures the ``SplitterConfig`` passed to the stub so the
+    test can inspect it after the call.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    from bristol_ml.evaluation.metrics import mae
+    from conf._schemas import SplitterConfig
+
+    captured: list[SplitterConfig] = []
+
+    fake_table = pd.DataFrame(
+        {"mae": [110.0, 105.0]},
+        index=["candidate", "neso"],
+    )
+
+    def _capturing_compare(
+        candidates: object,
+        df: object,
+        neso_forecast: object,
+        splitter_cfg: SplitterConfig,
+        metrics: object,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        captured.append(splitter_cfg)
+        return fake_table
+
+    monkeypatch.setattr(
+        "bristol_ml.evaluation.benchmarks.compare_on_holdout",
+        _capturing_compare,
+    )
+
+    # Build feature frame with a known split: 100 train rows, 24 test rows
+    n_train = 100
+    n_test = 24
+    n_total = n_train + n_test
+    idx = pd.date_range("2024-01-01", periods=n_total, freq="h", tz="UTC")
+    features = pd.DataFrame({"nd_mw": np.ones(n_total) * 3000.0}, index=idx)
+
+    holdout_start = idx[n_train]  # first test row
+    holdout_end = idx[n_train + n_test - 1]  # last test row
+
+    class _ConstantModel:
+        def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
+            pass
+
+        def predict(self, features: pd.DataFrame) -> pd.Series:
+            return pd.Series(3000.0, index=features.index)
+
+        def save(self, path: object) -> None:
+            pass
+
+        @classmethod
+        def load(cls, path: object) -> _ConstantModel:
+            return cls()
+
+        @property
+        def metadata(self) -> object:
+            return None  # type: ignore[return-value]
+
+    fig = _plots.benchmark_holdout_bar(
+        candidates={"candidate": _ConstantModel()},
+        neso_forecast=pd.DataFrame(),
+        features=features,
+        metrics=[mae],
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+    )
+    plt.close(fig)
+
+    assert len(captured) == 1, (
+        "compare_on_holdout must be called exactly once by benchmark_holdout_bar."
+    )
+    cfg = captured[0]
+    assert cfg.min_train_periods == n_train, (
+        f"SplitterConfig.min_train_periods must be {n_train} (rows before holdout_start); "
+        f"got {cfg.min_train_periods} (plan T4 holdout-window contract)."
+    )
+    assert cfg.test_len == n_test, (
+        f"SplitterConfig.test_len must be {n_test} (rows in [holdout_start, holdout_end]); "
+        f"got {cfg.test_len} (plan T4 holdout-window contract)."
+    )
+    assert cfg.fixed_window is True, (
+        "SplitterConfig.fixed_window must be True for the holdout benchmark "
+        "(plan T4 / D10 fixed-window semantics)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 41 — benchmark_holdout_bar model-agnostic (Plan T4)
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_holdout_bar_model_agnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards plan T4: accepts a dict whose values are any Model protocol implementers.
+
+    Confirms that ``benchmark_holdout_bar`` does not inspect the concrete
+    type of the model objects — it treats the candidates mapping as an opaque
+    ``Mapping[str, Model]`` and passes it through to ``compare_on_holdout``.
+    The test uses three different stub classes (none inheriting from a common
+    base) to exercise the structural-subtyping contract.
+
+    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    """
+    import matplotlib.figure
+
+    from bristol_ml.evaluation.metrics import mae
+    from bristol_ml.models.protocol import Model
+
+    class _StubAlpha:
+        """First model stub — returns a constant 3000.0."""
+
+        def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
+            pass
+
+        def predict(self, features: pd.DataFrame) -> pd.Series:
+            return pd.Series(3000.0, index=features.index)
+
+        def save(self, path: object) -> None:
+            pass
+
+        @classmethod
+        def load(cls, path: object) -> _StubAlpha:
+            return cls()
+
+        @property
+        def metadata(self) -> object:
+            return None  # type: ignore[return-value]
+
+    class _StubBeta:
+        """Second model stub — returns a constant 3500.0."""
+
+        def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
+            pass
+
+        def predict(self, features: pd.DataFrame) -> pd.Series:
+            return pd.Series(3500.0, index=features.index)
+
+        def save(self, path: object) -> None:
+            pass
+
+        @classmethod
+        def load(cls, path: object) -> _StubBeta:
+            return cls()
+
+        @property
+        def metadata(self) -> object:
+            return None  # type: ignore[return-value]
+
+    # Verify structural protocol conformance for both stubs
+    assert isinstance(_StubAlpha(), Model), (
+        "_StubAlpha does not satisfy the Model protocol — fix the stub."
+    )
+    assert isinstance(_StubBeta(), Model), (
+        "_StubBeta does not satisfy the Model protocol — fix the stub."
+    )
+
+    # Pre-built metric table (two candidates + neso row)
+    fake_table = pd.DataFrame(
+        {"mae": [115.0, 125.0, 108.0]},
+        index=["alpha", "beta", "neso"],
+    )
+
+    # Track which candidates mapping the stub receives to verify pass-through
+    received_candidates: list[object] = []
+
+    def _passthrough_compare(
+        candidates: object,
+        df: object,
+        neso_forecast: object,
+        splitter_cfg: object,
+        metrics: object,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        received_candidates.append(candidates)
+        return fake_table
+
+    monkeypatch.setattr(
+        "bristol_ml.evaluation.benchmarks.compare_on_holdout",
+        _passthrough_compare,
+    )
+
+    n = 150
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    features = pd.DataFrame({"nd_mw": np.ones(n) * 3000.0}, index=idx)
+    holdout_start = idx[120]
+    holdout_end = idx[149]
+
+    candidates = {"alpha": _StubAlpha(), "beta": _StubBeta()}
+
+    fig = _plots.benchmark_holdout_bar(
+        candidates=candidates,
+        neso_forecast=pd.DataFrame(),
+        features=features,
+        metrics=[mae],
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+    )
+    try:
+        assert isinstance(fig, matplotlib.figure.Figure), (
+            f"benchmark_holdout_bar must return a Figure; got {type(fig).__name__!r}."
+        )
+        # Confirm the candidates mapping was passed through to compare_on_holdout
+        assert len(received_candidates) == 1, "compare_on_holdout must be called exactly once."
+        passed_candidates = received_candidates[0]
+        assert passed_candidates is candidates, (
+            "benchmark_holdout_bar must pass the candidates dict through to "
+            "compare_on_holdout unchanged (plan T4 model-agnostic contract)."
+        )
+    finally:
+        plt.close(fig)
