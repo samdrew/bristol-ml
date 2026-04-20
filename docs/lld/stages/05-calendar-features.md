@@ -58,4 +58,4 @@ The two `train` invocations print per-fold metric tables whose headers name the 
 
 ## Next
 
-→ Stage 6 — Tree-based models. First model family beyond OLS to consume the `weather_calendar` feature set; same `Model` protocol, same `harness.evaluate`, same `compare_on_holdout`. The Stage 5 residual plot's remaining structure (weather-calendar interactions) is the motivation.
+→ Stage 6 — Enhanced evaluation & visualisation. Adds a diagnostic-plot helper library (residuals-vs-time, predicted-vs-actual, ACF with weekly markers, hour-of-day × weekday heatmap, forecast overlay, empirical uncertainty band) and wires up the fixed-window NESO benchmark via `NesoBenchmarkConfig.holdout_start/_end`. Notebook 04 gains a Stage 6 appendix demonstrating the helpers; Stage 4 Cells 0–12 stay verbatim. No new models ship at Stage 6.
