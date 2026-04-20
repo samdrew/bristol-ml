@@ -166,6 +166,48 @@ partial re-fetch on the next `AUTO` call — the user must re-run with
 `REFRESH` to rebuild the cache from all configured stations. Staleness
 detection is a Stage 19 (orchestration) concern.
 
+## `holidays.py` — output schema
+
+File path: `<cache_dir>/holidays.parquet` where `<cache_dir>` defaults
+to `${BRISTOL_ML_CACHE_DIR:-./data/raw/holidays}`.  The parquet carries
+every division the feed returns, even though the Stage 5 feature
+derivation only encodes England & Wales and Scotland (plan **D-2**):
+keeping the cache policy-agnostic means a future regional stage does
+not need to re-ingest.
+
+| Column              | Parquet type                          | Notes                                                                     |
+|---------------------|---------------------------------------|---------------------------------------------------------------------------|
+| `date`              | `date32`                              | ISO calendar date the holiday falls on. Primary sort key.                 |
+| `division`          | `string`                              | One of `england-and-wales`, `scotland`, `northern-ireland`.               |
+| `title`             | `string`                              | As published by gov.uk (`"Christmas Day"`, `"St Andrew's Day"`, ...).     |
+| `notes`             | `string`                              | gov.uk's free-text note; often empty. Never `None` (empty string fill).   |
+| `bunting`           | `bool`                                | gov.uk's UI flag — true for flag-flying holidays, false for e.g. Good Friday. |
+| `retrieved_at_utc`  | `timestamp[us, tz=UTC]`               | Per-fetch provenance (§2.1.6).                                            |
+
+Primary key: `(date, division)` unique; sorted by `date ASC, division
+ASC`.  A duplicate `(date, division)` in the upstream payload is a
+hard error — the feed has never carried a duplicate in practice, and a
+duplicate would signal upstream drift.
+
+### Coverage
+
+As of 2026-04 the gov.uk feed returns events from 2019-01-01 forward;
+future years are appended as the UK announces them (typically mid-year
+for the following calendar year).  Stage 5 research §R1 / §R10 cited
+2012-01-02 as the historical lower bound — the feed window has
+narrowed since that research was captured.  Pre-window rows in the
+feature layer are zero-filled by `derive_calendar` and logged as a
+single `loguru` WARNING per fetch (plan **D-6**).
+
+### Rate limit
+
+gov.uk publishes no documented rate limit on
+`/bank-holidays.json`.  The ingester's `min_inter_request_seconds`
+defaults to `0.0` and the tenacity retry loop covers transient 5xx /
+429 / network errors per the shared `_retrying_get` contract.  The
+feed is a single GET — no pagination, no per-division loop at the HTTP
+layer.
+
 ## Fixtures
 
 Cassettes live at `tests/fixtures/<source>/cassettes/` via
@@ -176,10 +218,17 @@ after deleting the cassette directory. Sensitive headers
 time even though none are currently required — this sets the precedent
 for future authenticated feeds.
 
+The Stage 5 holidays cassette lives at
+`tests/fixtures/holidays/cassettes/holidays_refresh.yaml` (~31 kB; one
+GET of the full feed, no body trimming required because the payload is
+already small).
+
 ## Licence
 
 NESO Historic Demand Data is published under NESO Open Data / OGL v3. The
 licence is acknowledged in the project `README.md`; we do not replicate
 licence metadata into the parquet file. Open-Meteo historical data is
 released under CC BY 4.0 — citation lives in the project `README.md`
-alongside the NESO acknowledgement.
+alongside the NESO acknowledgement.  gov.uk bank-holidays data is
+published under the Open Government Licence v3.0 (crown copyright);
+the same README carries that acknowledgement.

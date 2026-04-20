@@ -232,16 +232,16 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 ### Task T2 — Bank-holidays ingester
 *(Depends on T1 for `HolidaysIngestionConfig`; independent of T3/T4.)*
 
-- [ ] Create `src/bristol_ml/ingestion/holidays.py`:
+- [x] Create `src/bristol_ml/ingestion/holidays.py`:
   - Copy-and-adapt of `neso_forecast.py` / `weather.py`. Target URL is a single GET — no CKAN pagination, no settlement-period algebra.
   - `OUTPUT_SCHEMA: pa.Schema` with six columns: `date` (`date32`), `division` (`string`), `title` (`string`), `notes` (`string`), `bunting` (`bool`), `retrieved_at_utc` (`timestamp("us", tz="UTC")`). Primary key `(date, division)`; sorted ascending.
   - `fetch(config, *, cache=CachePolicy.AUTO) -> Path` — standard `CachePolicy` semantics; calls `_common._retrying_get`; writes all three divisions' events (not only the two needed for the GB composite) so the cache remains policy-agnostic.
   - `load(path) -> pd.DataFrame` — schema-validating reader.
   - `_cli_main(argv=None) -> int` — `python -m bristol_ml.ingestion.holidays --cache auto` prints the cache path and schema summary.
-  - Module docstring names the OGL v3 licence, the gov.uk source, and the 2012-01-02 historical lower bound (per **D6**).
-- [ ] Add VCR cassette at `tests/fixtures/holidays/cassettes/holidays_refresh.yaml` recording one real GET of `https://www.gov.uk/bank-holidays.json`. Scrub no headers (public endpoint, no auth).
-- [ ] Add `scripts/record_holidays_cassette.py` mirroring `scripts/record_neso_cassette.py`.
-- [ ] Extend `src/bristol_ml/ingestion/CLAUDE.md` with the new `holidays.py` public surface, the 2012+ coverage note, and the cassette location.
+  - Module docstring names the OGL v3 licence, the gov.uk source, and the historical lower bound. **Implementation note (2026-04-20):** the live feed as observed at recording time carries events from 2019-01-01 forward, not the 2012-01-02 bound cited in research §R1 / §R10. The feed rolls its window forward as years are announced. The module docstring records the observed 2019-01-01 floor and references plan D-6 as the mechanism that handles pre-window rows (zero-fill + single WARNING).
+- [x] Add VCR cassette at `tests/fixtures/holidays/cassettes/holidays_refresh.yaml` recording one real GET of `https://www.gov.uk/bank-holidays.json`. Scrub no headers (public endpoint, no auth). Cassette size: 31 kB; 280 events across three divisions covering 2019-01-01 → 2028-12-26.
+- [x] Add `scripts/record_holidays_cassette.py` mirroring `scripts/record_neso_cassette.py`.
+- [x] Extend `src/bristol_ml/ingestion/CLAUDE.md` with the new `holidays.py` public surface, the 2019+ coverage note (corrected from research's 2012+), and the cassette location.
 - **Acceptance:** AC-6, AC-7, AC-9 (CLI entry point).
 - **Tests (spec-derived + cassette-backed):**
   - `test_holidays_fetch_writes_parquet` — VCR cassette playback; asserts parquet exists, schema passes.
@@ -480,3 +480,7 @@ Housekeeping:
 - H-4 (`docs/architecture/ROADMAP.md` Features section closed at Stage 5 T7): **ACCEPT**
 
 *Process feedback (human, 2026-04-20): "In future please ensure that the plan refers to the relevant context in a research doc, as finding it was difficult at times."* Applied to this plan via the in-table anchor links added to D-1, D-2, D-3, D-4, D-5, D-6, D-7, D-8, D-9, D-10 and throughout Task T3 — each research claim now links to the specific subsection of the relevant `docs/lld/research/05-calendar-features-*.md` file. Future plans to follow the same pattern.
+
+### Implementation findings (surfaced during Phase 2)
+
+- **T2 coverage-window drift (2026-04-20):** Research §R1 / §R10 cites 2012-01-02 as the gov.uk feed's historical lower bound. Observed at T2 cassette-recording time, the live feed carries events from 2019-01-01 onwards only; the window rolls forward as gov.uk publishes future years. No plan change required — D-6's "pre-window rows get zero-filled + single WARNING" rule was already scoped to handle this class of case, and the Stage 2 / 3 training window starts well inside the 2019+ coverage. The module docstring and `ingestion/CLAUDE.md` were updated to record the observed window. Flag noted so the Stage 5 retrospective and any future research refresh can re-confirm.
