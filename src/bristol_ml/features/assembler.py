@@ -463,8 +463,8 @@ def assemble(cfg: AppConfig, cache: str = "offline") -> Path:
 
     if cfg.features.weather_only is None:
         raise ValueError(
-            "No feature-set config resolved. Ensure "
-            "`features/weather_only@features.weather_only` is in `conf/config.yaml` defaults."
+            "No weather-only feature-set config resolved. Ensure `features: weather_only` "
+            "is in `conf/config.yaml` defaults (or use the `features=weather_only` CLI override)."
         )
     if cfg.ingestion.neso is None or cfg.ingestion.weather is None:
         raise ValueError(

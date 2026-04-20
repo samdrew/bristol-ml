@@ -1,0 +1,32 @@
+# @package ingestion.holidays
+#
+# GB bank-holidays ingester (Stage 5).
+#
+# Source: ``https://www.gov.uk/bank-holidays.json`` under the Open Government
+# Licence v3.0.  The endpoint returns all three UK divisions
+# (``england-and-wales``, ``scotland``, ``northern-ireland``) with complete
+# coverage from 2012-01-02 onwards (per Stage 5 research R1 / R10).
+#
+# Per plan D-2 the feature derivation encodes only E&W and Scotland, but the
+# cache persists all three divisions so future regional work does not need
+# to re-ingest.  Retry / rate-limit knobs mirror ``conf/ingestion/neso.yaml``
+# structurally so the shared helpers in ``bristol_ml.ingestion._common``
+# accept this config via their ``Protocol`` types.  ``min_inter_request_seconds``
+# is zero because gov.uk publishes no documented rate limit.
+
+url: https://www.gov.uk/bank-holidays.json
+# Defaults to ``data/raw/holidays`` relative to the current working directory;
+# override with ``BRISTOL_ML_CACHE_DIR`` for portable caches.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/holidays}
+cache_filename: holidays.parquet
+request_timeout_seconds: 30.0
+max_attempts: 3
+backoff_base_seconds: 1.0
+backoff_cap_seconds: 10.0
+# gov.uk has no documented rate limit; zero keeps the retry loop honest.
+min_inter_request_seconds: 0.0
+# All three divisions persisted — feature derivation picks its subset.
+divisions:
+  - england-and-wales
+  - scotland
+  - northern-ireland

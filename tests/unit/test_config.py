@@ -27,6 +27,8 @@ from conf._schemas import (
     EvaluationGroup,
     FeatureSetConfig,
     FeaturesGroup,
+    HolidaysIngestionConfig,
+    IngestionGroup,
     LinearConfig,
     MetricsConfig,
     ModelMetadata,
@@ -771,3 +773,224 @@ def test_model_metadata_name_pattern_rejects_uppercase() -> None:
     """
     with pytest.raises(ValidationError):
         ModelMetadata(name="BadName", feature_columns=())
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 T1 — calendar features config
+# ---------------------------------------------------------------------------
+
+
+def test_app_config_default_selects_weather_only() -> None:
+    """Pins D-10 + defaults-list invariant: no override populates weather_only only.
+
+    After a defaults-only ``load_config()`` the resolved config must have
+    ``cfg.features.weather_only`` populated as a ``FeatureSetConfig`` and
+    ``cfg.features.weather_calendar`` must be ``None``.  This guards the D-10
+    decision that ``- features: weather_only`` is the ``conf/config.yaml``
+    default, and that switching to the calendar set is a config change rather
+    than a code change.  If either assertion fails the defaults-list wiring
+    is broken.
+    """
+    cfg = load_config()
+
+    assert cfg.features is not None, "AppConfig.features must not be None after defaults-only load."
+    assert isinstance(cfg.features.weather_only, FeatureSetConfig), (
+        "D-10: cfg.features.weather_only must be a FeatureSetConfig with no override."
+    )
+    assert cfg.features.weather_calendar is None, (
+        "D-10: cfg.features.weather_calendar must be None when no features= override is given."
+    )
+
+
+def test_features_override_swaps_to_weather_calendar() -> None:
+    """Pins D-10 group swap: ``features=weather_calendar`` populates weather_calendar only.
+
+    After ``load_config(overrides=['features=weather_calendar'])`` the resolved
+    config must have ``cfg.features.weather_calendar`` populated with the values
+    from ``conf/features/weather_calendar.yaml`` — specifically ``name='weather_calendar'``,
+    ``forward_fill_hours==3``, and ``demand_aggregation=='mean'`` — and
+    ``cfg.features.weather_only`` must be ``None``.
+
+    This is the mirror of how ``model=naive`` swaps the model variant; a single
+    CLI word selects the feature set without any code change (AC-1).
+    """
+    cfg = load_config(overrides=["features=weather_calendar"])
+
+    assert cfg.features is not None
+    fset = cfg.features.weather_calendar
+    assert fset is not None, (
+        "D-10: cfg.features.weather_calendar must be populated after "
+        "features=weather_calendar override."
+    )
+    assert isinstance(fset, FeatureSetConfig), (
+        "D-10: weather_calendar must be a FeatureSetConfig instance."
+    )
+    assert fset.name == "weather_calendar", (
+        f"D-10: feature-set name must be 'weather_calendar'; got {fset.name!r}."
+    )
+    assert fset.forward_fill_hours == 3, (
+        f"D-10: forward_fill_hours default must be 3; got {fset.forward_fill_hours!r}."
+    )
+    assert fset.demand_aggregation == "mean", (
+        f"D-10: demand_aggregation default must be 'mean'; got {fset.demand_aggregation!r}."
+    )
+    assert cfg.features.weather_only is None, (
+        "D-10: cfg.features.weather_only must be None after features=weather_calendar override."
+    )
+
+
+def test_features_group_both_fields_optional() -> None:
+    """Pins backwards-compatibility contract: FeaturesGroup() with no args is valid.
+
+    ``FeaturesGroup()`` must construct successfully with both ``weather_only``
+    and ``weather_calendar`` as ``None``.  This ensures that pre-Stage-5 code
+    that builds ``FeaturesGroup`` programmatically (without supplying either
+    field) is not broken by the Stage 5 addition of the ``weather_calendar``
+    field.  Guards the ``| None = None`` idiom applied to both fields.
+    """
+    fg = FeaturesGroup()
+
+    assert fg.weather_only is None, (
+        "Backwards-compat: FeaturesGroup().weather_only must be None by default."
+    )
+    assert fg.weather_calendar is None, (
+        "Backwards-compat: FeaturesGroup().weather_calendar must be None by default."
+    )
+
+
+def test_holidays_ingestion_config_defaults_from_yaml() -> None:
+    """Pins D-1: load_config() populates cfg.ingestion.holidays from holidays.yaml.
+
+    After a defaults-only ``load_config()`` the resolved config must have
+    ``cfg.ingestion.holidays`` populated as a ``HolidaysIngestionConfig``
+    with the values pinned in ``conf/ingestion/holidays.yaml``.  Specifically:
+
+    - ``url`` contains ``www.gov.uk/bank-holidays.json`` (D-1 source).
+    - ``cache_filename == 'holidays.parquet'``.
+    - ``min_inter_request_seconds == 0.0`` (gov.uk has no documented rate limit; D-1).
+    - ``divisions == ("england-and-wales", "scotland", "northern-ireland")``
+      (all three divisions cached, policy-agnostic; D-1 / D-2).
+    """
+    cfg = load_config()
+
+    assert cfg.ingestion is not None
+    holidays = cfg.ingestion.holidays
+    assert holidays is not None, (
+        "D-1: cfg.ingestion.holidays must be populated from the defaults list."
+    )
+    assert isinstance(holidays, HolidaysIngestionConfig)
+    assert "www.gov.uk/bank-holidays.json" in str(holidays.url), (
+        f"D-1: url must contain 'www.gov.uk/bank-holidays.json'; got {holidays.url!r}."
+    )
+    assert holidays.cache_filename == "holidays.parquet", (
+        f"D-1: cache_filename must be 'holidays.parquet'; got {holidays.cache_filename!r}."
+    )
+    assert holidays.min_inter_request_seconds == 0.0, (
+        f"D-1: min_inter_request_seconds must be 0.0; got {holidays.min_inter_request_seconds!r}."
+    )
+    assert holidays.divisions == ("england-and-wales", "scotland", "northern-ireland"), (
+        f"D-1/D-2: divisions must be all three UK divisions; got {holidays.divisions!r}."
+    )
+
+
+def test_holidays_ingestion_config_rejects_extra_keys() -> None:
+    """Pins ConfigDict(extra='forbid') on HolidaysIngestionConfig.
+
+    Supplying an unknown keyword argument at direct-construction time must raise
+    ``ValidationError``.  This prevents silent config drift where a mis-typed
+    field name is accepted rather than surfaced immediately.
+    """
+    with pytest.raises(ValidationError):
+        HolidaysIngestionConfig(  # type: ignore[call-arg]  # testing extra="forbid"
+            cache_dir=Path("/tmp/x"),
+            bogus=1,
+        )
+
+
+def test_holidays_ingestion_config_divisions_literal_narrowing() -> None:
+    """Pins Literal narrowing on HolidaysIngestionConfig.divisions.
+
+    The ``divisions`` field uses a ``tuple[Literal["england-and-wales",
+    "scotland", "northern-ireland"], ...]`` annotation.  Any string outside
+    those three values (e.g. ``"isle-of-man"``) must be rejected with a
+    ``ValidationError`` so an invalid division name fails fast rather than
+    silently producing a malformed cache.
+    """
+    with pytest.raises(ValidationError):
+        HolidaysIngestionConfig(
+            cache_dir=Path("/tmp/x"),
+            divisions=("isle-of-man",),  # type: ignore[arg-type]  # testing Literal narrowing
+        )
+
+
+def test_holidays_ingestion_config_direct_construction_smoke() -> None:
+    """Smoke test: HolidaysIngestionConfig constructs correctly with only cache_dir supplied.
+
+    Guards AC-7 schema soundness.  With only the required ``cache_dir`` argument
+    all optional fields must assume their documented defaults: ``url`` is the
+    gov.uk bank-holidays endpoint, ``cache_filename`` is ``'holidays.parquet'``,
+    and the model is frozen (mutation raises).
+    """
+    cfg = HolidaysIngestionConfig(cache_dir=Path("/tmp/holidays"))
+
+    assert "www.gov.uk/bank-holidays.json" in str(cfg.url), (
+        f"D-1: default url must point to gov.uk bank-holidays endpoint; got {cfg.url!r}."
+    )
+    assert cfg.cache_filename == "holidays.parquet", (
+        f"D-1: default cache_filename must be 'holidays.parquet'; got {cfg.cache_filename!r}."
+    )
+
+    # ConfigDict(frozen=True): mutation must raise.
+    with pytest.raises((ValidationError, TypeError)):
+        cfg.cache_filename = "changed.parquet"  # type: ignore[misc]  # testing frozen enforcement
+
+
+def test_ingestion_group_holidays_field_defaults_to_none() -> None:
+    """Pins backwards-compatibility: IngestionGroup() with no args produces holidays=None.
+
+    Pre-Stage-5 call sites that construct ``IngestionGroup`` programmatically
+    (without a ``holidays`` argument) must not break.  The ``holidays:
+    HolidaysIngestionConfig | None = None`` default must hold so Stage 1-4 code
+    paths remain valid after the Stage 5 schema extension.
+    """
+    ig = IngestionGroup()
+
+    assert ig.holidays is None, (
+        "Backwards-compat: IngestionGroup().holidays must be None by default."
+    )
+
+
+def test_weather_calendar_override_cache_filename_from_yaml() -> None:
+    """Pins D-10: weather_calendar.yaml sets cache_filename to 'weather_calendar.parquet'.
+
+    After a ``features=weather_calendar`` override, ``cfg.features.weather_calendar``
+    must carry ``cache_filename == 'weather_calendar.parquet'`` — the value written
+    in ``conf/features/weather_calendar.yaml``.  If this assertion fails the
+    YAML file diverges from the plan.
+    """
+    cfg = load_config(overrides=["features=weather_calendar"])
+
+    assert cfg.features is not None
+    assert cfg.features.weather_calendar is not None
+    assert cfg.features.weather_calendar.cache_filename == "weather_calendar.parquet", (
+        f"D-10: cache_filename must be 'weather_calendar.parquet'; "
+        f"got {cfg.features.weather_calendar.cache_filename!r}."
+    )
+
+
+def test_weather_calendar_rejects_invalid_demand_aggregation() -> None:
+    """Pins Literal narrowing on FeatureSetConfig.demand_aggregation via the new path.
+
+    After selecting ``features=weather_calendar``, overriding
+    ``features.weather_calendar.demand_aggregation=median`` must raise
+    ``ValidationError`` because ``'median'`` is not in the ``Literal["mean", "max"]``
+    set.  This confirms the D-10 feature-set config shares the same validator
+    as the weather-only set — the schema is reused verbatim (plan T1 note).
+    """
+    with pytest.raises(ValidationError):
+        load_config(
+            overrides=[
+                "features=weather_calendar",
+                "features.weather_calendar.demand_aggregation=median",
+            ]
+        )

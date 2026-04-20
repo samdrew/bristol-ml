@@ -1,22 +1,27 @@
-# @package features.weather_only
+# @package features
 #
-# Weather-only feature set (Stage 3). Joins NESO half-hourly demand (aggregated
-# to hourly via ``demand_aggregation``) with the population-weighted national
-# weather aggregate (Stage 2 ``features.weather.national_aggregate``).
+# Weather-only feature set (Stage 3; Hydra-group-swap refactor in Stage 5 T1).
 #
-# Stage 5 will ship ``conf/features/weather_calendar.yaml`` alongside this file
-# so the without/with-calendar comparison is a single ``+features=...`` override
-# rather than a code change.
+# Joins NESO half-hourly demand (aggregated to hourly via ``demand_aggregation``)
+# with the population-weighted national weather aggregate
+# (Stage 2 ``features.weather.national_aggregate``).
+#
+# This file is a member of the ``features`` Hydra group.  The defaults list in
+# ``conf/config.yaml`` picks it with ``- features: weather_only``; a CLI
+# override ``features=weather_calendar`` swaps to the sibling YAML (Stage 5 D-10).
+# Exactly one of ``cfg.features.weather_only`` / ``cfg.features.weather_calendar``
+# is populated per run; ``bristol_ml.train._resolve_feature_set`` enforces this.
 
-name: weather_only
-# D1 (plan §1): ``mean`` of the two half-hourly NESO rows per UTC hour is the
-# default. Override to ``max`` at the CLI (``features.weather_only.demand_aggregation=max``)
-# for a peak-demand framing.
-demand_aggregation: mean
-# D6 (plan §1): derived artefact; regenerable; lives outside ``data/raw`` to
-# keep the raw-vs-derived distinction legible.
-cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/features}
-cache_filename: weather_only.parquet
-# D5 (plan §1): forward-fill short weather gaps up to this many hours; longer
-# gaps propagate NaN and the row is dropped with an INFO-level log entry.
-forward_fill_hours: 3
+weather_only:
+  name: weather_only
+  # D1 (Stage 3 plan §1): ``mean`` of the two half-hourly NESO rows per UTC hour
+  # is the default.  Override to ``max`` at the CLI
+  # (``features.weather_only.demand_aggregation=max``) for a peak-demand framing.
+  demand_aggregation: mean
+  # D6 (Stage 3 plan §1): derived artefact; regenerable; lives outside
+  # ``data/raw`` to keep the raw-vs-derived distinction legible.
+  cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/features}
+  cache_filename: weather_only.parquet
+  # D5 (Stage 3 plan §1): forward-fill short weather gaps up to this many hours;
+  # longer gaps propagate NaN and the row is dropped with an INFO-level log entry.
+  forward_fill_hours: 3
