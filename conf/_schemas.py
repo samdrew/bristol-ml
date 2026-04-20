@@ -164,6 +164,50 @@ class NesoForecastIngestionConfig(BaseModel):
     )
 
 
+class HolidaysIngestionConfig(BaseModel):
+    """Configuration for the GB bank-holidays ingester (Stage 5).
+
+    Source: ``https://www.gov.uk/bank-holidays.json``, published under the
+    Open Government Licence v3.0.  The endpoint returns all three UK
+    divisions (``england-and-wales``, ``scotland``, ``northern-ireland``)
+    with complete coverage from 2012-01-02 onwards.  The ingester persists
+    every division even though the Stage 5 feature derivation only encodes
+    England & Wales and Scotland (see plan D-2): keeping the cache
+    policy-agnostic means future regional work does not need to re-ingest.
+
+    Retry / rate-limit fields mirror ``NesoIngestionConfig`` structurally so
+    the shared helpers in ``bristol_ml.ingestion._common`` accept this config
+    via their ``Protocol`` types.  ``min_inter_request_seconds`` defaults to
+    zero because gov.uk publishes no documented rate limit and the endpoint
+    is cheap.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: HttpUrl = Field(default=HttpUrl("https://www.gov.uk/bank-holidays.json"))
+    cache_dir: Path
+    cache_filename: str = "holidays.parquet"
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    backoff_base_seconds: float = Field(default=1.0, gt=0)
+    backoff_cap_seconds: float = Field(default=10.0, gt=0)
+    # gov.uk has no documented rate limit; set to zero so the retry loop
+    # does not artificially throttle recorder runs.
+    min_inter_request_seconds: float = Field(default=0.0, ge=0)
+    # Divisions persisted to the parquet cache.  Defaults to all three so the
+    # cache is policy-agnostic; the feature derivation (per plan D-2) only
+    # encodes E&W and Scotland.  Override to a subset if a future stage wants
+    # a narrower cache.
+    divisions: tuple[
+        Literal["england-and-wales", "scotland", "northern-ireland"],
+        ...,
+    ] = (
+        "england-and-wales",
+        "scotland",
+        "northern-ireland",
+    )
+
+
 class IngestionGroup(BaseModel):
     """Container for per-source ingestion configs.
 
@@ -177,6 +221,7 @@ class IngestionGroup(BaseModel):
     neso: NesoIngestionConfig | None = None
     weather: WeatherIngestionConfig | None = None
     neso_forecast: NesoForecastIngestionConfig | None = None
+    holidays: HolidaysIngestionConfig | None = None
 
 
 class FeatureSetConfig(BaseModel):
@@ -203,12 +248,18 @@ class FeaturesGroup(BaseModel):
     """Container for named feature-set configs.
 
     Each field is optional so stage-0/1/2 configs (no features section) still
-    validate. Stage 5 will add ``weather_calendar: FeatureSetConfig | None``.
+    validate.  Stage 5 adds ``weather_calendar`` alongside ``weather_only``;
+    per plan D-10 exactly one is populated per run — the ``features=`` Hydra
+    group override (wired in ``conf/config.yaml`` defaults as ``- features:
+    weather_only``) selects which file loads, and ``bristol_ml.train.
+    _resolve_feature_set`` enforces the mutual-exclusivity invariant at
+    runtime.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     weather_only: FeatureSetConfig | None = None
+    weather_calendar: FeatureSetConfig | None = None
 
 
 class SplitterConfig(BaseModel):

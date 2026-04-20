@@ -1,6 +1,6 @@
 # Plan — Stage 5: Calendar features (without/with comparison)
 
-**Status:** `unreviewed` — awaiting human approval of D1–D11 and H-1–H-4 before Phase 2 begins.
+**Status:** `approved` — human markup 2026-04-20: D-1, D-3, D-5, D-6, D-7, D-8, D-9, D-10, D-11 + H-1–H-4 accepted; D-2 overridden (per-division columns, no union); D-4 accepted with Monday-reference change. Phase 2 ready.
 **Intent:** [`docs/intent/05-calendar-features.md`](../../intent/05-calendar-features.md)
 **Upstream stages shipped:** Stage 0 (foundation), Stage 1 (NESO demand), Stage 2 (weather + national aggregate), Stage 3 (feature assembler + splitter), Stage 4 (linear baseline + evaluation harness).
 **Downstream consumers:** every subsequent modelling stage (6, 7, 8, 9, 10, 11) inherits the enriched `weather_calendar` feature set by default. Stage 6 (enhanced evaluation) composes the without/with residual-pattern story into a richer visualisation surface.
@@ -21,25 +21,28 @@ Eleven decision points plus four housekeeping carry-overs. For each I propose a 
 
 | # | Decision | Proposed default | Simplicity rationale | Evidence |
 |---|---|---|---|---|
-| **D1** | Bank-holiday source | **`https://www.gov.uk/bank-holidays.json`** via `requests` + VCR cassette, mirroring the existing NESO / Open-Meteo / NESO-forecast ingesters. No new package dependency. | OGL v3.0, no auth, stable shape since 2012, same `_common.py` helpers apply verbatim. Adding `python-holidays` or `govuk-bank-holidays` introduces a dependency for zero extra capability against our training window. | External R1, R9; codebase map §E. |
-| **D2** | GB division composition | **Union of `england-and-wales` and `scotland`** only. NI excluded from the composite `is_bank_holiday` column because NESO ND is the GB grid (NI runs on SEM via SONI). The gov.uk JSON's `northern-ireland` key is still persisted to the cache for completeness (so the ingester stays policy-agnostic), but the feature derivation ignores it. | Intent: "any division is on holiday" is a reasonable composite for a national model. R2 tightens this by excluding NI on geographic / grid grounds. Separate per-division indicators are the natural extension for future regional work but add 3× column count for no current-model gain. | Intent §Points for consideration; R2 (NESO grid geography, Hong 2016, Ziel 2018). |
-| **D3** | Encoding of `hour_of_day` | **One-hot** (23 dummies after dropping hour 0 as the reference category). A readable "load profile" falls out of the OLS coefficients — a direct teaching artefact for meetups. | R4's sklearn empirical benchmark shows one-hot outperforms sin/cos for linear models on hourly demand-like data (10.0% MAE vs 12.5%). Hong 2016 GEFCom vanilla benchmark + Ziel & Weron 2018 both use one-hot hour-of-day. Sin/cos was the initial proposal in the requirements doc but the evidence runs the other way. | External R4 (sklearn cyclical-feature-engineering example; Hong et al. 2016; Ziel & Weron 2018). |
-| **D4** | Encoding of `day_of_week` and `month` | **One-hot for both.** Day-of-week: 6 dummies (drop Sunday = reference). Month: 11 dummies (drop January). | Same empirical argument as D3. Weekday effects in GB demand are large and non-linear; month effects are seasonally coarse but one-hot gives readable coefficients at meetups. 17 categorical dummies + 23 hour dummies + 5 weather columns + 3 holiday columns = ~48 coefficients — still a trivial OLS fit, still interpretable. | External R4 (Hong 2016 vanilla benchmark; Ziel & Weron 2018 LEAR model D1..D7 dummies). |
-| **D5** | Holiday-proximity feature shape | **Two binary columns** — `is_day_before_holiday` and `is_day_after_holiday` — matching Ziel 2018's factor-variable shape. No signed integer `days_to_nearest_holiday` column. | R3 confirms binary is the industry convention; Azure AutoML's signed-integer alternative forces a monotone linear relationship the data does not support. Binary handles Christmas–New Year clusters correctly (both bits may simultaneously be 1). | External R3 (Ziel 2018; Amperon 2024; Azure AutoML docs). |
-| **D6** | Historical-depth fallback | **WARNING-level log + fill `is_bank_holiday=0` + continue** for any row pre-2012-01-02. No pre-cache data is raised as an error. Document in the module docstring that `python-holidays` is the sanctioned extension path for any future stage training pre-2012. | Stage 4 training window starts 2018-01-01 (DESIGN §5.1); the gov.uk archive starts 2012-01-02. Zero rows actually fall into the gap today, so the path is defensive rather than functional. Raising would make the pipeline fragile to an unrelated training-window change. | External R10 (gov.uk historical depth; python-holidays algorithmic-generation path). |
-| **D7** | DST / UTC-hour → local-date mapping rule | **"Any UTC hour whose `Europe/London` local-date component matches a bank-holiday date gets `is_bank_holiday=1`,"** regardless of spring-forward / autumn-back. Documented verbatim in the `derive_calendar` module docstring. Unit-tested on a synthetic frame spanning one spring-forward Sunday. | No published convention found (R6); any defensible rule needs to be documented. `Europe/London` local date is what a consumer experiences as "on the holiday"; it also lines up with how `day_of_week` and `hour_of_day` are derived. DST-change Sundays are never statutory bank holidays, so the rule fires only on the edge case of a moving holiday (Easter Monday / Good Friday never fall on clock-change days; Mothering Sunday is not statutory; Easter Sunday is not statutory). | External R6 (pandas `tz_localize` docs; BST Wikipedia; absence of published convention). |
-| **D8** | Notebook step override | **Inherit Stage 4's precedent verbatim**: in-cell `evaluation.rolling_origin.min_train_periods=720` + `step=168` override for the demo notebook. CLI `python -m bristol_ml.train features=weather_calendar` uses the full daily-stride defaults. | Stage 4 D7 established this exact pattern for pedagogical pacing — narrower train window + weekly stride fits comfortably under the 120 s notebook ceiling. No reason to diverge. | Stage 4 plan §D7; `docs/lld/stages/04-linear-baseline.md` design choices. |
-| **D9** | `OUTPUT_SCHEMA` extension mechanism | **Option 3 — composable `derive_calendar(df, holidays_df)` pure function + parallel `CALENDAR_OUTPUT_SCHEMA` + `assemble_calendar` / `load_calendar` orchestrators** in `features/assembler.py`, with `features/calendar.py` owning the pure derivation. `CALENDAR_VARIABLE_COLUMNS` joins `WEATHER_VARIABLE_COLUMNS` as a sibling constant. | Matches the intent's AC-2 "pure function" requirement verbatim; matches the existing `features.weather.national_aggregate` shape; avoids a branching `build()` (Option 2) and an awkward callable-in-config pattern (Option 4); avoids the discriminator sprawl of Option 1 (schema constants proliferate, but that mirrors the Stage 4 `ModelConfig` discriminated-union shape and is explicit). The codebase-explorer strongly recommends this option. | Codebase map §B Option 3; intent §AC-2; `docs/architecture/layers/features.md` §2 pure-derivation pattern. |
-| **D10** | `train.py` feature-set selection | **Hydra `features=` group override.** Add a `features=weather_only \| weather_calendar` override key that selects which `cfg.features.<set>` block `train.py` reads. Internal resolver `_resolve_feature_set(cfg) -> (FeatureSetConfig, load_fn, feature_column_names)` picks the populated set and returns the correct loader + column list; raises if both or neither are populated after Hydra resolution. | Intent AC-1 is explicit: "switching is a configuration change, not a code change." A Hydra `features=` override satisfies this exactly, symmetric with how Stage 4 ships `model=linear` / `model=naive`. The resolver keeps `LinearConfig.feature_columns` as the single source of truth for *which* columns feed the model; the feature-set discriminator picks *which schema* gets loaded. | Codebase map §F (current `train.py` hardcodes `cfg.features.weather_only`); intent §AC-1. |
+| **D1** | Bank-holiday source | **`https://www.gov.uk/bank-holidays.json`** via `requests` + VCR cassette, mirroring the existing NESO / Open-Meteo / NESO-forecast ingesters. No new package dependency. | OGL v3.0, no auth, stable shape since 2012, same `_common.py` helpers apply verbatim. Adding `python-holidays` or `govuk-bank-holidays` introduces a dependency for zero extra capability against our training window. | External research §R1 (endpoint survey) + §R9 (library comparison) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md); codebase map §E (endpoint shape) in [`05-calendar-features-codebase-map.md`](../../lld/research/05-calendar-features-codebase-map.md). |
+| **D2** | GB division composition | **Two separate binary columns: `is_bank_holiday_ew` (England & Wales) and `is_bank_holiday_sco` (Scotland).** NI is still persisted to the ingester cache for completeness (policy-agnostic ingester) but is **not** encoded as a feature column. No `is_bank_holiday` union column. *(Human override 2026-04-20: proposed union collapsed distinct E&W vs Scottish holiday effects; keeping them separate preserves the signal — e.g. 2 Jan is a Scottish-only holiday and its demand effect should be learnt on its own coefficient.)* | Intent: "any division is on holiday". Human tightened to per-division because the electricity-demand effect of a Scotland-only holiday (~8% of GB demand) differs in magnitude from an England-and-Wales holiday (~92%). One unioned coefficient averages the two effects, losing teaching signal. NI is still excluded because NESO ND is the GB grid (NI runs on SEM via SONI). | Intent §Points for consideration; External research §R2 (NESO grid geography, Hong 2016, Ziel 2018) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D3** | Encoding of `hour_of_day` | **One-hot** (23 dummies after dropping hour 0 as the reference category). A readable "load profile" falls out of the OLS coefficients — a direct teaching artefact for meetups. | R4's sklearn empirical benchmark shows one-hot outperforms sin/cos for linear models on hourly demand-like data (10.0% MAE vs 12.5%). Hong 2016 GEFCom vanilla benchmark + Ziel & Weron 2018 both use one-hot hour-of-day. Sin/cos was the initial proposal in the requirements doc but the evidence runs the other way. | External research §R4 (sklearn cyclical-feature-engineering example; Hong et al. 2016; Ziel & Weron 2018) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D4** | Encoding of `day_of_week` and `month` | **One-hot for both, with Monday as the day-of-week reference** *(human mandate 2026-04-20)*. Day-of-week: 6 dummies `day_of_week_1..6` representing Tuesday..Sunday (pandas weekday convention: Monday = 0 = reference, dropped). Month: 11 dummies `month_2..12` (January = 1 = reference, dropped). | Same empirical argument as D3. Monday-as-reference is the dominant convention in electricity demand forecasting literature (Mondays are the archetypal "working-week start" and other weekdays read naturally as deltas off Monday). 17 categorical dummies + 23 hour dummies + 5 weather columns + 4 holiday columns = ~49 coefficients — still a trivial OLS fit, still interpretable. | External research §R4 (Hong 2016 vanilla benchmark; Ziel & Weron 2018 LEAR model D1..D7 dummies) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D5** | Holiday-proximity feature shape | **Two binary columns** — `is_day_before_holiday` and `is_day_after_holiday` — matching Ziel 2018's factor-variable shape. No signed integer `days_to_nearest_holiday` column. **Intersection rule** *(human note 2026-04-20, consequent to D-2)*: the holiday-date set for proximity is the **intersection** of the E&W and Scotland holiday-date sets — proximity fires only on dates that are a bank holiday in **both** E&W and Scotland. This narrows the signal to UK-wide statutory holidays (Christmas, Boxing Day, Good Friday, Easter Monday, May Day, Spring Bank, Summer Bank, New Year's Day) and drops Scotland-only (2 Jan, St Andrew's Day) and E&W-only dates. | R3 confirms binary is the industry convention; Azure AutoML's signed-integer alternative forces a monotone linear relationship the data does not support. Binary handles Christmas–New Year clusters correctly (both bits may simultaneously be 1). The intersection rule keeps proximity features focused on the high-magnitude GB-wide effects; per-division proximity columns would triple the proximity column count for diminishing teaching signal and can be a Stage 6+ extension if wanted. | External research §R3 (Ziel 2018; Amperon 2024; Azure AutoML docs) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D6** | Historical-depth fallback | **WARNING-level log + fill `is_bank_holiday_ew=0`, `is_bank_holiday_sco=0`, `is_day_before_holiday=0`, `is_day_after_holiday=0` + continue** for any row pre-2012-01-02. No pre-cache data is raised as an error. Document in the module docstring that `python-holidays` is the sanctioned extension path for any future stage training pre-2012. | Stage 4 training window starts 2018-01-01 (DESIGN §5.1); the gov.uk archive starts 2012-01-02. Zero rows actually fall into the gap today, so the path is defensive rather than functional. Raising would make the pipeline fragile to an unrelated training-window change. | External research §R10 (gov.uk historical depth; python-holidays algorithmic-generation path) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D7** | DST / UTC-hour → local-date mapping rule | **"Any UTC hour whose `Europe/London` local-date component matches a bank-holiday date gets the matching division flag `is_bank_holiday_<div>=1`,"** regardless of spring-forward / autumn-back. Documented verbatim in the `derive_calendar` module docstring. Unit-tested on a synthetic frame spanning one spring-forward Sunday. | No published convention found (R6); any defensible rule needs to be documented. `Europe/London` local date is what a consumer experiences as "on the holiday"; it also lines up with how `day_of_week` and `hour_of_day` are derived. DST-change Sundays are never statutory bank holidays, so the rule fires only on the edge case of a moving holiday (Easter Monday / Good Friday never fall on clock-change days; Mothering Sunday is not statutory; Easter Sunday is not statutory). | External research §R6 (pandas `tz_localize` docs; BST Wikipedia; absence of published convention) in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md). |
+| **D8** | Notebook step override | **Inherit Stage 4's precedent verbatim**: in-cell `evaluation.rolling_origin.min_train_periods=720` + `step=168` override for the demo notebook. CLI `python -m bristol_ml.train features=weather_calendar` uses the full daily-stride defaults. | Stage 4 D7 established this exact pattern for pedagogical pacing — narrower train window + weekly stride fits comfortably under the 120 s notebook ceiling. No reason to diverge. | [Stage 4 plan §D7](../completed/04-linear-baseline.md); Stage 4 retrospective at [`docs/lld/stages/04-linear-baseline.md`](../../lld/stages/04-linear-baseline.md). |
+| **D9** | `OUTPUT_SCHEMA` extension mechanism | **Option 3 — composable `derive_calendar(df, holidays_df)` pure function + parallel `CALENDAR_OUTPUT_SCHEMA` + `assemble_calendar` / `load_calendar` orchestrators** in `features/assembler.py`, with `features/calendar.py` owning the pure derivation. `CALENDAR_VARIABLE_COLUMNS` joins `WEATHER_VARIABLE_COLUMNS` as a sibling constant. | Matches the intent's AC-2 "pure function" requirement verbatim; matches the existing `features.weather.national_aggregate` shape; avoids a branching `build()` (Option 2) and an awkward callable-in-config pattern (Option 4); avoids the discriminator sprawl of Option 1 (schema constants proliferate, but that mirrors the Stage 4 `ModelConfig` discriminated-union shape and is explicit). The codebase-explorer strongly recommends this option. | Codebase map §B Option 3 (assembler extension points) in [`05-calendar-features-codebase-map.md`](../../lld/research/05-calendar-features-codebase-map.md); intent §AC-2; [`docs/architecture/layers/features.md` §2 pure-derivation pattern](../../architecture/layers/features.md). |
+| **D10** | `train.py` feature-set selection | **Hydra `features=` group override.** Add a `features=weather_only \| weather_calendar` override key that selects which `cfg.features.<set>` block `train.py` reads. Internal resolver `_resolve_feature_set(cfg) -> (FeatureSetConfig, load_fn, feature_column_names)` picks the populated set and returns the correct loader + column list; raises if both or neither are populated after Hydra resolution. | Intent AC-1 is explicit: "switching is a configuration change, not a code change." A Hydra `features=` override satisfies this exactly, symmetric with how Stage 4 ships `model=linear` / `model=naive`. The resolver keeps `LinearConfig.feature_columns` as the single source of truth for *which* columns feed the model; the feature-set discriminator picks *which schema* gets loaded. | Codebase map §F (current `train.py` line 106 hardcodes `cfg.features.weather_only`) in [`05-calendar-features-codebase-map.md`](../../lld/research/05-calendar-features-codebase-map.md); intent §AC-1. |
 | **D11** | Notebook shape | **New `notebooks/05_calendar_features.ipynb`** dedicated to the without/with demo. `04_linear_baseline.ipynb` remains the linear-baseline surface and is not modified. | One-notebook-per-stage precedent (Stages 1, 2, 3, 4 all have their own notebook); the Stage 4 demo was narratively complete on its own. Merging would confuse the pedagogical progression "Stage 4 shows the linear baseline; Stage 5 shows what feature engineering adds". Duplicate setup (two `load_config` cells, two `assembler.load` cells) is cheap. | Intent §Demo moment; one-notebook-per-stage precedent across Stages 1-4. |
 
-**Blocking note.** D-2, D-3, D-4, D-9, and D-10 are load-bearing — each governs a decision that propagates downstream:
-- D-2 (NI exclusion) determines the `holidays_df` filter in `derive_calendar` and is the one decision that would most surprise a facilitator if wrong.
-- D-3 and D-4 (one-hot encoding) determine the final feature column count (~40 calendar columns) and the readability of OLS coefficients at the meetup.
-- D-9 (composable `derive_calendar` shape) is the assembler's architectural seam; reversing it would mean reorganising `features/` and `assembler.py` after other work has landed on top.
-- D-10 (`features=` Hydra override) is the one change to `train.py` and is the only AC-1 implementation path.
+**Resolution log (2026-04-20).**
+- **D-2 overridden** — two per-division columns `is_bank_holiday_ew`, `is_bank_holiday_sco` instead of one unioned `is_bank_holiday`. NI still cached; NI not encoded.
+- **D-4 accepted with change** — Monday is the day-of-week reference (dropped from one-hot), not Sunday. Column names remain `day_of_week_1..6` (pandas weekday convention: Mon = 0 = dropped; 1..6 = Tue..Sun).
+- **D-5 accepted with note** — holiday-proximity features use the **intersection** of E&W and Scotland holiday-date sets (proximity fires only on UK-wide statutory holidays), which is the natural consequence of D-2's split.
+- All remaining decisions (D-1, D-3, D-6 through D-11) and housekeeping items (H-1 through H-4) accepted verbatim.
 
-Please resolve all five before Phase 2. D-1, D-5, D-6, D-7, D-8, D-11 are lower-risk single-line reversals.
+Load-bearing propagation notes:
+- D-2 split doubles the holiday indicator column count (2 columns instead of 1); CALENDAR_VARIABLE_COLUMNS total is now 44 (was 42 under union).
+- D-4 Monday-reference change only affects which of the 7 weekday columns is dropped; the column count stays at 6.
+- D-5 intersection rule changes the derivation logic inside `derive_calendar` but not its public signature or column count.
 
 ### Housekeeping carry-overs
 
@@ -141,7 +144,7 @@ load_config(overrides=["features=weather_calendar"]) → AppConfig
 
 _resolve_feature_set(cfg) → (FeatureSetConfig, load_fn=assembler.load_calendar, feature_column_names=(*weather, *calendar))
 
-assembler.load_calendar(path) → pd.DataFrame (CALENDAR_OUTPUT_SCHEMA; 10 + ~40 columns)
+assembler.load_calendar(path) → pd.DataFrame (CALENDAR_OUTPUT_SCHEMA; 10 weather + 44 calendar + 1 provenance = 55 columns)
 
 harness.evaluate(model, df, splitter_cfg, metrics, feature_columns=<resolved>) →
     pd.DataFrame (per-fold metrics)
@@ -161,14 +164,22 @@ def fetch(config: HolidaysIngestionConfig, *, cache: CachePolicy = CachePolicy.A
 def load(path: Path) -> pd.DataFrame: ...
 
 # features/calendar.py
-CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]   # ~40 (name, dtype) pairs
+CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]   # 44 (name, dtype) pairs
 def derive_calendar(df: pd.DataFrame, holidays_df: pd.DataFrame) -> pd.DataFrame:
-    """Append one-hot hour-of-day, one-hot day-of-week, one-hot month,
-    is_bank_holiday, is_day_before_holiday, is_day_after_holiday columns
-    to a UTC-hourly frame. Pure — no I/O. Deterministic."""
+    """Append to a UTC-hourly frame: 23 one-hot hour-of-day dummies (hour 0 dropped),
+    6 one-hot day-of-week dummies (Monday dropped, Tue..Sun retained), 11 one-hot
+    month dummies (January dropped), is_bank_holiday_ew, is_bank_holiday_sco,
+    is_day_before_holiday, is_day_after_holiday. Pure — no I/O. Deterministic.
+
+    Per-division flags (D-2): is_bank_holiday_ew fires on England & Wales dates;
+    is_bank_holiday_sco on Scotland dates. NI is not encoded.
+
+    Proximity intersection rule (D-5): is_day_(before|after)_holiday fires only on
+    dates adjacent to a UK-wide holiday — i.e. a date that is a bank holiday in
+    BOTH E&W AND Scotland."""
 
 # features/assembler.py (additions)
-CALENDAR_OUTPUT_SCHEMA: pa.Schema   # 10 weather-only columns + ~40 calendar columns, in order
+CALENDAR_OUTPUT_SCHEMA: pa.Schema   # 10 weather-only columns + 44 calendar columns + 1 provenance, in order
 def assemble_calendar(cfg: AppConfig, cache: CachePolicy = CachePolicy.OFFLINE) -> Path:
     """Orchestrator: calls assemble() then derive_calendar() then writes parquet."""
 def load_calendar(path: Path) -> pd.DataFrame:
@@ -199,17 +210,17 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
   - `min_inter_request_seconds: 0.0` (gov.uk has no documented rate limit; D-1).
   - `rate_limit`, `retry`, `request_timeout_seconds` — copied from `conf/ingestion/neso.yaml`.
   - `divisions` list as above.
-- [ ] Create `conf/features/weather_calendar.yaml` with `# @package features.weather_calendar`:
+- [ ] **Refactor `conf/features/weather_only.yaml`** — change the `# @package` header from `features.weather_only` to `features`, and wrap the existing fields under a `weather_only:` key. This is the prerequisite for the `features=<name>` Hydra group-swap override: the `model=<name>` precedent works because `conf/model/linear.yaml` uses `# @package model` and the defaults list contains `- model: linear`. The `features/weather_only@features.weather_only` package-override form does not support `features=` CLI swap.
+- [ ] Create `conf/features/weather_calendar.yaml` with `# @package features` and wrap under `weather_calendar:`:
   - `name: weather_calendar`
   - `cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/features}`
   - `cache_filename: weather_calendar.parquet`
   - `demand_aggregation: mean` (same as weather_only default).
-  - `forward_fill_weather_hours: 3` (same as weather_only default).
-- [ ] Add to `conf/config.yaml` `defaults:` list:
-  - `- ingestion/holidays@ingestion.holidays`
-  - (Do NOT add `- features/weather_calendar@features.weather_calendar` — the whole point of D-10 is that exactly one of `features.weather_only` / `features.weather_calendar` is populated at a time. Treat `features` as a Hydra group, keeping `- features/weather_only@features.weather_only` as the default group entry and relying on a CLI override `features=weather_calendar` to swap.)
-
-  Clarification on Hydra mechanics: if the existing `features/weather_only` entry is written with the `@features.weather_only` package specifier, the equivalent `weather_calendar` yaml must use `@features.weather_calendar`. A CLI `features=weather_calendar` override replaces the default entry and leaves the other unset. `_resolve_feature_set(cfg)` enforces mutual-exclusivity at runtime.
+  - `forward_fill_hours: 3` (same as weather_only default; note: schema field is `forward_fill_hours`, not the plan's earlier mis-name `forward_fill_weather_hours`).
+- [ ] Update `conf/config.yaml` `defaults:` list:
+  - Add `- ingestion/holidays@ingestion.holidays`.
+  - **Change `- features/weather_only@features.weather_only` → `- features: weather_only`** (group-swap form; symmetric with `- model: linear`). After this change, `features=weather_calendar` swaps the loaded file; only ONE of `cfg.features.weather_only` / `cfg.features.weather_calendar` is populated at runtime. The `_resolve_feature_set(cfg)` resolver in T5 picks the populated one.
+- [ ] Update the error message in `src/bristol_ml/features/assembler.py:467` that references the old defaults-list form — it currently reads `"Ensure 'features/weather_only@features.weather_only' is in 'conf/config.yaml' defaults."` and should read `"Ensure 'features: weather_only' (or 'features=weather_only' CLI override) resolves to a populated cfg.features.weather_only."`.
 - **Acceptance:** contributes to AC-1, AC-7.
 - **Tests (spec-derived, written by `@test-author`):**
   - `test_app_config_default_selects_weather_only` — `load_config()` with no overrides yields `cfg.features.weather_only` populated, `cfg.features.weather_calendar is None`.
@@ -247,30 +258,36 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 - [ ] Create `src/bristol_ml/features/calendar.py`:
   - Pure function `derive_calendar(df: pd.DataFrame, holidays_df: pd.DataFrame) -> pd.DataFrame`. Input: hourly frame with tz-aware UTC `timestamp_utc` column or index (document which). Output: same frame with calendar columns appended. No I/O, no global state, no logging of side-effecting content — one `logger.info` line per call summarising the row count, bank-holiday date count, and dropped-row count (if any), matching the Stage 3 D5 convention.
   - `CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...]` — the explicit ordered list, derivable by code but pinned as a constant so downstream (harness / `LinearConfig.feature_columns`) has one source of truth. Dtypes per D-3 / D-4 / D-5:
-    - `hour_of_day_{01..23}` — 23 `int8` one-hot columns (hour 0 is reference; drop it).
-    - `day_of_week_{1..6}` — 6 `int8` one-hot columns (Sunday = 0 is reference; drop it).
-    - `month_{2..12}` — 11 `int8` one-hot columns (January = 1 is reference; drop it).
-    - `is_bank_holiday` — 1 `int8` column; union of england-and-wales + scotland per **D2**.
-    - `is_day_before_holiday` — 1 `int8` column per **D5**.
-    - `is_day_after_holiday` — 1 `int8` column per **D5**.
-    - Total: 42 calendar columns (23 + 6 + 11 + 3).
-  - DST rule per **D7**: convert the UTC index to `Europe/London`, take the local-date component, compare to the holiday-date set. Document the rule verbatim in the module docstring; cite the plan decision.
-  - Collinearity guard: assert (in code, not just docstring) that `is_weekend` is NOT in the output column set — the one-hot `day_of_week` already encodes weekend information and adding `is_weekend` produces perfect multicollinearity (per R5). The guard is a one-line `assert "is_weekend" not in derived.columns` that catches future mistaken extensions.
-  - Historical-depth fallback per **D6**: if any row in the input has a local-date before the earliest holiday-date, log `WARNING` and fill `is_bank_holiday` / `is_day_before_holiday` / `is_day_after_holiday` with `0` for those rows. Do not raise.
+    - `hour_of_day_{01..23}` — 23 `int8` one-hot columns (hour 0 is reference; drop it). D-3 above; external research §R4 in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md).
+    - `day_of_week_{1..6}` — 6 `int8` one-hot columns. **Monday (pandas weekday = 0) is the reference category, dropped from the one-hot.** Remaining columns map to: `_1 = Tuesday`, `_2 = Wednesday`, `_3 = Thursday`, `_4 = Friday`, `_5 = Saturday`, `_6 = Sunday`. The module docstring MUST document this mapping verbatim because the pandas/ISO/US conventions differ and readers of OLS coefficients need certainty. Per D-4 human mandate.
+    - `month_{2..12}` — 11 `int8` one-hot columns (January = 1 is reference; drop it). D-4 above; external research §R4 in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md).
+    - `is_bank_holiday_ew` — 1 `int8` column; fires on dates whose `Europe/London` local date is in the gov.uk `england-and-wales` division events. Per **D-2**.
+    - `is_bank_holiday_sco` — 1 `int8` column; fires on dates whose `Europe/London` local date is in the gov.uk `scotland` division events. Per **D-2**.
+    - `is_day_before_holiday` — 1 `int8` column. Fires on dates where the next calendar date is in the **intersection** of `england-and-wales` ∩ `scotland` holiday-date sets (i.e. a UK-wide holiday). Per **D-5** intersection rule.
+    - `is_day_after_holiday` — 1 `int8` column. Fires on dates where the previous calendar date is in the intersection set. Per **D-5**.
+    - **Total: 44 calendar columns** (23 hour + 6 day-of-week + 11 month + 4 holiday).
+    - `northern-ireland` division events are explicitly **not** encoded (D-2); the gov.uk cache still contains them so future regional work can use them without re-ingesting.
+  - DST rule per **D7**: convert the UTC index to `Europe/London`, take the local-date component, compare to the division-specific holiday-date set. Document the rule verbatim in the module docstring; cite the plan decision. External research §R6 in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md).
+  - Collinearity guard: assert (in code, not just docstring) that `is_weekend` is NOT in the output column set — the one-hot `day_of_week` already encodes weekend information and adding `is_weekend` produces perfect multicollinearity. The guard is a one-line `assert "is_weekend" not in derived.columns` that catches future mistaken extensions. external research §R5 in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md).
+  - Historical-depth fallback per **D6**: if any row in the input has a local-date before the earliest holiday-date, log `WARNING` and fill all four holiday columns (`is_bank_holiday_ew`, `is_bank_holiday_sco`, `is_day_before_holiday`, `is_day_after_holiday`) with `0` for those rows. Do not raise.
   - `_cli_main(argv=None) -> int` — `python -m bristol_ml.features.calendar --help` prints the expected output schema. If `cfg.features.weather_calendar` + `cfg.ingestion.holidays` caches are warm, also loads them and prints the first few rows of `derive_calendar`'s output.
 - **Acceptance:** AC-2, AC-3, AC-5 (residual-ripple suppression depends on the calendar columns being correct), AC-7.
 - **Tests (spec-derived; pure function — no fixtures needed beyond synthetic frames):**
   - `test_derive_calendar_deterministic` — same input twice → byte-identical output (AC-2).
   - `test_derive_calendar_one_hot_hour_sum_leq_one` — for every row, the 23 hour dummies sum to 0 (hour 0) or 1 (any other hour).
-  - `test_derive_calendar_one_hot_weekday_sum_leq_one` — same property for day-of-week.
+  - `test_derive_calendar_one_hot_weekday_monday_is_reference` — for a row whose `Europe/London` local date is a Monday, all six `day_of_week_*` columns are 0. For Tuesday, `day_of_week_1=1` and the rest are 0. Pins the **D-4 Monday-reference** convention.
+  - `test_derive_calendar_one_hot_weekday_sum_leq_one` — for every row, the 6 day-of-week dummies sum to 0 (Monday) or 1 (any other day).
   - `test_derive_calendar_one_hot_month_sum_leq_one` — same property for month.
-  - `test_derive_calendar_is_bank_holiday_matches_holidays_df` — synthetic frame with a known Boxing Day row → `is_bank_holiday=1`.
-  - `test_derive_calendar_proximity_christmas_cluster` — 27 December (Boxing Day substitute + day-before-New-Year is not a holiday, but day-after Boxing Day is) → `is_day_after_holiday=1`, `is_day_before_holiday=0` if New Year's Day is a Thursday; variant covers both cases.
-  - `test_derive_calendar_dst_spring_forward` — synthetic frame spanning the last Sunday of March; bank holiday on that Sunday (hypothetical; or use the Monday after) → `is_bank_holiday=1` for all UTC hours whose `Europe/London` date matches (per **D7**).
-  - `test_derive_calendar_pre_2012_warns_and_fills_zero` — synthetic 2011 frame → all three holiday columns == 0, single `loguru` WARNING logged (per **D6**). Uses the `loguru_caplog` fixture in `tests/conftest.py`.
-  - `test_derive_calendar_ni_excluded_from_composite` — synthetic `holidays_df` with an NI-only holiday (e.g. 12 July) → `is_bank_holiday=0` for a frame containing that date (per **D2**).
-  - `test_derive_calendar_no_is_weekend_column` — output schema must not contain `is_weekend` (per R5 collinearity guard).
-  - `test_derive_calendar_column_order_matches_constant` — `derive_calendar`'s output columns end with exactly the `CALENDAR_VARIABLE_COLUMNS` ordered list.
+  - `test_derive_calendar_is_bank_holiday_ew_fires_on_ew_only_date` — synthetic `holidays_df` with an E&W-only holiday (an unusual English royal event, scripted into the fixture) → `is_bank_holiday_ew=1`, `is_bank_holiday_sco=0` for the matching UTC hours. Per **D-2**.
+  - `test_derive_calendar_is_bank_holiday_sco_fires_on_scotland_only_date` — 2 January (Scotland only) → `is_bank_holiday_sco=1`, `is_bank_holiday_ew=0`. Per **D-2**.
+  - `test_derive_calendar_is_bank_holiday_both_fire_on_uk_wide_date` — 25 December → `is_bank_holiday_ew=1` AND `is_bank_holiday_sco=1`. Per **D-2**.
+  - `test_derive_calendar_ni_not_encoded` — synthetic `holidays_df` with an NI-only holiday (12 July) → neither `is_bank_holiday_ew` nor `is_bank_holiday_sco` fires on 12 July; no `is_bank_holiday_ni` column exists in the output schema. Per **D-2**.
+  - `test_derive_calendar_proximity_intersection_fires_on_uk_wide_only` — 26 December (Boxing Day, UK-wide) is in the intersection set → 25 December (Christmas) already being UK-wide means `is_day_after_holiday=1` on 26 December. In contrast, 3 January (day after 2-January Scotland-only) → `is_day_after_holiday=0` because 2 January is NOT in the intersection. Per **D-5** intersection rule.
+  - `test_derive_calendar_proximity_christmas_cluster` — synthetic holidays covering 25–26 December and 1 January; verify a representative week produces the expected proximity bit pattern for each date (e.g. 24 Dec → `is_day_before_holiday=1`, `is_day_after_holiday=0`; 27 Dec → `is_day_after_holiday=1`, `is_day_before_holiday=0`; etc.).
+  - `test_derive_calendar_dst_spring_forward` — synthetic frame spanning the last Sunday of March; bank holiday on the adjacent Monday → `is_bank_holiday_ew=1` for all UTC hours whose `Europe/London` date matches the Monday, and 0 for the Sunday's hours even though the last UTC hour of Sunday may fall in the early hours of Monday local time. Pins **D-7**.
+  - `test_derive_calendar_pre_2012_warns_and_fills_zero` — synthetic 2011 frame → all four holiday columns == 0, single `loguru` WARNING logged (per **D6**). Uses the `loguru_caplog` fixture in `tests/conftest.py`.
+  - `test_derive_calendar_no_is_weekend_column` — output schema must not contain `is_weekend` (per external research §R5 in [`05-calendar-features-external-research.md`](../../lld/research/05-calendar-features-external-research.md)).
+  - `test_derive_calendar_column_order_matches_constant` — `derive_calendar`'s output columns end with exactly the `CALENDAR_VARIABLE_COLUMNS` ordered list (44 columns).
   - `test_derive_calendar_no_io` — `unittest.mock` over `builtins.open`, `requests.get`, `Path.write_bytes` — none called during derivation (AC-2).
 - **Command:** `uv run pytest tests/unit/features/test_calendar.py -q`.
 
@@ -278,7 +295,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 *(Depends on T1, T3.)*
 
 - [ ] Extend `src/bristol_ml/features/assembler.py`:
-  - Add module-level constant `CALENDAR_OUTPUT_SCHEMA: pa.Schema` = `OUTPUT_SCHEMA` (10 weather columns) + `CALENDAR_VARIABLE_COLUMNS` (42 calendar columns) + `holidays_retrieved_at_utc` scalar column. Total: 53 columns. Column order: weather-only columns first (preserves `OUTPUT_SCHEMA.names` as a prefix), calendar columns next, provenance scalars last.
+  - Add module-level constant `CALENDAR_OUTPUT_SCHEMA: pa.Schema` = `OUTPUT_SCHEMA` (10 weather columns) + `CALENDAR_VARIABLE_COLUMNS` (44 calendar columns under D-2 split) + `holidays_retrieved_at_utc` scalar column. **Total: 55 columns**. Column order: weather-only columns first (preserves `OUTPUT_SCHEMA.names` as a prefix), calendar columns next (23 hour + 6 day-of-week + 11 month + 2 per-division-flag + 2 proximity), provenance scalars last.
   - Add `assemble_calendar(cfg: AppConfig, *, cache: CachePolicy = CachePolicy.OFFLINE) -> Path`: orchestrator that (a) calls `assemble(cfg, cache=...)` with the weather-only config, (b) loads the weather-only parquet, (c) loads the holidays parquet via `ingestion.holidays.load`, (d) calls `features.calendar.derive_calendar`, (e) appends `holidays_retrieved_at_utc` as a scalar column, (f) schema-asserts against `CALENDAR_OUTPUT_SCHEMA`, (g) writes to `cfg.features.weather_calendar.cache_dir / cache_filename` via `_atomic_write`.
   - Add `load_calendar(path: Path) -> pd.DataFrame`: schema-validating reader for `CALENDAR_OUTPUT_SCHEMA`. Reuses the existing `load` schema-validation idiom but on the extended schema.
   - Do NOT modify the existing `build()`, `assemble()`, or `load()` — those continue to serve the `weather_only` feature set unchanged.
@@ -286,7 +303,7 @@ No change to `src/bristol_ml/cli.py`, `__main__.py`, `load_config()` signature, 
 - [ ] Extend `src/bristol_ml/features/CLAUDE.md` with the new surface + the two-schemas-in-one-module convention.
 - **Acceptance:** AC-3, AC-7.
 - **Tests (spec-derived):**
-  - `test_calendar_output_schema_is_weather_schema_plus_calendar_plus_provenance` — structural: `CALENDAR_OUTPUT_SCHEMA.names[:10]` matches `OUTPUT_SCHEMA.names`; columns 10–51 match `CALENDAR_VARIABLE_COLUMNS`; last column is `holidays_retrieved_at_utc`.
+  - `test_calendar_output_schema_is_weather_schema_plus_calendar_plus_provenance` — structural: `CALENDAR_OUTPUT_SCHEMA.names[:10]` matches `OUTPUT_SCHEMA.names`; columns 10..53 (44 entries) match `CALENDAR_VARIABLE_COLUMNS`; last column (index 54) is `holidays_retrieved_at_utc`.
   - `test_assemble_calendar_writes_parquet` — with mock caches for demand, weather, holidays, `assemble_calendar(cfg)` returns a `Path` that exists and passes `load_calendar`.
   - `test_load_calendar_rejects_weather_only_schema` — loading a `weather_only` parquet via `load_calendar` raises because calendar columns are missing.
   - `test_load_rejects_weather_calendar_schema` — the reverse (existing `load` rejects extra columns — already tested; re-verify the invariant is preserved in this plan).
@@ -429,12 +446,12 @@ Escalate to `@reframer` only if a task fails three times with the same framing (
 |---|---|---|---|
 | gov.uk changes the JSON shape of the endpoint mid-stage | Low | High | VCR cassette pins the response shape; the `OUTPUT_SCHEMA` declaration derives from the cassette. A shape change surfaces as a schema-assert test failure, not a silent data corruption. |
 | `python-holidays` (R9) is the wrong fallback path and the human prefers a committed CSV (D-6 override) | Low | Low | D-6 is a single-line reversal; test `test_derive_calendar_pre_2012_warns_and_fills_zero` would be replaced by one asserting the raise. |
-| NI composition is actually wanted for a future regional story (D-2 override) | Medium | Low | The ingester persists all three divisions to the cache; `derive_calendar` filters to two. Adding `is_bank_holiday_ni` as a separate column requires one line in `derive_calendar` + one line in `CALENDAR_VARIABLE_COLUMNS` — no architectural change. |
+| NI encoding is actually wanted for a future regional story | Low | Low | The ingester persists all three divisions to the cache; `derive_calendar` currently emits `is_bank_holiday_ew` + `is_bank_holiday_sco` and intentionally omits NI (D-2). Adding `is_bank_holiday_ni` requires one line in `derive_calendar` + one entry in `CALENDAR_VARIABLE_COLUMNS` — no architectural change. |
 | R4's one-hot vs sin/cos evidence does not translate to GB demand data; the one-hot OLS overfits on the small test folds | Low | Medium | The sklearn evidence is on an analogous hourly demand series with similar data volume. OLS at n=8760, p≈48 is still well-conditioned. If the notebook shows this, revisit D-3/D-4 in Stage 6. No blocker for Stage 5's without/with comparison. |
 | `is_weekend` collinearity guard (R5) fires inadvertently when a future stage extends `CALENDAR_VARIABLE_COLUMNS` | Low | Low | The assert has a clear error message citing R5. A future extension must consciously either drop the one-hot day-of-week encoding (change D-4) or omit `is_weekend`. |
 | `derive_calendar` fails on a real DST-change day with data-gap edge case (pandas GH#47398) | Medium | Medium | Synthetic test fixture covers a real spring-forward Sunday. If the test passes and production fails, the plan's DST rule is wrong; escalate to `@reframer`. |
 | `train.py` Hydra `features=` override semantics don't mutually-exclude the two config blocks as the plan assumes | Medium | Medium | `_resolve_feature_set` raises on the "both populated" / "neither populated" cases. Tests `test_resolve_feature_set_both_populated_raises` / `_neither_populated_raises` pin the expectation. If Hydra populates both, the resolver surfaces that and the plan's YAML wiring must change. |
-| Notebook exceeds 120 s budget with ~40 extra feature columns | Low | Low | OLS fit at n=8760, p≈48 is ~10 ms per fold; 52 weekly folds = ~0.5 s for fits alone. The full notebook should comfortably stay under 15 s on a warm cache. If breached, drop `min_train_periods` further. |
+| Notebook exceeds 120 s budget with 44 extra feature columns | Low | Low | OLS fit at n=8760, p≈49 (5 weather + 44 calendar) is ~10 ms per fold; 52 weekly folds = ~0.5 s for fits alone. The full notebook should comfortably stay under 15 s on a warm cache. If breached, drop `min_train_periods` further. |
 | NESO forecast three-way comparison breaks because the two `LinearModel` instances share hidden state across `compare_on_holdout` calls | Low | Medium | `LinearModel` fit state is per-instance; `compare_on_holdout` re-fits per fold. The test `test_benchmarks_three_way_table_shape` from Stage 4 is a regression guard. |
 | `CALENDAR_OUTPUT_SCHEMA` column order drifts between `derive_calendar` output and the schema constant | Medium | High | `test_calendar_output_schema_is_weather_schema_plus_calendar_plus_provenance` pins the ordering; `test_derive_calendar_column_order_matches_constant` pins `derive_calendar`'s output. Both must pass before T4 reports complete. |
 
@@ -442,22 +459,24 @@ Escalate to `@reframer` only if a task fails three times with the same framing (
 
 ## Human sign-off
 
-*Pending.*
+*Resolved 2026-04-20.*
 
-- D1 (gov.uk/bank-holidays.json + VCR cassette): **ACCEPT / OVERRIDE**
-- D2 (GB composite = E&W ∪ Scotland; NI excluded): **ACCEPT / OVERRIDE**
-- D3 (one-hot `hour_of_day`): **ACCEPT / OVERRIDE**
-- D4 (one-hot `day_of_week` + one-hot `month`): **ACCEPT / OVERRIDE**
-- D5 (binary pair `is_day_before_holiday` + `is_day_after_holiday`): **ACCEPT / OVERRIDE**
-- D6 (WARNING + fill 0 for pre-2012; `python-holidays` documented as extension path): **ACCEPT / OVERRIDE**
-- D7 (`Europe/London` local-date DST rule): **ACCEPT / OVERRIDE**
-- D8 (notebook `step=168` + `min_train_periods=720` override): **ACCEPT / OVERRIDE**
-- D9 (Option 3 — composable `derive_calendar` + parallel `CALENDAR_OUTPUT_SCHEMA`): **ACCEPT / OVERRIDE**
-- D10 (Hydra `features=weather_only | weather_calendar` group override; `_resolve_feature_set` in `train.py`): **ACCEPT / OVERRIDE**
-- D11 (new `notebooks/05_calendar_features.ipynb`): **ACCEPT / OVERRIDE**
+- D1 (gov.uk/bank-holidays.json + VCR cassette): **ACCEPT**
+- D2 (GB division composition): **OVERRIDE** — two separate columns `is_bank_holiday_ew` + `is_bank_holiday_sco` (no union column); NI still cached but not encoded.
+- D3 (one-hot `hour_of_day`): **ACCEPT**
+- D4 (one-hot `day_of_week` + one-hot `month`): **ACCEPT WITH CHANGE** — Monday is the reference category for day-of-week (dropped from one-hot), replacing the originally-proposed Sunday reference. Month reference unchanged (January).
+- D5 (binary pair `is_day_before_holiday` + `is_day_after_holiday`): **ACCEPT WITH NOTE** — consequent to D-2's split, proximity uses the **intersection** of E&W and Scotland holiday-date sets (i.e. fires only on UK-wide statutory holidays).
+- D6 (WARNING + fill 0 for pre-2012; `python-holidays` documented as extension path): **ACCEPT**
+- D7 (`Europe/London` local-date DST rule): **ACCEPT**
+- D8 (notebook `step=168` + `min_train_periods=720` override): **ACCEPT**
+- D9 (Option 3 — composable `derive_calendar` + parallel `CALENDAR_OUTPUT_SCHEMA`): **ACCEPT**
+- D10 (Hydra `features=weather_only | weather_calendar` group override; `_resolve_feature_set` in `train.py`): **ACCEPT**
+- D11 (new `notebooks/05_calendar_features.ipynb`): **ACCEPT**
 
 Housekeeping:
-- H-1 (`NesoBenchmarkConfig.holdout_start/_end` → Stage 6): **ACCEPT / OVERRIDE**
-- H-2 (`ingestion._neso_dst` extraction → Stage 13): **ACCEPT / OVERRIDE**
-- H-3 (human-led batched `DESIGN.md §6` edit covering Stages 1–5 at PR review): **ACCEPT / OVERRIDE**
-- H-4 (`docs/architecture/ROADMAP.md` Features section closed at Stage 5 T7): **ACCEPT / OVERRIDE**
+- H-1 (`NesoBenchmarkConfig.holdout_start/_end` → Stage 6): **ACCEPT**
+- H-2 (`ingestion._neso_dst` extraction → Stage 13): **ACCEPT**
+- H-3 (human-led batched `DESIGN.md §6` edit covering Stages 1–5 at PR review): **ACCEPT**
+- H-4 (`docs/architecture/ROADMAP.md` Features section closed at Stage 5 T7): **ACCEPT**
+
+*Process feedback (human, 2026-04-20): "In future please ensure that the plan refers to the relevant context in a research doc, as finding it was difficult at times."* Applied to this plan via the in-table anchor links added to D-1, D-2, D-3, D-4, D-5, D-6, D-7, D-8, D-9, D-10 and throughout Task T3 — each research claim now links to the specific subsection of the relevant `docs/lld/research/05-calendar-features-*.md` file. Future plans to follow the same pattern.

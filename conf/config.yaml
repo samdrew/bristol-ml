@@ -3,7 +3,14 @@ defaults:
   - ingestion/neso@ingestion.neso
   - ingestion/weather@ingestion.weather
   - ingestion/neso_forecast@ingestion.neso_forecast
-  - features/weather_only@features.weather_only
+  - ingestion/holidays@ingestion.holidays
+  # Stage 5 D-10: ``features`` is a Hydra group (not a package override) so
+  # ``features=weather_calendar`` swaps feature sets at the CLI, symmetric
+  # with how ``model=naive`` / ``model=linear`` work.  Exactly one of
+  # ``cfg.features.weather_only`` / ``cfg.features.weather_calendar`` is
+  # populated per run; ``bristol_ml.train._resolve_feature_set`` enforces
+  # mutual-exclusivity.
+  - features: weather_only
   - evaluation/rolling_origin@evaluation.rolling_origin
   - evaluation/metrics@evaluation.metrics
   - evaluation/benchmark@evaluation.benchmark
