@@ -243,7 +243,7 @@ live-demo sanity check and to satisfy DESIGN §2.1.1.
 - Layer contract — `docs/architecture/layers/evaluation.md` (Stage 3
   lands the initial version; Stage 4 extends for metrics + harness +
   benchmarks).
-- Stage 4 plan — `docs/plans/active/04-linear-baseline.md` §5 (public
+- Stage 4 plan — `docs/plans/completed/04-linear-baseline.md` §5 (public
   surface) and §6 Tasks T5–T8.
 - Stage 3 plan — `docs/plans/completed/03-feature-assembler.md` §5 (the
   splitter's public signature).
