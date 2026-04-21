@@ -20,6 +20,10 @@ Land a colourblind-safe diagnostic-plot helper library for the evaluation layer 
 - `docs/stages/README.md` — Stage 6 status cell flipped to `shipped` with links to plan + retro + evaluation layer.
 - H-3 fix — `docs/lld/stages/05-calendar-features.md` "Next" cell corrected from "Stage 6 — Tree-based models" (copy-paste residue) to "Stage 6 — Enhanced evaluation & visualisation".
 - Plan moved from `docs/plans/active/06-enhanced-evaluation.md` to `docs/plans/completed/06-enhanced-evaluation.md` in this final commit.
+- Phase 3 review response — three fixes added in-branch before PR:
+  - **B1 (bug).** `forecast_overlay` drew the second prediction line in the Actual colour. Palette slice corrected from `OKABE_ITO[1:] + OKABE_ITO[3:]` to `OKABE_ITO[1:2] + OKABE_ITO[3:]`. Regression test pins "no prediction colour equals Actual" for a 3-prediction call (matches notebook Cell 15).
+  - **N1 (defensive).** `forecast_overlay_with_band` silently inverted the band on reversed `quantiles`. Now raises `ValueError` for any `(lo, hi)` outside `0 ≤ lo < hi ≤ 1`; label-based column access added as defence-in-depth. Parametrised regression test over six malformed inputs.
+  - **N2 (spec-drift).** D5's "Hydra-configurable figsize / dpi" was decorative because `plots.py` never read `PlotsConfig`. Added public `apply_plots_config(config: PlotsConfig) -> None` — a notebook or CLI that calls it after `load_config()` now propagates `evaluation.plots.figsize` / `dpi` overrides to `plt.rcParams`. Regression test round-trips `PlotsConfig(figsize=(16, 10), dpi=150)` through the entry point.
 
 ## Design choices made here
 
