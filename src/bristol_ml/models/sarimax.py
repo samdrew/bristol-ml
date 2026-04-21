@@ -151,23 +151,7 @@ class SarimaxModel:
                 "SarimaxModel.fit requires len(features) == len(target); "
                 f"got {len(features)} vs {len(target)}."
             )
-        if not isinstance(features.index, pd.DatetimeIndex):
-            raise ValueError(
-                "SarimaxModel.fit requires a DatetimeIndex on features; "
-                f"got {type(features.index).__name__}."
-            )
-        if features.index.tz is None:
-            raise ValueError(
-                "SarimaxModel.fit requires a tz-aware DatetimeIndex on features "
-                "(the Stage 3 assembler contract guarantees UTC). Got tz-naive."
-            )
-        if str(features.index.tz) != "UTC":
-            raise ValueError(
-                "SarimaxModel.fit requires a UTC-tz DatetimeIndex on features "
-                "(the Stage 3 assembler contract); got "
-                f"tz={features.index.tz!r}. "
-                "Convert upstream via df.index = df.index.tz_convert('UTC')."
-            )
+        self._require_utc_datetimeindex(features, method="fit")
 
         # --- 2. Feature-column resolution --------------------------------
         features_with_fourier = self._append_fourier_if_configured(features)
@@ -190,9 +174,9 @@ class SarimaxModel:
         # used).  Set freq on a copy of the index so the warning is
         # suppressed and callers' DataFrames are not mutated.
         endog_index = features.index.copy()
-        # Non-uniform or otherwise incompatible index: fall back to the
-        # constructor's ``freq="h"`` kwarg path.  The warning may still
-        # fire but the fit still works.
+        # In practice this fires only on non-uniform test data; the
+        # constructor's ``freq="h"`` kwarg remains the fallback path and
+        # the fit still succeeds.
         with contextlib.suppress(ValueError, TypeError):
             endog_index.freq = "h"
         endog = pd.Series(
@@ -252,6 +236,7 @@ class SarimaxModel:
         if self._results is None:
             raise RuntimeError("SarimaxModel must be fit() before predict().")
 
+        self._require_utc_datetimeindex(features, method="predict")
         features_with_fourier = self._append_fourier_if_configured(features)
         missing = [c for c in self._feature_columns if c not in features_with_fourier.columns]
         if missing:
@@ -345,10 +330,14 @@ class SarimaxModel:
             # ``mle_retvals`` is the statsmodels optimiser bag.  The
             # ``converged`` key is present when the optimiser ran (which
             # is every real fit); guard with ``.get`` so a hypothetical
-            # future statsmodels API change surfaces as ``None`` rather
-            # than a KeyError.
+            # future statsmodels API change surfaces as ``None`` ("don't
+            # know") rather than as ``False`` ("ran but did not
+            # converge") or a KeyError (Stage 7 Phase 3 review N3).
             mle_retvals = getattr(self._results, "mle_retvals", None) or {}
-            hyperparameters["converged"] = bool(mle_retvals.get("converged", False))
+            converged_raw = mle_retvals.get("converged")
+            hyperparameters["converged"] = (
+                bool(converged_raw) if converged_raw is not None else None
+            )
         return ModelMetadata(
             name=_build_metadata_name(self._config.order, self._config.seasonal_order),
             feature_columns=self._feature_columns,
@@ -377,6 +366,37 @@ class SarimaxModel:
     # ---------------------------------------------------------------------
     # Internal helpers
     # ---------------------------------------------------------------------
+
+    @staticmethod
+    def _require_utc_datetimeindex(features: pd.DataFrame, *, method: str) -> None:
+        """Guard ``features.index`` as a UTC-tz ``DatetimeIndex``.
+
+        Centralised so :meth:`fit` and :meth:`predict` share the exact
+        same contract.  Called from both entry points because
+        :meth:`predict`'s only other index-sensitive helper
+        (:func:`bristol_ml.features.fourier.append_weekly_fourier`) is
+        skipped on the ``weekly_fourier_harmonics=0`` no-op path — without
+        this guard a direct ``SarimaxModel.predict(df)`` call with a
+        tz-naive index would fall through to an opaque statsmodels error
+        (Stage 7 Phase 3 review R1).
+        """
+        if not isinstance(features.index, pd.DatetimeIndex):
+            raise ValueError(
+                f"SarimaxModel.{method} requires a DatetimeIndex on features; "
+                f"got {type(features.index).__name__}."
+            )
+        if features.index.tz is None:
+            raise ValueError(
+                f"SarimaxModel.{method} requires a tz-aware DatetimeIndex on features "
+                "(the Stage 3 assembler contract guarantees UTC). Got tz-naive."
+            )
+        if str(features.index.tz) != "UTC":
+            raise ValueError(
+                f"SarimaxModel.{method} requires a UTC-tz DatetimeIndex on features "
+                "(the Stage 3 assembler contract); got "
+                f"tz={features.index.tz!r}. "
+                "Convert upstream via df.index = df.index.tz_convert('UTC')."
+            )
 
     def _append_fourier_if_configured(self, features: pd.DataFrame) -> pd.DataFrame:
         """Append weekly-Fourier columns when ``weekly_fourier_harmonics > 0``.

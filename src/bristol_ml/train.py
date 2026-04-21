@@ -242,7 +242,22 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         )
         primary_kind = "linear"
     elif isinstance(model_cfg, SarimaxConfig):
-        primary = SarimaxModel(model_cfg)
+        # Mirror the LinearConfig branch: promote feature_columns=None to
+        # the resolved feature-set tuple so ``SarimaxModel._config.feature_columns``
+        # records exactly which columns the fit saw.  Without this promotion
+        # the stored config says ``None`` while the fitted metadata carries
+        # a resolved tuple — reproducibility from config alone is lost
+        # (Stage 7 Phase 3 review R3).
+        if model_cfg.feature_columns is None:
+            sarimax_cfg = model_cfg.model_copy(update={"feature_columns": feature_column_names})
+        else:
+            logger.info(
+                "SarimaxConfig.feature_columns explicitly set via Hydra "
+                "({} columns); not overriding with resolved feature-set columns.",
+                len(model_cfg.feature_columns),
+            )
+            sarimax_cfg = model_cfg
+        primary = SarimaxModel(sarimax_cfg)
         primary_kind = "sarimax"
     else:  # pragma: no cover — the discriminated union is exhaustive
         print(

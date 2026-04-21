@@ -1072,6 +1072,16 @@ def test_sarimax_residual_acf_at_lag_168_materially_lower_than_linear() -> None:
     abs_linear_168 = abs(linear_acf_values[168])
     abs_sarimax_168 = abs(sarimax_acf_values[168])
 
+    # Floor assertion: guard against a vacuous pass when both residuals are at
+    # the noise floor.  A broken SARIMAX that drives everything to noise could
+    # otherwise satisfy the ratio trivially.  0.05 chosen because the synthetic
+    # frame's weekly component is materially stronger than this on OLS residuals.
+    assert abs_linear_168 > 0.05, (
+        f"Linear residual ACF at lag 168 ({abs_linear_168:.4f}) is at or below "
+        f"the noise floor (0.05); the ratio comparison below would be vacuous. "
+        f"Check the synthetic-frame helper and linear baseline (T7 / AC-9)."
+    )
+
     # Relaxed threshold (70 % instead of plan's 50 %) — see docstring rationale.
     threshold = 0.70
     assert abs_sarimax_168 < threshold * abs_linear_168, (
@@ -1176,3 +1186,82 @@ def test_sarimax_fit_emits_no_frequency_userwarning(tmp_path: Path) -> None:
         f"{[str(w.message) for w in freq_warnings_b]} "
         f"(T7 surprise-2 regression guard / commit 65afd8e fix)."
     )
+
+
+# ---------------------------------------------------------------------------
+# T4. test_sarimax_fit_single_fold_completes_under_60_seconds (@slow benchmark)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_sarimax_fit_single_fold_completes_under_60_seconds() -> None:
+    """A single-fold SARIMAX fit on a 8760-row synthetic endog completes in ≤ 60 s.
+
+    Benchmark guard for NFR-1 (AC-3 feasibility): with the shipped
+    defaults (``order=(1,0,1)``, ``seasonal_order=(1,1,1,24)``,
+    ``weekly_fourier_harmonics=3``) a single-fold fit on a full year of
+    hourly data (8760 rows) must complete within 60 seconds on CI-class
+    hardware.  This is the risk-register guard referenced in the plan's
+    "Chosen default order does not fit in the AC-3 time budget" row.
+
+    Marked ``@pytest.mark.slow`` and excluded from the default
+    ``uv run pytest`` run via ``addopts = "... -m 'not slow'"`` in
+    ``pyproject.toml``.  Run explicitly with ``uv run pytest -m slow``.
+
+    If this test fails, D1/D6 cost assumptions no longer hold on current
+    hardware — do not weaken the threshold.  The documented fallbacks are
+    (a) drop a Fourier harmonic (3 → 1) or (b) reduce the fold window in
+    the notebook (``step=1344 → step=672``).  Either path must be discussed
+    with the human before landing.
+
+    Plan clause: T4 plan §Task T4 line 359 / risk-register line 506 / NFR-1.
+    """
+    import time
+
+    rng = np.random.default_rng(42)
+    n_rows = 8760  # one year of hourly data
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+
+    temp_c = rng.normal(loc=10.0, scale=5.0, size=n_rows)
+    cloud_cover = rng.uniform(0.0, 1.0, size=n_rows)
+    features = pd.DataFrame(
+        {"temp_c": temp_c, "cloud_cover": cloud_cover},
+        index=index,
+    )
+
+    # Target: AR(1) + daily + weekly seasonality + noise, ~10 000 MW scale.
+    ar_coef = 0.7
+    noise = rng.normal(scale=200.0, size=n_rows)
+    t = np.arange(n_rows, dtype=np.float64)
+    daily = 500.0 * np.sin(2.0 * np.pi * t / 24.0)
+    weekly = 300.0 * np.sin(2.0 * np.pi * t / 168.0)
+    target_vals = np.zeros(n_rows, dtype=np.float64)
+    target_vals[0] = 10_000.0
+    for i in range(1, n_rows):
+        target_vals[i] = (
+            ar_coef * target_vals[i - 1]
+            + (1.0 - ar_coef) * 10_000.0
+            + daily[i]
+            + weekly[i]
+            + noise[i]
+        )
+    target = pd.Series(target_vals, index=index, name="nd_mw")
+
+    # Shipped defaults: order=(1,0,1), seasonal_order=(1,1,1,24),
+    # weekly_fourier_harmonics=3 → 6 Fourier columns added by fit().
+    config = SarimaxConfig()
+    model = SarimaxModel(config)
+
+    start = time.perf_counter()
+    model.fit(features, target)
+    elapsed_s = time.perf_counter() - start
+
+    assert elapsed_s <= 60.0, (
+        f"Single-fold SARIMAX fit on 8760 rows took {elapsed_s:.1f} s "
+        f"(> 60 s budget).  D1/D6 cost assumptions no longer hold.  Do not "
+        f"weaken the threshold — investigate fallbacks (drop a Fourier "
+        f"harmonic 3→1, or reduce the notebook fold window step=1344→step=672). "
+        f"(T4 / NFR-1 / risk-register line 506)."
+    )
+    # Sanity: the fit actually produced a results wrapper.
+    assert model.results is not None

@@ -57,7 +57,13 @@ known-first-party = ["bristol_ml", "conf"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = "-ra --strict-markers --record-mode=none"
+# ``-m "not slow"`` excludes the ``@pytest.mark.slow`` benchmark guards from the
+# default suite (see Stage 7 T4 plan clause — ``test_sarimax_fit_single_fold_``
+# ``completes_under_60_seconds``).  Run them explicitly with ``uv run pytest -m slow``.
+addopts = "-ra --strict-markers --record-mode=none -m 'not slow'"
+markers = [
+    "slow: benchmark/performance guards excluded from the default run; opt in with -m slow.",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:vcr.*",
 ]

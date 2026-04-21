@@ -526,8 +526,10 @@ class SarimaxConfig(BaseModel):
     # D2 (plan §1): (P, D, Q, s) seasonal order; ``s=24`` is the daily period.
     seasonal_order: tuple[int, int, int, int] = (1, 1, 1, 24)
     # Optional statsmodels trend argument: ``"n"`` (no trend), ``"c"`` (constant),
-    # ``"t"`` (linear), ``"ct"`` (both), or ``None`` (statsmodels default).
-    trend: str | None = None
+    # ``"t"`` (linear), ``"ct"`` (both), or ``None`` (statsmodels default).  The
+    # four-value ``Literal`` rejects typos like ``"linear"`` at config-load time
+    # rather than at ``fit()`` time (Stage 7 Phase 3 review R2).
+    trend: Literal["n", "c", "t", "ct"] | None = None
     # D1+D3 (plan §1): number of sin/cos Fourier harmonic pairs at the
     # 168-hour weekly period to append as exogenous regressors.  ``0`` disables
     # the weekly Fourier path (e.g. for ablation experiments or if using
