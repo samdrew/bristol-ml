@@ -466,10 +466,81 @@ class LinearConfig(BaseModel):
     fit_intercept: bool = True
 
 
+class SarimaxKwargs(BaseModel):
+    """statsmodels ``SARIMAX`` constructor kwargs, pinned by Stage 7 D6.
+
+    All five defaults are the *non-project-default* statsmodels values recommended
+    for real-world seasonal demand data.  ``enforce_stationarity`` and
+    ``enforce_invertibility`` are relaxed because the ML optimiser routinely
+    finds non-stationary optima on hourly electricity series; statsmodels PR
+    #4739 softened the same check at the starting-parameter stage for the same
+    reason.  ``concentrate_scale=True`` removes sigma^2 from the parameter
+    vector and materially speeds optimisation.  ``simple_differencing=False``
+    keeps the Harvey representation so the full residual series reaches the
+    Stage 6 ``acf_residuals`` helper without the first ``d + D*s`` observations
+    being dropped.  ``hamilton_representation=False`` stays on the default
+    Harvey form; only flip for Stata/R reproducibility.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enforce_stationarity: bool = False
+    enforce_invertibility: bool = False
+    concentrate_scale: bool = True
+    simple_differencing: bool = False
+    hamilton_representation: bool = False
+
+
+class SarimaxConfig(BaseModel):
+    """Configuration for the SARIMAX model (Stage 7).
+
+    Stage 7 D1 picks the dynamic-harmonic-regression (DHR) approach for the
+    dual-seasonality problem: daily seasonality at ``s=24`` is handled inside
+    the SARIMAX ``seasonal_order``; the weekly period (168 h) is absorbed by
+    Fourier exogenous regressors (``weekly_fourier_harmonics`` sin/cos pairs).
+    Setting ``weekly_fourier_harmonics=0`` disables the weekly Fourier path.
+
+    Per D2 the default ``(p,d,q)(P,D,Q,s) = (1,0,1)(1,1,1,24)`` is the
+    conservative textbook order from Hyndman *fpp3* §9 for hourly electricity
+    demand; the notebook exhibits an AIC grid sweep that justifies the pick as
+    a pedagogical exercise (not an architectural auto-search, which is out of
+    scope per the intent).
+
+    ``feature_columns=None`` means "use every non-target column from the input
+    feature frame at fit time" (including the Stage 5 calendar one-hots when
+    the weather-plus-calendar feature table is supplied); ``SarimaxModel.fit``
+    then appends the weekly-Fourier columns on top.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union.
+    type: Literal["sarimax"] = "sarimax"
+    # Target column on the Stage 3 feature table.
+    target_column: str = "nd_mw"
+    # ``None`` means "every non-target column in the supplied feature frame";
+    # an explicit tuple narrows the exogenous-regressor set for ablation runs.
+    feature_columns: tuple[str, ...] | None = None
+    # D2 (plan §1): (p, d, q) non-seasonal ARIMA order.
+    order: tuple[int, int, int] = (1, 0, 1)
+    # D2 (plan §1): (P, D, Q, s) seasonal order; ``s=24`` is the daily period.
+    seasonal_order: tuple[int, int, int, int] = (1, 1, 1, 24)
+    # Optional statsmodels trend argument: ``"n"`` (no trend), ``"c"`` (constant),
+    # ``"t"`` (linear), ``"ct"`` (both), or ``None`` (statsmodels default).
+    trend: str | None = None
+    # D1+D3 (plan §1): number of sin/cos Fourier harmonic pairs at the
+    # 168-hour weekly period to append as exogenous regressors.  ``0`` disables
+    # the weekly Fourier path (e.g. for ablation experiments or if using
+    # ``s=168`` directly in ``seasonal_order``).
+    weekly_fourier_harmonics: int = Field(default=3, ge=0, le=10)
+    # D6 (plan §1): the SARIMAX constructor kwargs bundle.
+    sarimax_kwargs: SarimaxKwargs = Field(default_factory=SarimaxKwargs)
+
+
 # ``AppConfig.model`` is a Pydantic discriminated union: exactly one of the
 # model variants is active per run (matching Hydra group-override semantics).
 # The ``type`` discriminator is written into the YAML by each Hydra group file.
-ModelConfig = NaiveConfig | LinearConfig
+ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig
 
 
 class ModelMetadata(BaseModel):
