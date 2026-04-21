@@ -5,11 +5,17 @@ Stage 7 Task T5 notebook deliverable — follows the 12-cell recipe in
 
 Generating the notebook from a Python script keeps cell source under
 version control as readable text and avoids the format-diff noise that
-Jupyter's editor cache produces.  Run once with
-``uv run python scripts/_build_notebook_07.py`` — the script is
-idempotent.  After generation, execute the notebook with
-``uv run jupyter nbconvert --execute --to notebook --inplace
-notebooks/07_sarimax.ipynb`` to populate outputs.
+Jupyter's editor cache produces.  The three-step regeneration flow is::
+
+    uv run python scripts/_build_notebook_07.py
+    uv run jupyter nbconvert --execute --to notebook --inplace \\
+        notebooks/07_sarimax.ipynb
+    uv run ruff format notebooks/07_sarimax.ipynb
+
+The generator's cell-source strings are *not* pre-formatted to ruff's
+line-wrapping conventions (string concatenation, long comprehensions);
+the final ``ruff format`` step is mandatory so the committed notebook
+passes the repo-wide format check.  The script itself is idempotent.
 
 Budget (plan AC-3): end-to-end under 10 minutes.  Single SARIMAX fit
 on 720 rows + 51 exog cols runs in ~20 s on the reference container;
@@ -101,7 +107,6 @@ if str(REPO_ROOT) not in sys.path:
 os.chdir(REPO_ROOT)  # cache_dir values resolve against cwd
 
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from statsmodels.tsa.seasonal import STL  # noqa: E402
 from statsmodels.tsa.statespace.sarimax import SARIMAX  # noqa: E402
@@ -115,7 +120,7 @@ from bristol_ml.features import assembler  # noqa: E402
 from bristol_ml.models.linear import LinearModel  # noqa: E402
 from bristol_ml.models.naive import NaiveModel  # noqa: E402
 from bristol_ml.models.sarimax import SarimaxModel  # noqa: E402
-from conf._schemas import LinearConfig, NaiveConfig, SplitterConfig  # noqa: E402
+from conf._schemas import LinearConfig, NaiveConfig  # noqa: E402
 
 # Apply the Okabe-Ito palette + figsize defaults (Stage 6 D2 / D5).
 plots.apply_plots_config(
@@ -164,7 +169,7 @@ calendar_cols = [
     if c.startswith(("hour_of_day_", "day_of_week_", "month_", "is_"))
     and not c.endswith("_retrieved_at_utc")
 ]
-exog_cols = ["temperature_2m"] + calendar_cols
+exog_cols = ["temperature_2m", *calendar_cols]
 print(f"Exog columns (pre-Fourier): {len(exog_cols)} "
       f"(temperature_2m + {len(calendar_cols)} calendar one-hots)")
 """)
@@ -310,7 +315,7 @@ for p in (0, 1):
                         freq="h",
                     ).fit(disp=False)
                     sweep_results.append((order, seasonal_order, float(res.aic)))
-                except Exception as exc:  # noqa: BLE001 — one broken cell shouldn't kill the sweep
+                except Exception as exc:  # one broken cell shouldn't kill the sweep
                     sweep_results.append((order, seasonal_order, float("nan")))
                     print(f"  {order} x {seasonal_order}: {type(exc).__name__}: {exc}")
 elapsed = time.time() - t0
@@ -340,7 +345,7 @@ cell_6 = code("""# Plan T5 Cell 6: single-fold fit on a 720-row training window 
 # automatically; the configured feature_columns need only name the
 # non-Fourier exog set.
 
-from conf._schemas import SarimaxConfig  # noqa: E402
+from conf._schemas import SarimaxConfig
 
 train_n = cfg.evaluation.rolling_origin.min_train_periods  # 720
 test_n = cfg.evaluation.rolling_origin.test_len  # 24

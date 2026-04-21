@@ -115,9 +115,9 @@ CLIs are the models, not the plumbing.
   initial version; Stage 7 updates the SARIMAX column).
 - Stage 4 plan — `docs/plans/completed/04-linear-baseline.md` §5 (public
   API surface) and §6 Tasks T2–T4.
-- Stage 7 plan — `docs/plans/active/07-sarimax.md` §5 (SARIMAX config
+- Stage 7 plan — `docs/plans/completed/07-sarimax.md` §5 (SARIMAX config
   schema + call path) and §6 Tasks T3–T5 (scaffold, fit/predict,
-  save/load + notebook).
+  save/load + notebook); retro at `docs/lld/stages/07-sarimax.md`.
 - Protocol rationale — `docs/architecture/decisions/0003-protocol-for-model-interface.md`
   (ADR filed in Task T10).
 - Intent — `docs/intent/04-linear-baseline.md` AC-2 (interface must be

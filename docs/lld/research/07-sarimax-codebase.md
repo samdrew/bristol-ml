@@ -1,7 +1,7 @@
 # Stage 7 — SARIMAX codebase map
 
-**Audience:** Stage 7 implementer, before opening any file.  
-**Status:** Research note — immutable after Stage 7 ships.  
+**Audience:** Stage 7 implementer, before opening any file.
+**Status:** Research note — immutable after Stage 7 ships.
 **Date:** 2026-04-21
 
 ---

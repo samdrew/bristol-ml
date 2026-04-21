@@ -51,6 +51,7 @@ Running standalone::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import warnings
 from collections.abc import Iterable
@@ -189,13 +190,11 @@ class SarimaxModel:
         # used).  Set freq on a copy of the index so the warning is
         # suppressed and callers' DataFrames are not mutated.
         endog_index = features.index.copy()
-        try:
+        # Non-uniform or otherwise incompatible index: fall back to the
+        # constructor's ``freq="h"`` kwarg path.  The warning may still
+        # fire but the fit still works.
+        with contextlib.suppress(ValueError, TypeError):
             endog_index.freq = "h"
-        except (ValueError, TypeError):
-            # Non-uniform or otherwise incompatible index; fall back to
-            # the constructor's ``freq="h"`` kwarg path.  The warning may
-            # still fire but the fit still works.
-            pass
         endog = pd.Series(
             np.asarray(target, dtype=np.float64),
             index=endog_index,
