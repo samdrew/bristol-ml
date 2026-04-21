@@ -492,3 +492,217 @@ def test_harness_train_end_before_test_start() -> None:
             f"must be strictly before test_start ({row['test_start']}) "
             "(no-leakage invariant)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 T5 — Harness predictions emission
+# ---------------------------------------------------------------------------
+
+
+def test_harness_evaluate_default_returns_metrics_only() -> None:
+    """Guards Stage 6 T5 — default call returns a plain DataFrame, not a tuple.
+
+    Regression guard: Stage 4 call sites must be unaffected by the new
+    ``return_predictions`` flag.  With the default (``return_predictions=False``),
+    ``evaluate`` must return a ``pd.DataFrame`` — never a tuple.
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_evaluate_default_returns_metrics_only``.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS)
+
+    assert isinstance(result, pd.DataFrame), (
+        "evaluate() with default return_predictions=False must return a pd.DataFrame, "
+        f"not {type(result).__name__} (Stage 6 T5 regression guard)."
+    )
+    assert not isinstance(result, tuple), (
+        "evaluate() with default return_predictions=False must not return a tuple "
+        "(Stage 6 T5 regression guard)."
+    )
+
+
+def test_harness_evaluate_return_predictions_returns_tuple() -> None:
+    """Guards Stage 6 T5 — ``return_predictions=True`` returns a 2-tuple.
+
+    The first element must be a ``pd.DataFrame`` (the metrics frame) and the
+    second element must also be a ``pd.DataFrame`` (the predictions frame).
+    Neither element may be a tuple itself.
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_evaluate_return_predictions_returns_tuple``.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    result = evaluate(model, df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True)
+
+    assert isinstance(result, tuple), (
+        "evaluate() with return_predictions=True must return a tuple; "
+        f"got {type(result).__name__} (Stage 6 T5)."
+    )
+    assert len(result) == 2, (
+        f"evaluate() with return_predictions=True must return a 2-tuple; "
+        f"got length {len(result)} (Stage 6 T5)."
+    )
+
+    metrics_df, predictions_df = result
+    assert isinstance(metrics_df, pd.DataFrame), (
+        "First element of the 2-tuple must be a pd.DataFrame (metrics); "
+        f"got {type(metrics_df).__name__} (Stage 6 T5)."
+    )
+    assert isinstance(predictions_df, pd.DataFrame), (
+        "Second element of the 2-tuple must be a pd.DataFrame (predictions); "
+        f"got {type(predictions_df).__name__} (Stage 6 T5)."
+    )
+
+
+def test_harness_predictions_column_order_and_dtypes() -> None:
+    """Guards Stage 6 T5 — predictions frame has pinned column order and dtypes.
+
+    Expected column order (pinned by Stage 6 T5 contract):
+      ``["fold_index", "test_start", "test_end", "horizon_h",
+         "y_true", "y_pred", "error"]``
+
+    Expected dtypes:
+    - ``fold_index``: ``int64``
+    - ``test_start``, ``test_end``: ``datetime64[ns, UTC]`` for UTC-aware input
+    - ``horizon_h``: ``int64``
+    - ``y_true``, ``y_pred``, ``error``: ``float64``
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_predictions_column_order_and_dtypes``.
+    """
+    # UTC-aware input — timestamps in predictions must be UTC-aware.
+    df = _make_df(tz="UTC")
+    model = _linear_model()
+
+    _metrics_df, predictions_df = evaluate(
+        model, df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True
+    )
+
+    expected_columns = [
+        "fold_index",
+        "test_start",
+        "test_end",
+        "horizon_h",
+        "y_true",
+        "y_pred",
+        "error",
+    ]
+    assert list(predictions_df.columns) == expected_columns, (
+        f"Predictions column order must be exactly {expected_columns!r}; "
+        f"got {list(predictions_df.columns)!r} (Stage 6 T5)."
+    )
+
+    # fold_index must be int64.
+    assert predictions_df["fold_index"].dtype == np.dtype("int64"), (
+        f"fold_index dtype must be int64; got {predictions_df['fold_index'].dtype} (Stage 6 T5)."
+    )
+
+    # Timestamp columns must be datetime and tz-aware (input was UTC).
+    for ts_col in ("test_start", "test_end"):
+        assert pd.api.types.is_datetime64_any_dtype(predictions_df[ts_col]), (
+            f"Column '{ts_col}' must have a datetime dtype; "
+            f"got {predictions_df[ts_col].dtype} (Stage 6 T5)."
+        )
+        assert predictions_df[ts_col].dt.tz is not None, (
+            f"Column '{ts_col}' must be tz-aware when the input index was UTC; "
+            f"got tz=None (Stage 6 T5)."
+        )
+
+    # horizon_h must be int64.
+    assert predictions_df["horizon_h"].dtype == np.dtype("int64"), (
+        f"horizon_h dtype must be int64; got {predictions_df['horizon_h'].dtype} (Stage 6 T5)."
+    )
+
+    # Prediction and error columns must be float64.
+    for float_col in ("y_true", "y_pred", "error"):
+        assert predictions_df[float_col].dtype == np.dtype("float64"), (
+            f"Column '{float_col}' dtype must be float64; "
+            f"got {predictions_df[float_col].dtype} (Stage 6 T5)."
+        )
+
+
+def test_harness_predictions_one_row_per_forecast_hour() -> None:
+    """Guards Stage 6 T5 — total predictions row count equals sum of test_len across folds.
+
+    For the shared ``_SPLIT_CFG`` with ``test_len=48`` and the pre-verified
+    ``_EXPECTED_FOLD_COUNT=6``, the predictions frame must have
+    ``6 x 48 = 288`` rows.
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_predictions_one_row_per_forecast_hour``.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    # Derive expected total independently from splitter, not from evaluate.
+    folds = list(rolling_origin_split_from_config(len(df), _SPLIT_CFG))
+    expected_total_rows = sum(len(test_idx) for _train_idx, test_idx in folds)
+
+    _metrics_df, predictions_df = evaluate(
+        model, df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True
+    )
+
+    assert len(predictions_df) == expected_total_rows, (
+        f"Predictions frame must have {expected_total_rows} rows "
+        f"(one per forecast hour across all folds); "
+        f"got {len(predictions_df)} (Stage 6 T5)."
+    )
+
+
+def test_harness_predictions_horizon_h_zero_based_per_fold() -> None:
+    """Guards Stage 6 T5 — ``horizon_h`` resets to 0 at the start of each fold.
+
+    For each unique ``fold_index`` in the predictions frame, ``horizon_h``
+    must run ``0, 1, 2, …, test_len-1`` without gaps or resets.  The
+    per-fold sequence is verified by grouping on ``fold_index`` and checking
+    the sorted ``horizon_h`` values match ``range(test_len)``.
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_predictions_horizon_h_zero_based_per_fold``.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    _metrics_df, predictions_df = evaluate(
+        model, df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True
+    )
+
+    expected_test_len = _SPLIT_CFG.test_len
+
+    for fold_idx, group in predictions_df.groupby("fold_index"):
+        horizon_values = sorted(group["horizon_h"].tolist())
+        expected = list(range(expected_test_len))
+        assert horizon_values == expected, (
+            f"fold {fold_idx}: horizon_h must be {expected!r}; "
+            f"got {horizon_values!r} (Stage 6 T5 — horizon_h resets per fold)."
+        )
+
+
+def test_harness_predictions_error_equals_y_true_minus_y_pred() -> None:
+    """Guards Stage 6 T5 — ``error`` column equals ``y_true - y_pred`` exactly.
+
+    Uses ``np.isclose`` for element-wise comparison to tolerate any
+    float64 rounding at the margins of numerical precision.
+
+    Plan clause: docs/plans/active/06-enhanced-evaluation.md §6 T5
+    ``test_harness_predictions_error_equals_y_true_minus_y_pred``.
+    """
+    df = _make_df()
+    model = _linear_model()
+
+    _metrics_df, predictions_df = evaluate(
+        model, df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True
+    )
+
+    expected_error = predictions_df["y_true"].to_numpy() - predictions_df["y_pred"].to_numpy()
+    actual_error = predictions_df["error"].to_numpy()
+
+    assert np.all(np.isclose(actual_error, expected_error)), (
+        "Column 'error' must equal y_true - y_pred for every row; "
+        "np.isclose check failed (Stage 6 T5)."
+    )

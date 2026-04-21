@@ -1,4 +1,4 @@
-"""Stage 0 + Stage 3 T1 smoke/acceptance tests for the config pipeline.
+"""Stage 0 + Stage 3 T1 + Stage 6 T1 smoke/acceptance tests for the config pipeline.
 
 Stage 0 tests cover the fundamental `load_config()` → `AppConfig` round-trip
 and the `python -m bristol_ml` demo moment.
@@ -35,6 +35,7 @@ from conf._schemas import (
     NaiveConfig,
     NesoBenchmarkConfig,
     NesoForecastIngestionConfig,
+    PlotsConfig,
     ProjectConfig,
     SplitterConfig,
 )
@@ -994,3 +995,169 @@ def test_weather_calendar_rejects_invalid_demand_aggregation() -> None:
                 "features.weather_calendar.demand_aggregation=median",
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 T1 — PlotsConfig + evaluation.plots group
+# ---------------------------------------------------------------------------
+
+
+def test_plots_config_rejects_extra_keys() -> None:
+    """Guards ``ConfigDict(extra='forbid')`` on ``PlotsConfig`` (AC-11).
+
+    Supplying an unknown keyword argument at direct-construction time must
+    raise ``ValidationError``.  This pins ``extra="forbid"`` so a mis-typed
+    config key is caught immediately rather than silently ignored (plan T1).
+    """
+    with pytest.raises((ValidationError, Exception)):
+        PlotsConfig(bogus=1)  # type: ignore[call-arg]  # testing extra="forbid"
+
+
+def test_plots_config_figsize_default_is_twelve_by_eight() -> None:
+    """Guards D5 human-mandated default: ``PlotsConfig().figsize == (12.0, 8.0)``.
+
+    The Stage 6 plan §1 D5 amendment (2026-04-20 human mandate) specifies
+    ``figsize=(12.0, 8.0)`` as the projector-legible default — wider than
+    matplotlib's 6.4x4.8 baseline for meetup legibility (AC-2).  Pinned here
+    so a future edit to ``_schemas.py`` cannot silently regress the value.
+    """
+    assert PlotsConfig().figsize == (12.0, 8.0), (
+        "D5: PlotsConfig().figsize must be (12.0, 8.0) per the 2026-04-20 human mandate."
+    )
+
+
+def test_plots_config_acf_default_lags_is_168() -> None:
+    """Guards D7: ``PlotsConfig().acf_default_lags == 168``.
+
+    168 hourly lags = one full week, covering both the daily (lag 24) and
+    weekly (lag 168) periodicity markers annotated on the ACF plot.  The
+    ``statsmodels`` default is too short for hourly data (misses the weekly
+    spike); this pin ensures the helper always renders the full 0-168 range
+    unless explicitly overridden (D7, AC-7).
+    """
+    assert PlotsConfig().acf_default_lags == 168, (
+        "D7: PlotsConfig().acf_default_lags must be 168 (covers daily + weekly seasonality)."
+    )
+
+
+def test_plots_config_display_tz_default_is_europe_london() -> None:
+    """Guards D6: ``PlotsConfig().display_tz == 'Europe/London'``.
+
+    Per D6 the default display timezone is ``"Europe/London"`` so the
+    hour-of-day heatmap renders local wall-clock time ('demand at 18:00' is
+    a local concept).  This test is conditional on the D6 T3 DST gate
+    passing at implementation time; if it later fails, both the default and
+    this assertion are updated together to ``"UTC"`` (plan §1 D6 amendment).
+    """
+    assert PlotsConfig().display_tz == "Europe/London", (
+        "D6: PlotsConfig().display_tz must default to 'Europe/London' "
+        "(conditional on the T3 DST-rendering gate passing)."
+    )
+
+
+def test_plots_config_defaults_match_plots_module() -> None:
+    """Guards that all four ``PlotsConfig`` fields carry the D5/D6/D7 mandated defaults.
+
+    Tests each field individually rather than deferring to a T2 module import
+    so that the config contract is verifiable before ``plots.py`` ships.
+    Serves as the explicit-field version of 'test_plots_config_defaults_match_plots_module'
+    listed in the T1 test plan (plan §6 T1).
+    """
+    cfg = PlotsConfig()
+
+    # D5 amendment (2026-04-20 human mandate) — projector-friendly figsize.
+    assert cfg.figsize == (12.0, 8.0), (
+        f"D5: figsize default must be (12.0, 8.0); got {cfg.figsize!r}."
+    )
+    # D5: middle ground between blurry 100 dpi and bloated 150 dpi.
+    assert cfg.dpi == 110, f"D5: dpi default must be 110; got {cfg.dpi!r}."
+    # D6: Europe/London local time for pedagogical readability.
+    assert cfg.display_tz == "Europe/London", (
+        f"D6: display_tz default must be 'Europe/London'; got {cfg.display_tz!r}."
+    )
+    # D7: 168 lags renders daily (24) + weekly (168) seasonality markers.
+    assert cfg.acf_default_lags == 168, (
+        f"D7: acf_default_lags default must be 168; got {cfg.acf_default_lags!r}."
+    )
+
+
+def test_config_loads_plots_group() -> None:
+    """Guards AC-10/AC-11: ``load_config()`` yields a populated ``cfg.evaluation.plots``.
+
+    After a defaults-only ``load_config()`` the resolved config must have
+    ``cfg.evaluation.plots`` populated as a ``PlotsConfig`` instance with all
+    four documented defaults.  This verifies the ``- evaluation/plots@evaluation.plots``
+    entry in ``conf/config.yaml`` and the ``# @package evaluation.plots`` header
+    in ``conf/evaluation/plots.yaml`` are wired correctly (plan T1).
+    """
+    cfg = load_config()
+
+    assert cfg.evaluation is not None, "AppConfig.evaluation must not be None."
+    plots = cfg.evaluation.plots
+    assert isinstance(plots, PlotsConfig), (
+        f"cfg.evaluation.plots must be a PlotsConfig instance; got {type(plots).__name__!r}."
+    )
+    # D5: figsize from the Hydra group file.
+    assert plots.figsize == (12.0, 8.0), (
+        f"D5: cfg.evaluation.plots.figsize must be (12.0, 8.0); got {plots.figsize!r}."
+    )
+    # D5: dpi from the Hydra group file.
+    assert plots.dpi == 110, f"D5: cfg.evaluation.plots.dpi must be 110; got {plots.dpi!r}."
+    # D6: display_tz from the Hydra group file.
+    assert plots.display_tz == "Europe/London", (
+        f"D6: cfg.evaluation.plots.display_tz must be 'Europe/London'; got {plots.display_tz!r}."
+    )
+    # D7: acf_default_lags from the Hydra group file.
+    assert plots.acf_default_lags == 168, (
+        f"D7: cfg.evaluation.plots.acf_default_lags must be 168; got {plots.acf_default_lags!r}."
+    )
+
+
+def test_config_figsize_overridable_via_hydra() -> None:
+    """Guards AC-10: ``evaluation.plots.figsize`` is overridable via Hydra CLI (D5).
+
+    ``load_config(overrides=["evaluation.plots.figsize=[16,10]"])`` must
+    propagate to ``cfg.evaluation.plots.figsize == (16.0, 10.0)``.  Casts the
+    Hydra ``ListConfig`` to a tuple for the equality check.
+    """
+    cfg = load_config(overrides=["evaluation.plots.figsize=[16,10]"])
+
+    assert cfg.evaluation is not None
+    figsize = tuple(cfg.evaluation.plots.figsize)
+    assert figsize == (16.0, 10.0), (
+        f"D5: override evaluation.plots.figsize=[16,10] must yield (16.0, 10.0); got {figsize!r}."
+    )
+
+
+def test_plots_config_forbids_negative_dpi() -> None:
+    """Guards ``Field(ge=50, le=400)`` on ``PlotsConfig.dpi`` (AC-11).
+
+    A ``dpi`` value below the minimum (e.g. 20) must raise ``ValidationError``
+    because it is outside the declared ``Field(ge=50, le=400)`` bounds.  A
+    positive in-range value (e.g. 150) must construct without error.
+    """
+    # Positive path: in-range dpi constructs successfully.
+    cfg = PlotsConfig(dpi=150)
+    assert cfg.dpi == 150, f"dpi=150 must be accepted; got {cfg.dpi!r}."
+
+    # Negative path: below-minimum dpi raises.
+    with pytest.raises(ValidationError):
+        PlotsConfig(dpi=20)
+
+
+def test_evaluation_group_plots_field_is_populated_by_default_factory() -> None:
+    """Guards backwards-compat invariant: ``EvaluationGroup()`` yields ``plots: PlotsConfig``.
+
+    ``EvaluationGroup`` uses ``plots: PlotsConfig = Field(default_factory=PlotsConfig)``
+    (plan T1).  Constructing ``EvaluationGroup()`` with no arguments must produce
+    a ``plots`` field that is a ``PlotsConfig`` instance (not ``None``), so that
+    pre-Stage-6 programmatic call sites always see a populated config with the
+    documented defaults rather than an absent field (AC-11).
+    """
+    eg = EvaluationGroup()
+
+    assert isinstance(eg.plots, PlotsConfig), (
+        f"EvaluationGroup().plots must be a PlotsConfig instance; "
+        f"got {type(eg.plots).__name__!r} — "
+        "backwards-compat invariant: default_factory=PlotsConfig must populate the field."
+    )

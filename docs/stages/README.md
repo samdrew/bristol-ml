@@ -32,7 +32,7 @@ Stages 2-19 are intentionally `planning` — briefs land when each stage becomes
 | 3 | Feature assembler + split | `shipped` | [intent](../intent/03-feature-assembler.md) | [plan](../plans/completed/03-feature-assembler.md) | [features](../architecture/layers/features.md) · [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/03-feature-assembler.md) |
 | 4 | Linear baseline + eval harness | `shipped` | [intent](../intent/04-linear-baseline.md) | [plan](../plans/completed/04-linear-baseline.md) | [models](../architecture/layers/models.md) · [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/04-linear-baseline.md) |
 | 5 | Calendar features | `shipped` | [intent](../intent/05-calendar-features.md) | [plan](../plans/completed/05-calendar-features.md) | [features](../architecture/layers/features.md) · [ingestion](../architecture/layers/ingestion.md) | — | [retro](../lld/stages/05-calendar-features.md) |
-| 6 | Enhanced evaluation & viz | `planning` | [intent](../intent/06-enhanced-evaluation.md) | — | — | — | — |
+| 6 | Enhanced evaluation & viz | `shipped` | [intent](../intent/06-enhanced-evaluation.md) | [plan](../plans/completed/06-enhanced-evaluation.md) | [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/06-enhanced-evaluation.md) |
 | 7 | SARIMAX | `planning` | [intent](../intent/07-sarimax.md) | — | — | — | — |
 | 8 | SciPy parametric | `planning` | [intent](../intent/08-scipy-parametric.md) | — | — | — | — |
 | 9 | Model registry | `planning` | [intent](../intent/09-model-registry.md) | — | — | — | — |
