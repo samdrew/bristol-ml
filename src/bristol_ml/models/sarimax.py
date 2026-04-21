@@ -181,9 +181,24 @@ class SarimaxModel:
             )
 
         # --- 3. Build the numeric matrices --------------------------------
+        # Surprise 2: the Stage 3 assembler emits a UTC hourly index but
+        # does not set ``df.index.freq``; even with ``freq="h"`` on the
+        # SARIMAX constructor, statsmodels' ``_init_dates`` emits a
+        # ``ValueWarning`` when the endog index has no freq set (the
+        # warning is an informational heads-up that the kwarg freq is being
+        # used).  Set freq on a copy of the index so the warning is
+        # suppressed and callers' DataFrames are not mutated.
+        endog_index = features.index.copy()
+        try:
+            endog_index.freq = "h"
+        except (ValueError, TypeError):
+            # Non-uniform or otherwise incompatible index; fall back to
+            # the constructor's ``freq="h"`` kwarg path.  The warning may
+            # still fire but the fit still works.
+            pass
         endog = pd.Series(
             np.asarray(target, dtype=np.float64),
-            index=features.index,
+            index=endog_index,
             name=target.name if target.name is not None else "target",
         )
         exog = features_with_fourier[list(resolved_columns)].to_numpy(dtype=np.float64)

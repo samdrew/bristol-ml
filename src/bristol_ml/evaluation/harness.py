@@ -474,7 +474,7 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
 def _build_model_from_config(model_cfg: object) -> Model | None:
     """Instantiate the concrete model class named by the discriminated union."""
-    from conf._schemas import LinearConfig, NaiveConfig
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
 
     if isinstance(model_cfg, NaiveConfig):
         from bristol_ml.models.naive import NaiveModel
@@ -484,14 +484,18 @@ def _build_model_from_config(model_cfg: object) -> Model | None:
         from bristol_ml.models.linear import LinearModel
 
         return LinearModel(model_cfg)
+    if isinstance(model_cfg, SarimaxConfig):
+        from bristol_ml.models.sarimax import SarimaxModel
+
+        return SarimaxModel(model_cfg)
     return None
 
 
 def _target_column(model_cfg: object) -> str:
     """Return the target column name declared by the resolved model config."""
-    from conf._schemas import LinearConfig, NaiveConfig
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
 
-    if isinstance(model_cfg, (NaiveConfig, LinearConfig)):
+    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig)):
         return model_cfg.target_column
     return "nd_mw"
 
