@@ -52,6 +52,16 @@ plots_mod = importlib.import_module("bristol_ml.evaluation.plots")
 _plots = plots_mod
 
 
+# Repo-root-relative path to ``src/bristol_ml/evaluation/CLAUDE.md``.  Derived
+# from ``__file__`` so the tests work regardless of the checkout location (the
+# previous hardcoded ``/workspace/...`` failed in GitHub Actions, whose runner
+# roots the checkout at ``/home/runner/work/<repo>/<repo>``).  The test file
+# sits at ``tests/unit/evaluation/test_plots.py``; ``parents[3]`` is the repo
+# root in every supported checkout layout.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_EVALUATION_CLAUDE_MD = _REPO_ROOT / "src" / "bristol_ml" / "evaluation" / "CLAUDE.md"
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — CLI returns 0 and lists helper names (Plan T2; AC-10)
 # ---------------------------------------------------------------------------
@@ -260,7 +270,7 @@ def test_evaluation_claude_md_has_api_growth_trigger_note() -> None:
     Checks both the heading and the key prohibition sentence so the content
     cannot be silently paraphrased away.
     """
-    claude_md = Path("/workspace/src/bristol_ml/evaluation/CLAUDE.md")
+    claude_md = _EVALUATION_CLAUDE_MD
     assert claude_md.exists(), f"CLAUDE.md not found at {claude_md} — was T2 hygiene skipped?"
     content = claude_md.read_text(encoding="utf-8")
 
@@ -363,7 +373,7 @@ def test_evaluation_claude_md_has_plotting_conventions_section() -> None:
     label requirement.  The presence of the heading plus the string "Okabe-Ito"
     confirms the section was added with the correct content.
     """
-    claude_md = Path("/workspace/src/bristol_ml/evaluation/CLAUDE.md")
+    claude_md = _EVALUATION_CLAUDE_MD
     assert claude_md.exists(), f"CLAUDE.md not found at {claude_md} — was T2 hygiene skipped?"
     content = claude_md.read_text(encoding="utf-8")
 
