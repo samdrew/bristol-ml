@@ -6,7 +6,7 @@ introduces the layer one stage earlier than DESIGN §9 implies, because
 Stage 2 needs a weighted-mean function and the notebook cannot reimplement
 it (§2.1.8 — notebooks are thin).
 
-## Current surface (Stage 5)
+## Current surface (Stages 5–7)
 
 ### `weather.national_aggregate(df, weights)` (Stage 2)
 
@@ -74,6 +74,12 @@ Public surface (matches `assembler.__all__`):
   `assemble()` / `assemble_calendar()` orchestrators. On clock-change days
   the output is 23 rows (spring) or 25 rows (autumn) — the UTC timeline
   is regular; the NESO ingester has already unwound DST algebra.
+
+### `fourier` (Stage 7)
+
+Pure weekly Fourier-harmonic feature helper, added by Stage 7 to supply the weekly exogenous regressors for `SarimaxModel`. Public surface:
+
+- `append_weekly_fourier(df, *, period_hours=168, harmonics=3, column_prefix="week") -> pd.DataFrame` — appends `2 * harmonics` columns (`week_sin_k1..kN`, `week_cos_k1..kN`) to `df` and returns a new frame (no input mutation). Requires a tz-aware `DatetimeIndex`; converts to integer hours via `df.index.view("int64") // 3_600_000_000_000` so DST transitions do not introduce phase drift. `harmonics=0` is a no-op fast path. Tz-naive input raises `ValueError`. Module CLI `python -m bristol_ml.features.fourier --help`.
 
 ### `calendar` (Stage 5)
 
@@ -154,8 +160,9 @@ source of truth for the 44 calendar column names / dtypes.
     python -m bristol_ml.features.weather   [--head N]
     python -m bristol_ml.features.calendar  [--rows N]
     python -m bristol_ml.features.assembler [--cache {auto,refresh,offline}]
+    python -m bristol_ml.features.fourier   [--help]
 
-All three CLIs honour Hydra overrides in the trailing positional slot.
+All four CLIs honour Hydra overrides in the trailing positional slot.
 
 ## Extensibility
 

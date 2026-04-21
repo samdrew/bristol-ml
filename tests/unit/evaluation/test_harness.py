@@ -25,16 +25,21 @@ Conventions
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from bristol_ml.evaluation.harness import evaluate
+from bristol_ml.evaluation.harness import _build_model_from_config, _cli_main, evaluate
 from bristol_ml.evaluation.metrics import mae, mape, rmse, wape
 from bristol_ml.evaluation.splitter import rolling_origin_split_from_config
-from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
+from bristol_ml.features.assembler import OUTPUT_SCHEMA, WEATHER_VARIABLE_COLUMNS
 from bristol_ml.models.linear import LinearModel
-from conf._schemas import LinearConfig, SplitterConfig
+from bristol_ml.models.sarimax import SarimaxModel
+from conf._schemas import LinearConfig, SarimaxConfig, SplitterConfig
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -705,4 +710,119 @@ def test_harness_predictions_error_equals_y_true_minus_y_pred() -> None:
     assert np.all(np.isclose(actual_error, expected_error)), (
         "Column 'error' must equal y_true - y_pred for every row; "
         "np.isclose check failed (Stage 6 T5)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 T6 — SARIMAX dispatcher wiring (harness)
+# Plan: docs/plans/active/07-sarimax.md §6 Task T6
+# ---------------------------------------------------------------------------
+
+
+def _write_feature_cache_for_harness(path: Path, n_hours: int = 24 * 90, seed: int = 42) -> Path:
+    """Write a minimal feature-table parquet conforming to ``assembler.OUTPUT_SCHEMA``.
+
+    Mirrors the helper of the same name in ``tests/unit/test_train_cli.py``.
+    Kept private to this module so the evaluation test file has no cross-file
+    import dependency (CLAUDE.md §"Tests at boundaries").
+
+    The 90-day window gives enough rows for a ``min_train_periods=720`` rolling-
+    origin run with at least one test fold.
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2023-10-01", periods=n_hours, freq="1h", tz="UTC")
+    nd = (
+        30_000 + 500 * np.sin(2 * np.pi * np.arange(n_hours) / 24) + rng.normal(0, 200, n_hours)
+    ).astype("int32")
+    tsd = (nd + 3_000).astype("int32")
+    weather = {
+        name: rng.normal(loc=10, scale=3, size=n_hours).astype("float32")
+        for name, _ in WEATHER_VARIABLE_COLUMNS
+    }
+    retrieved_at = pd.Timestamp("2024-01-01T00:00:00Z")
+    frame = pd.DataFrame(
+        {
+            "timestamp_utc": idx,
+            "nd_mw": nd,
+            "tsd_mw": tsd,
+            **weather,
+            "neso_retrieved_at_utc": [retrieved_at] * n_hours,
+            "weather_retrieved_at_utc": [retrieved_at] * n_hours,
+        }
+    )
+    table = pa.Table.from_pandas(frame, preserve_index=False).cast(OUTPUT_SCHEMA, safe=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)
+    return path
+
+
+@pytest.fixture()
+def warm_feature_cache_for_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Populate a warm feature-table cache and point Hydra at ``tmp_path``.
+
+    Mirrors ``tests/unit/test_train_cli.py::warm_feature_cache`` for use in
+    harness CLI integration tests that need a populated feature cache without
+    taking a cross-file fixture import dependency.
+    """
+    monkeypatch.setenv("BRISTOL_ML_CACHE_DIR", str(tmp_path))
+    _write_feature_cache_for_harness(tmp_path / "weather_only.parquet")
+    return tmp_path
+
+
+def test_harness_build_model_dispatches_sarimax_config() -> None:
+    """Stage 7 T6 (AC-6): dispatcher returns a ``SarimaxModel`` for ``SarimaxConfig``.
+
+    Directly instantiates a default ``SarimaxConfig()`` and passes it to the
+    module-private dispatcher.  Asserts the returned object is an instance of
+    ``SarimaxModel`` — not merely truthy — so that a wrong-type return (e.g.
+    ``LinearModel`` or ``None``) will fail.
+
+    Plan clause: docs/plans/active/07-sarimax.md §6 Task T6 —
+    ``test_harness_build_model_dispatches_sarimax_config``.
+    """
+    cfg = SarimaxConfig()
+    result = _build_model_from_config(cfg)
+
+    assert isinstance(result, SarimaxModel), (
+        f"_build_model_from_config(SarimaxConfig()) must return a SarimaxModel; "
+        f"got {type(result)!r} (Stage 7 T6 AC-6)."
+    )
+
+
+def test_harness_cli_runs_with_model_sarimax(
+    warm_feature_cache_for_harness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage 7 T6 (AC-6, AC-11): harness CLI exits 0 when ``model=sarimax`` is selected.
+
+    Integration smoke.  Uses a warm 90-day synthetic feature cache and
+    deliberately small rolling-origin parameters to keep fit time within a few
+    seconds.  The ``seasonal_order=[0,0,0,24]`` and ``weekly_fourier_harmonics=0``
+    overrides disable the heavy seasonal and Fourier components so the SARIMA fit
+    completes quickly on the synthetic data.
+
+    A zero exit code confirms that the harness ``_build_model_from_config``
+    branch for ``SarimaxConfig`` is wired correctly end-to-end; no assertion on
+    stdout content is made because the harness CLI prints a plain DataFrame, not
+    the ``"Per-fold metrics for model=…"`` banner from ``train.py``.
+
+    Plan clause: docs/plans/active/07-sarimax.md §6 Task T6 —
+    ``test_harness_cli_runs_with_model_sarimax``.
+    """
+    exit_code = _cli_main(
+        [
+            "model=sarimax",
+            "model.order=[1,0,0]",
+            "model.seasonal_order=[0,0,0,24]",
+            "model.weekly_fourier_harmonics=0",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=24",
+            "evaluation.rolling_origin.step=720",
+            "evaluation.rolling_origin.fixed_window=true",
+        ]
+    )
+
+    assert exit_code == 0, (
+        f"harness _cli_main must exit 0 with model=sarimax on a warm feature cache; "
+        f"got exit_code={exit_code} (Stage 7 T6 AC-6)."
     )

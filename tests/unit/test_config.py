@@ -1,4 +1,4 @@
-"""Stage 0 + Stage 3 T1 + Stage 6 T1 smoke/acceptance tests for the config pipeline.
+"""Stage 0 + Stage 3 T1 + Stage 6 T1 + Stage 7 T1 smoke/acceptance tests for the config pipeline.
 
 Stage 0 tests cover the fundamental `load_config()` → `AppConfig` round-trip
 and the `python -m bristol_ml` demo moment.
@@ -9,6 +9,10 @@ the four new Pydantic models (`FeatureSetConfig`, `FeaturesGroup`,
 `SplitterConfig`, `EvaluationGroup`).  Each test docstring cites the plan
 decision or acceptance criterion it guards so future readers can trace back to
 `docs/plans/completed/03-feature-assembler.md`.
+
+Stage 7 T1 tests guard `SarimaxConfig` and `SarimaxKwargs` schema correctness,
+the discriminated-union dispatch on ``type: "sarimax"``, and the full Hydra
+round-trip including the D4 splitter per-field overrides (plan §6 T1).
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ from conf._schemas import (
     NesoForecastIngestionConfig,
     PlotsConfig,
     ProjectConfig,
+    SarimaxConfig,
+    SarimaxKwargs,
     SplitterConfig,
 )
 
@@ -1160,4 +1166,235 @@ def test_evaluation_group_plots_field_is_populated_by_default_factory() -> None:
         f"EvaluationGroup().plots must be a PlotsConfig instance; "
         f"got {type(eg.plots).__name__!r} — "
         "backwards-compat invariant: default_factory=PlotsConfig must populate the field."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 T1 — SarimaxConfig + SarimaxKwargs schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_config_rejects_extra_keys() -> None:
+    """Guards ``ConfigDict(extra='forbid')`` on ``SarimaxConfig`` (plan §6 T1).
+
+    An unknown keyword argument supplied at direct-construction time must raise
+    ``ValidationError``.  This mirrors the same constraint applied to
+    ``LinearConfig``, ``NaiveConfig``, and all other model configs — config
+    drift is caught at validation time rather than silently accepted.
+
+    Cited criterion: plan §6 T1, ``test_sarimax_config_rejects_extra_keys``.
+    """
+    with pytest.raises(ValidationError):
+        SarimaxConfig(bogus_kwarg=42)  # type: ignore[call-arg]  # testing extra="forbid"
+
+
+def test_sarimax_kwargs_defaults_match_plan_d6() -> None:
+    """Guards ``SarimaxKwargs`` field defaults match the plan §1 D6 mandate.
+
+    D6 pins five constructor kwargs for the real-world seasonal demand case:
+    ``enforce_stationarity=False`` and ``enforce_invertibility=False`` because
+    the ML optimiser routinely finds non-stationary optima on hourly electricity
+    series; ``concentrate_scale=True`` speeds optimisation; ``simple_differencing=False``
+    keeps the Harvey representation so the full residual series reaches the Stage 6
+    ``acf_residuals`` helper; ``hamilton_representation=False`` retains the
+    statsmodels Harvey default.
+
+    All five must match D6 exactly so downstream ``SARIMAX(...)`` calls inherit
+    the correct settings from the config rather than statsmodels' own defaults.
+
+    Cited criterion: plan §6 T1, ``test_sarimax_kwargs_defaults_match_design_D6``.
+    """
+    kwargs = SarimaxKwargs()
+
+    assert kwargs.enforce_stationarity is False, (
+        f"D6: enforce_stationarity default must be False; got {kwargs.enforce_stationarity!r}."
+    )
+    assert kwargs.enforce_invertibility is False, (
+        f"D6: enforce_invertibility default must be False; got {kwargs.enforce_invertibility!r}."
+    )
+    assert kwargs.concentrate_scale is True, (
+        f"D6: concentrate_scale default must be True; got {kwargs.concentrate_scale!r}."
+    )
+    assert kwargs.simple_differencing is False, (
+        f"D6: simple_differencing default must be False; got {kwargs.simple_differencing!r}."
+    )
+    assert kwargs.hamilton_representation is False, (
+        f"D6: hamilton_representation default must be False; got "
+        f"{kwargs.hamilton_representation!r}."
+    )
+
+
+def test_sarimax_config_order_default_matches_plan_d2() -> None:
+    """Guards ``SarimaxConfig`` ARIMA order defaults from plan §1 D2.
+
+    D2 picks ``order=(1,0,1)`` (non-seasonal ARIMA) and
+    ``seasonal_order=(1,1,1,24)`` (daily-seasonal, ``s=24``).  These are the
+    conservative textbook defaults from Hyndman *fpp3* §9 for hourly electricity
+    demand.  Pinning them here ensures a future edit to ``_schemas.py`` does not
+    silently regress the documented defaults.
+
+    Cited criterion: plan §6 T1, ``test_sarimax_config_order_default_matches_plan_D2``.
+    """
+    cfg = SarimaxConfig()
+
+    assert cfg.order == (1, 0, 1), f"D2: order default must be (1, 0, 1); got {cfg.order!r}."
+    assert cfg.seasonal_order == (1, 1, 1, 24), (
+        f"D2: seasonal_order default must be (1, 1, 1, 24); got {cfg.seasonal_order!r}."
+    )
+
+
+def test_sarimax_config_weekly_fourier_default_is_three_harmonics() -> None:
+    """Guards ``SarimaxConfig.weekly_fourier_harmonics`` default = 3 (plan §1 D1+D3).
+
+    D1 specifies the DHR strategy: daily seasonality at ``s=24`` inside
+    ``seasonal_order``; the weekly period (168 h) is absorbed by
+    ``weekly_fourier_harmonics`` sin/cos Fourier pair columns.  D3 fixes three
+    harmonic pairs (``k=1..3``, six columns) as the default — enough to capture
+    the GB weekly demand shape after calendar exogenous regressors have already
+    absorbed the day-of-week contribution.
+
+    Cited criterion: plan §6 T1, ``test_sarimax_config_weekly_fourier_default_is_three_harmonics``.
+    """
+    cfg = SarimaxConfig()
+
+    assert cfg.weekly_fourier_harmonics == 3, (
+        f"D1+D3: weekly_fourier_harmonics default must be 3; got {cfg.weekly_fourier_harmonics!r}."
+    )
+
+
+def test_sarimax_config_weekly_fourier_rejects_negative() -> None:
+    """Guards ``Field(ge=0)`` on ``SarimaxConfig.weekly_fourier_harmonics`` (plan §6 T1).
+
+    A negative harmonic count is physically meaningless — ``ge=0`` must cause
+    Pydantic to raise ``ValidationError`` for ``weekly_fourier_harmonics=-1``.
+    ``harmonics=0`` is the documented no-op path (disables the weekly Fourier
+    exogenous path) so only strictly negative values are rejected.
+
+    Cited criterion: plan §6 T1, ``test_sarimax_config_weekly_fourier_rejects_negative``.
+    """
+    with pytest.raises(ValidationError):
+        SarimaxConfig(weekly_fourier_harmonics=-1)
+
+
+def test_model_config_union_dispatches_on_type_sarimax() -> None:
+    """Guards D3: the discriminated union resolves ``type='sarimax'`` to ``SarimaxConfig``.
+
+    Constructing an ``AppConfig`` with a raw dict payload whose ``type`` is
+    ``"sarimax"`` must yield a ``SarimaxConfig`` instance under ``AppConfig.model``
+    — not a ``LinearConfig`` or ``NaiveConfig``.  This round-trip confirms the
+    discriminator wiring (``discriminator="type"`` on ``AppConfig.model``) without
+    going through Hydra, so it tests Pydantic schema correctness in isolation.
+
+    Uses ``type(app.model).__name__ == "SarimaxConfig"`` to be explicit about
+    the resolved class, as required by plan §6 T1.
+
+    Cited criterion: plan §6 T1, ``test_model_config_union_dispatches_on_type_sarimax``.
+    """
+    app = AppConfig.model_validate(
+        {
+            "project": {"name": "bristol_ml", "seed": 0},
+            "model": {"type": "sarimax"},
+        }
+    )
+
+    assert type(app.model).__name__ == "SarimaxConfig", (
+        f"D3: type='sarimax' payload must resolve to SarimaxConfig; "
+        f"got {type(app.model).__name__!r}."
+    )
+    assert isinstance(app.model, SarimaxConfig), (
+        "D3: resolved model must be an instance of SarimaxConfig."
+    )
+    assert app.model.type == "sarimax", (
+        f"D3: discriminator tag must be 'sarimax'; got {app.model.type!r}."
+    )
+
+
+def test_config_loads_model_sarimax_via_hydra() -> None:
+    """Guards AC-6: ``load_config(overrides=['model=sarimax'])`` resolves to ``SarimaxConfig``.
+
+    Verifies that the ``conf/model/sarimax.yaml`` Hydra group file is correctly
+    wired and populates ``cfg.model`` as a ``SarimaxConfig`` instance with the
+    documented D2 and D6 defaults:
+
+    - ``type == 'sarimax'``
+    - ``order == (1, 0, 1)`` (D2)
+    - ``seasonal_order == (1, 1, 1, 24)`` (D2)
+    - ``weekly_fourier_harmonics == 3`` (D1+D3)
+    - ``sarimax_kwargs.concentrate_scale is True`` (D6)
+
+    Cited criterion: plan §6 T1, ``test_config_loads_model_sarimax_via_hydra``.
+    """
+    cfg = load_config(overrides=["model=sarimax"])
+
+    assert cfg.model is not None, "cfg.model must not be None after model=sarimax override."
+    assert isinstance(cfg.model, SarimaxConfig), (
+        f"AC-6: expected SarimaxConfig after model=sarimax; got {type(cfg.model).__name__!r}."
+    )
+    assert cfg.model.type == "sarimax", (
+        f"AC-6: discriminator tag must be 'sarimax'; got {cfg.model.type!r}."
+    )
+    # D2: order and seasonal_order defaults from conf/model/sarimax.yaml.
+    assert tuple(cfg.model.order) == (1, 0, 1), (
+        f"D2: order must be (1, 0, 1) from YAML defaults; got {tuple(cfg.model.order)!r}."
+    )
+    assert tuple(cfg.model.seasonal_order) == (1, 1, 1, 24), (
+        f"D2: seasonal_order must be (1, 1, 1, 24) from YAML defaults; "
+        f"got {tuple(cfg.model.seasonal_order)!r}."
+    )
+    # D1+D3: weekly Fourier harmonics default.
+    assert cfg.model.weekly_fourier_harmonics == 3, (
+        f"D1+D3: weekly_fourier_harmonics must be 3; got {cfg.model.weekly_fourier_harmonics!r}."
+    )
+    # D6: concentrate_scale is the most load-bearing of the SarimaxKwargs fields.
+    assert cfg.model.sarimax_kwargs.concentrate_scale is True, (
+        "D6: sarimax_kwargs.concentrate_scale must be True from YAML defaults."
+    )
+
+
+def test_config_loads_splitter_sarimax_overrides() -> None:
+    """Guards plan §1 D4: per-field Hydra overrides wire the SARIMAX splitter settings.
+
+    D4 mandates a fixed sliding window with ``fixed_window=true`` and
+    ``step=168`` (weekly folds) to keep per-fold fit time within AC-3's budget
+    on laptop CPUs.  These overrides are applied as per-field CLI Hydra arguments
+    rather than a new ``conf/evaluation/*.yaml`` file (plan §6 T1 note: no new
+    group file created).
+
+    The test asserts:
+    - ``cfg.evaluation.rolling_origin.fixed_window is True`` (D4 fixed window).
+    - ``cfg.evaluation.rolling_origin.step == 168`` (D4 weekly step).
+    - ``cfg.evaluation.rolling_origin.min_train_periods == 8760`` — project
+      default unchanged (one year of hourly data — no override applied).
+
+    The ``model=sarimax`` override is also applied so the full D4 invocation
+    is tested as a unit.
+
+    Cited criterion: plan §6 T1, ``test_config_loads_splitter_sarimax_overrides``.
+    """
+    cfg = load_config(
+        overrides=[
+            "model=sarimax",
+            "evaluation.rolling_origin.fixed_window=true",
+            "evaluation.rolling_origin.step=168",
+        ]
+    )
+
+    assert cfg.evaluation is not None, "cfg.evaluation must not be None."
+    splitter = cfg.evaluation.rolling_origin
+    assert splitter is not None, (
+        "cfg.evaluation.rolling_origin must be populated when the override is applied."
+    )
+
+    # D4: fixed sliding window.
+    assert splitter.fixed_window is True, (
+        f"D4: fixed_window must be True after override; got {splitter.fixed_window!r}."
+    )
+    # D4: weekly step (168 h).
+    assert splitter.step == 168, (
+        f"D4: step must be 168 (weekly folds) after override; got {splitter.step!r}."
+    )
+    # Project default: min_train_periods stays at 8760 — no override applied.
+    assert splitter.min_train_periods == 8760, (
+        f"Project default: min_train_periods must remain 8760 (one year of hourly data); "
+        f"got {splitter.min_train_periods!r}."
     )

@@ -654,3 +654,96 @@ def test_train_cli_weather_only_still_works(
         "metadata.name must include 'weather-only' for the default feature-set path; "
         f"stdout was:\n{out}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 T6 — SARIMAX dispatcher wiring (train CLI)
+# Plan: docs/plans/active/07-sarimax.md §6 Task T6
+# ---------------------------------------------------------------------------
+
+
+def test_train_build_model_dispatches_sarimax_config(
+    warm_feature_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage 7 T6 (AC-6): ``train.py``'s inline dispatcher handles ``SarimaxConfig``.
+
+    ``train.py`` does not expose a standalone ``_build_model_from_config``
+    function — the model-dispatch logic is inlined inside ``_cli_main``.
+    The equivalent unit-level test therefore exercises that inline branch via an
+    end-to-end ``_cli_main`` call with ``model=sarimax``, and asserts that the
+    output contains the ``"Per-fold metrics for model=sarimax"`` banner.  A
+    missing or wrong dispatch would produce exit code 2/3 or a different banner.
+
+    The ``seasonal_order=[0,0,0,24]`` and ``weekly_fourier_harmonics=0`` overrides
+    disable the heavy seasonal and Fourier components so the SARIMA fit completes
+    quickly on the 90-day synthetic cache.
+
+    Plan clause: docs/plans/active/07-sarimax.md §6 Task T6 —
+    ``test_train_build_model_dispatches_sarimax_config``.
+    """
+    exit_code = _cli_main(
+        [
+            "model=sarimax",
+            "model.order=[1,0,0]",
+            "model.seasonal_order=[0,0,0,24]",
+            "model.weekly_fourier_harmonics=0",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=24",
+            "evaluation.rolling_origin.step=720",
+            "evaluation.rolling_origin.fixed_window=true",
+        ]
+    )
+
+    assert exit_code == 0, (
+        f"_cli_main must exit 0 when model=sarimax is selected; got {exit_code} (Stage 7 T6)."
+    )
+    out = capsys.readouterr().out
+    assert "Per-fold metrics for model=sarimax" in out, (
+        "stdout must contain 'Per-fold metrics for model=sarimax' confirming the "
+        f"inline SarimaxConfig branch was taken; stdout was:\n{out} (Stage 7 T6 AC-6)."
+    )
+
+
+def test_train_cli_runs_with_model_sarimax(
+    warm_feature_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage 7 T6 (AC-6, AC-11): ``train`` CLI exits 0 and prints SARIMAX per-fold table.
+
+    Full-path integration smoke for the ``model=sarimax`` CLI path.  Uses the
+    same ``warm_feature_cache`` fixture as the other ``test_train_cli_*`` tests
+    and the same override recipe as ``test_harness_cli_runs_with_model_sarimax``
+    in ``tests/unit/evaluation/test_harness.py``.
+
+    Asserts:
+    - Exit code is 0 (the SARIMAX dispatcher ran without error).
+    - Stdout contains ``"Per-fold metrics for model=sarimax"`` — the substring
+      that ``test_train_cli_model_swap`` uses for naive; applying the same check
+      here ensures the banner is correctly parameterised for SARIMAX.
+
+    Plan clause: docs/plans/active/07-sarimax.md §6 Task T6 —
+    ``test_train_cli_runs_with_model_sarimax``.
+    """
+    exit_code = _cli_main(
+        [
+            "model=sarimax",
+            "model.order=[1,0,0]",
+            "model.seasonal_order=[0,0,0,24]",
+            "model.weekly_fourier_harmonics=0",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=24",
+            "evaluation.rolling_origin.step=720",
+            "evaluation.rolling_origin.fixed_window=true",
+        ]
+    )
+
+    assert exit_code == 0, (
+        f"_cli_main must exit 0 for model=sarimax on a warm feature cache; "
+        f"got exit_code={exit_code} (Stage 7 T6 AC-11)."
+    )
+    out = capsys.readouterr().out
+    assert "Per-fold metrics for model=sarimax" in out, (
+        "stdout must contain 'Per-fold metrics for model=sarimax'; "
+        f"stdout was:\n{out} (Stage 7 T6 AC-11)."
+    )

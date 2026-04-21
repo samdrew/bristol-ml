@@ -460,4 +460,3 @@ Primary key: `(date, division)` unique; sorted ascending.
 
 **Deny-tier for the lead (human edit required):**
 - `docs/intent/DESIGN.md §6` layout tree — accumulate Stages 1–5 additions.
-

@@ -177,7 +177,8 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     from bristol_ml.ingestion import neso_forecast as neso_forecast_mod
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
-    from conf._schemas import LinearConfig, NaiveConfig
+    from bristol_ml.models.sarimax import SarimaxModel
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
 
     cfg = load_config(overrides=list(args.overrides))
 
@@ -197,8 +198,8 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
     if cfg.model is None:
         print(
-            "No model resolved. Ensure `model=linear` or `model=naive` is "
-            "in the resolved Hydra composition.",
+            "No model resolved. Ensure `model=linear`, `model=naive`, or "
+            "`model=sarimax` is in the resolved Hydra composition.",
             file=sys.stderr,
         )
         return 2
@@ -240,6 +241,24 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
             metadata_name=f"linear-ols-{fset.name.replace('_', '-')}",
         )
         primary_kind = "linear"
+    elif isinstance(model_cfg, SarimaxConfig):
+        # Mirror the LinearConfig branch: promote feature_columns=None to
+        # the resolved feature-set tuple so ``SarimaxModel._config.feature_columns``
+        # records exactly which columns the fit saw.  Without this promotion
+        # the stored config says ``None`` while the fitted metadata carries
+        # a resolved tuple — reproducibility from config alone is lost
+        # (Stage 7 Phase 3 review R3).
+        if model_cfg.feature_columns is None:
+            sarimax_cfg = model_cfg.model_copy(update={"feature_columns": feature_column_names})
+        else:
+            logger.info(
+                "SarimaxConfig.feature_columns explicitly set via Hydra "
+                "({} columns); not overriding with resolved feature-set columns.",
+                len(model_cfg.feature_columns),
+            )
+            sarimax_cfg = model_cfg
+        primary = SarimaxModel(sarimax_cfg)
+        primary_kind = "sarimax"
     else:  # pragma: no cover — the discriminated union is exhaustive
         print(
             f"No harness factory for model type {type(model_cfg).__name__!r}.",
@@ -405,9 +424,9 @@ def _print_metric_table(df: pd.DataFrame) -> None:
 
 def _target_column(model_cfg: object) -> str:
     """Return the resolved model's target column (``"nd_mw"`` default)."""
-    from conf._schemas import LinearConfig, NaiveConfig
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
 
-    if isinstance(model_cfg, (NaiveConfig, LinearConfig)):
+    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig)):
         return model_cfg.target_column
     return "nd_mw"
 

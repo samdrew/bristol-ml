@@ -28,18 +28,33 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
     from bristol_ml.models.io import load_joblib, save_joblib
+    from bristol_ml.models.linear import LinearModel
+    from bristol_ml.models.naive import NaiveModel
     from bristol_ml.models.protocol import Model, ModelMetadata
+    from bristol_ml.models.sarimax import SarimaxModel
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
 
 __all__ = [
+    "LinearConfig",
+    "LinearModel",
     "Model",
     "ModelMetadata",
+    "NaiveConfig",
+    "NaiveModel",
+    "SarimaxConfig",
+    "SarimaxModel",
     "load_joblib",
     "save_joblib",
 ]
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-export of the protocol + metadata + io helpers."""
+    """Lazy re-export of the protocol + metadata + io helpers + concrete models.
+
+    Concrete model classes are pulled from their submodules on first
+    access so ``python -m bristol_ml`` (scaffold invocation) does not
+    pay the statsmodels import cost just to print version info.
+    """
     if name in {"Model", "ModelMetadata"}:
         from bristol_ml.models import protocol as _protocol
 
@@ -48,4 +63,20 @@ def __getattr__(name: str) -> object:
         from bristol_ml.models import io as _io
 
         return getattr(_io, name)
+    if name == "NaiveModel":
+        from bristol_ml.models.naive import NaiveModel
+
+        return NaiveModel
+    if name == "LinearModel":
+        from bristol_ml.models.linear import LinearModel
+
+        return LinearModel
+    if name == "SarimaxModel":
+        from bristol_ml.models.sarimax import SarimaxModel
+
+        return SarimaxModel
+    if name in {"NaiveConfig", "LinearConfig", "SarimaxConfig"}:
+        from conf import _schemas
+
+        return getattr(_schemas, name)
     raise AttributeError(f"module 'bristol_ml.models' has no attribute {name!r}")
