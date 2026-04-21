@@ -28,6 +28,7 @@ Conventions
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -37,6 +38,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX as _StatsmodelsSARIMAX
 from statsmodels.tsa.statespace.sarimax import SARIMAXResultsWrapper
 
 from bristol_ml.models import Model, SarimaxModel
+from bristol_ml.models.io import save_joblib
 from bristol_ml.models.sarimax import _cli_main
 from conf._schemas import SarimaxConfig
 
@@ -627,3 +629,268 @@ def test_sarimax_predict_raises_on_missing_feature_column() -> None:
     )
     with pytest.raises(KeyError):
         model.predict(test_features)
+
+
+# ===========================================================================
+# Task T5 — SarimaxModel.save and .load (plan §Task T5, lines 362-395)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. test_sarimax_save_load_round_trip_with_exog
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_utc_frame_4col(n_rows: int) -> tuple[pd.DataFrame, pd.Series]:
+    """Return a ``(features_df, target_series)`` with 4 exog columns.
+
+    Columns: ``temp_c``, ``cloud_cover``, ``wind_speed``, ``solar_irradiance``.
+    Used for T5 save/load tests to exercise the issue #6542 regression guard
+    (exog column metadata must survive the joblib round-trip).
+
+    Uses the same synthetic process as ``_synthetic_utc_frame`` so results
+    are reproducible.
+    """
+    rng = np.random.default_rng(1)
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+
+    temp_c = rng.normal(loc=10.0, scale=5.0, size=n_rows)
+    cloud_cover = rng.uniform(0.0, 1.0, size=n_rows)
+    wind_speed = rng.gamma(2.0, 2.0, size=n_rows)
+    solar_irradiance = rng.uniform(0.0, 1000.0, size=n_rows)
+
+    ar_coef = 0.7
+    noise = rng.normal(scale=200.0, size=n_rows)
+    t = np.arange(n_rows, dtype=np.float64)
+    daily = 500.0 * np.sin(2.0 * np.pi * t / 24.0)
+    target_vals = np.zeros(n_rows, dtype=np.float64)
+    target_vals[0] = 10_000.0
+    for i in range(1, n_rows):
+        target_vals[i] = (
+            ar_coef * target_vals[i - 1] + (1.0 - ar_coef) * 10_000.0 + daily[i] + noise[i]
+        )
+
+    features_df = pd.DataFrame(
+        {
+            "temp_c": temp_c,
+            "cloud_cover": cloud_cover,
+            "wind_speed": wind_speed,
+            "solar_irradiance": solar_irradiance,
+        },
+        index=index,
+    )
+    target_series = pd.Series(target_vals, index=index, name="nd_mw")
+    return features_df, target_series
+
+
+def test_sarimax_save_load_round_trip_with_exog(tmp_path: Path) -> None:
+    """Saved and reloaded model predicts identically on a 24-row test window.
+
+    Fits on a 500-row synthetic series (trimmed from the spec's 2000 rows for
+    speed — the regression guard is behavioural, not scale-dependent).
+    Saves to ``tmp_path / "model.joblib"``, reloads via ``SarimaxModel.load``,
+    predicts on the same 24-row slice, and asserts bit-for-bit equivalence
+    with ``np.testing.assert_allclose(rtol=1e-10)``.
+
+    This is the AC-2 test and the statsmodels issue #6542 regression guard:
+    the four exog column names must survive the joblib round-trip so that the
+    internal ``SARIMAXResultsWrapper`` can still map regressors correctly on
+    ``get_forecast``.
+
+    Plan clause: T5 plan §Task T5 named test / AC-2 / issue #6542 regression guard.
+    """
+    features, target = _synthetic_utc_frame_4col(500)
+
+    config = SarimaxConfig(
+        order=(1, 0, 0),
+        seasonal_order=(0, 0, 0, 24),
+        weekly_fourier_harmonics=2,
+    )
+    model = SarimaxModel(config)
+    model.fit(features, target)
+
+    test_window = features.iloc[-24:]
+    original_pred = model.predict(test_window)
+
+    save_path = tmp_path / "model.joblib"
+    model.save(save_path)
+
+    reloaded = SarimaxModel.load(save_path)
+    reloaded_pred = reloaded.predict(test_window)
+
+    np.testing.assert_allclose(
+        original_pred.to_numpy(),
+        reloaded_pred.to_numpy(),
+        rtol=1e-10,
+        err_msg=(
+            "Reloaded model predictions must match the original predictions "
+            "exactly (rtol=1e-10); statsmodels issue #6542 regression guard "
+            "— exog columns must survive the joblib round-trip."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. test_sarimax_save_unfitted_raises_runtime_error
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_save_unfitted_raises_runtime_error(tmp_path: Path) -> None:
+    """``save()`` on an unfitted model raises ``RuntimeError`` mentioning "fit".
+
+    Constructs a ``SarimaxModel(SarimaxConfig())`` without calling ``fit()``
+    and asserts that ``save()`` raises ``RuntimeError`` whose message contains
+    "unfitted" or "fit".
+
+    Plan clause: T5 plan §Task T5 named test — pre-fit save raises.
+    """
+    model = SarimaxModel(SarimaxConfig())
+    with pytest.raises(RuntimeError) as exc_info:
+        model.save(tmp_path / "x.joblib")
+    msg = str(exc_info.value).lower()
+    assert "unfitted" in msg or "fit" in msg, (
+        f"RuntimeError message must mention 'unfitted' or 'fit'; "
+        f"got {str(exc_info.value)!r} (T5 plan §Task T5 / unfitted guard)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. test_sarimax_load_rejects_wrong_type
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_load_rejects_wrong_type(tmp_path: Path) -> None:
+    """``SarimaxModel.load`` raises ``TypeError`` when the artefact is not a ``SarimaxModel``.
+
+    Uses ``save_joblib`` directly to write a plain ``dict`` (the simplest
+    non-SarimaxModel object) to a path, then asserts that
+    ``SarimaxModel.load(path)`` raises ``TypeError``.
+
+    Plan clause: T5 plan §Task T5 named test — loading wrong type raises ``TypeError``.
+    """
+    wrong_artefact: dict = {"not": "a model"}
+    bad_path = tmp_path / "wrong.joblib"
+    save_joblib(wrong_artefact, bad_path)
+
+    with pytest.raises(TypeError):
+        SarimaxModel.load(bad_path)
+
+
+# ---------------------------------------------------------------------------
+# 4. test_sarimax_load_preserves_metadata
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_load_preserves_metadata(tmp_path: Path) -> None:
+    """Reloaded model's metadata equals the pre-save metadata field-by-field.
+
+    After a save/load round-trip, the reloaded model's ``metadata`` must
+    satisfy:
+    - ``metadata.feature_columns`` equals the original's ``feature_columns``.
+    - ``metadata.fit_utc`` equals the original's ``fit_utc``.
+    - ``metadata.hyperparameters["order"]`` equals the original's.
+
+    ``metadata`` is a property that constructs a fresh ``ModelMetadata``
+    instance on each access, so comparisons are field-by-field, not by
+    identity.
+
+    Plan clause: T5 plan §Task T5 named test / AC-2 (metadata survives round-trip).
+    """
+    features, target = _synthetic_utc_frame(300)
+
+    config = SarimaxConfig(
+        order=(1, 0, 0),
+        seasonal_order=(0, 0, 0, 24),
+        weekly_fourier_harmonics=0,
+    )
+    model = SarimaxModel(config)
+    model.fit(features, target)
+
+    original_metadata = model.metadata
+
+    save_path = tmp_path / "meta_model.joblib"
+    model.save(save_path)
+    reloaded = SarimaxModel.load(save_path)
+    reloaded_metadata = reloaded.metadata
+
+    assert reloaded_metadata.feature_columns == original_metadata.feature_columns, (
+        f"reloaded metadata.feature_columns must equal original; "
+        f"expected {original_metadata.feature_columns!r}, "
+        f"got {reloaded_metadata.feature_columns!r} (T5 plan §Task T5 / AC-2)."
+    )
+    assert reloaded_metadata.fit_utc == original_metadata.fit_utc, (
+        f"reloaded metadata.fit_utc must equal original; "
+        f"expected {original_metadata.fit_utc!r}, "
+        f"got {reloaded_metadata.fit_utc!r} (T5 plan §Task T5 / AC-2)."
+    )
+    reloaded_order = reloaded_metadata.hyperparameters["order"]
+    original_order = original_metadata.hyperparameters["order"]
+    assert reloaded_order == original_order, (
+        f"reloaded metadata.hyperparameters['order'] must equal original; "
+        f"expected {original_order!r}, got {reloaded_order!r} "
+        "(T5 plan §Task T5 / AC-2)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. test_sarimax_reentrant_fit_after_load
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_reentrant_fit_after_load(tmp_path: Path) -> None:
+    """Calling ``fit()`` on a loaded model overwrites the loaded state (NFR-5).
+
+    Fit model A on series_A, save, load as model B.  Then call
+    ``B.fit(features_B, target_B)`` on a different synthetic series
+    (different start date, different column set).  Assert that B's new
+    ``metadata.feature_columns`` reflects the second fit only — not the
+    columns from the loaded artefact.
+
+    This guards the re-entrancy protocol (NFR-5) across the save/load
+    boundary: a loaded model must be fully re-trainable and discard its
+    loaded weights when ``fit()`` is called again.
+
+    Plan clause: T5 plan §Task T5 named test / NFR-5 (re-entrancy across save/load).
+    """
+    rng = np.random.default_rng(99)
+
+    # Series A — two exog columns
+    idx_a = pd.date_range("2024-01-01", periods=300, freq="h", tz="UTC")
+    features_a = pd.DataFrame(
+        {"temp_c": rng.normal(10, 5, 300), "cloud_cover": rng.uniform(0, 1, 300)},
+        index=idx_a,
+    )
+    target_a = pd.Series(rng.normal(10_000, 500, 300), index=idx_a, name="nd_mw")
+
+    config = SarimaxConfig(
+        order=(1, 0, 0),
+        seasonal_order=(0, 0, 0, 24),
+        weekly_fourier_harmonics=0,
+    )
+    model_a = SarimaxModel(config)
+    model_a.fit(features_a, target_a)
+    loaded_feature_columns = model_a.metadata.feature_columns  # ("temp_c", "cloud_cover")
+
+    save_path = tmp_path / "model_a.joblib"
+    model_a.save(save_path)
+    model_b = SarimaxModel.load(save_path)
+
+    # Series B — single different exog column, different date range
+    idx_b = pd.date_range("2024-06-01", periods=280, freq="h", tz="UTC")
+    features_b = pd.DataFrame(
+        {"wind_speed": rng.gamma(2.0, 2.0, 280)},
+        index=idx_b,
+    )
+    target_b = pd.Series(rng.normal(9_000, 400, 280), index=idx_b, name="nd_mw")
+
+    model_b.fit(features_b, target_b)
+
+    new_feature_columns = model_b.metadata.feature_columns
+    assert new_feature_columns != loaded_feature_columns, (
+        f"After re-fit, metadata.feature_columns must reflect the new fit, not the "
+        f"loaded state; loaded {loaded_feature_columns!r}, "
+        f"new {new_feature_columns!r} (T5 plan §Task T5 / NFR-5)."
+    )
+    assert new_feature_columns == ("wind_speed",), (
+        f"After re-fit on features_b, metadata.feature_columns must be "
+        f"('wind_speed',); got {new_feature_columns!r} (T5 plan §Task T5 / NFR-5)."
+    )

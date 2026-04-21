@@ -64,6 +64,7 @@ from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResultsWrapper
 
 from bristol_ml.features.fourier import append_weekly_fourier
+from bristol_ml.models.io import load_joblib, save_joblib
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import SarimaxConfig
 
@@ -79,10 +80,11 @@ class SarimaxModel:
     ``print(model.results.summary())`` and call
     ``model.results.plot_diagnostics()`` directly (plan §Task T5 cell 7).
 
-    The scaffold landed in Task T3: constructor, ``metadata`` and
-    ``results`` properties, and ``_cli_main`` are complete.  :meth:`fit`,
-    :meth:`predict`, :meth:`save`, and :meth:`load` raise
-    :class:`NotImplementedError` and are filled in Tasks T4 / T5.
+    Implementation landed across Tasks T3 (scaffold + metadata +
+    ``_cli_main``), T4 (``fit`` / ``predict``) and T5 (``save`` /
+    ``load`` + notebook).  The Stage 7 plan's three codebase surprises
+    are covered by regression tests in
+    ``tests/unit/models/test_sarimax.py``.
     """
 
     def __init__(self, config: SarimaxConfig) -> None:
@@ -260,25 +262,50 @@ class SarimaxModel:
         )
 
     def save(self, path: Path) -> None:
-        """Serialise the fitted model atomically via joblib.
+        """Serialise the fitted :class:`SarimaxModel` atomically (plan D6).
 
-        Filled in Task T5.
+        Delegates to :func:`bristol_ml.models.io.save_joblib`.  The
+        :class:`~statsmodels.tsa.statespace.sarimax.SARIMAXResultsWrapper`
+        is pickle-compatible via
+        :meth:`~statsmodels.tsa.statespace.mlemodel.MLEResults.__getstate__`,
+        so joblib handles the whole ``SarimaxModel`` instance — including
+        its config, feature-column tuple, fit_utc, and the results wrapper —
+        in one round trip.
+
+        The alternative considered and rejected was
+        ``self._results.save(path, remove_data=True)``: it only serialises
+        the statsmodels results and loses the wrapping ``SarimaxModel``
+        metadata needed for reconstruction (config, feature-columns,
+        fit_utc).  Sticking with :func:`save_joblib` keeps the Stage 4
+        save/load contract in sync across every concrete model.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit` has not been called.
         """
-        raise NotImplementedError(
-            "SarimaxModel.save lands in Stage 7 Task T5. "
-            "See docs/plans/active/07-sarimax.md §Task T5."
-        )
+        if self._results is None:
+            raise RuntimeError("Cannot save unfitted SarimaxModel")
+        save_joblib(self, path)
 
     @classmethod
     def load(cls, path: Path) -> SarimaxModel:
         """Load a previously-saved :class:`SarimaxModel` from ``path``.
 
-        Filled in Task T5.
+        Raises
+        ------
+        TypeError
+            If the artefact at ``path`` is not a :class:`SarimaxModel`
+            (e.g. a :class:`~bristol_ml.models.linear.LinearModel` pickled
+            at the same path).  Mirrors the Stage 4 ``LinearModel.load``
+            guard.
         """
-        raise NotImplementedError(
-            "SarimaxModel.load lands in Stage 7 Task T5. "
-            "See docs/plans/active/07-sarimax.md §Task T5."
-        )
+        obj = load_joblib(path)
+        if not isinstance(obj, cls):
+            raise TypeError(
+                f"Expected a SarimaxModel artefact at {path}; got {type(obj).__name__}."
+            )
+        return obj
 
     @property
     def metadata(self) -> ModelMetadata:
