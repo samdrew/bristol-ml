@@ -38,7 +38,9 @@ pedagogical cost (every notebook that imports this module inherits the
 Okabe-Ito palette and 12x8 default figsize) is the pedagogical win
 (every Stage 6+ plot in the repo looks the same for live demos).  To opt
 out, call ``plt.rcdefaults()`` or a bespoke ``plt.rcParams.update(...)``
-after the import.
+after the import.  To instead propagate ``evaluation.plots.figsize`` /
+``dpi`` from a loaded Hydra config, call :func:`apply_plots_config` with
+the ``PlotsConfig`` instance (D5 Hydra-configurable knob).
 
 **British English.**  All docstrings, axis labels, and legend entries use
 British spellings ("colour", "visualisation") per ``CLAUDE.md``.
@@ -91,6 +93,7 @@ from statsmodels.graphics.tsaplots import plot_acf
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
     from bristol_ml.evaluation.metrics import MetricFn
     from bristol_ml.models.protocol import Model
+    from conf._schemas import PlotsConfig
 
 
 __all__ = [
@@ -98,6 +101,7 @@ __all__ = [
     "OKABE_ITO",
     "SEQUENTIAL_CMAP",
     "acf_residuals",
+    "apply_plots_config",
     "benchmark_holdout_bar",
     "error_heatmap_hour_weekday",
     "forecast_overlay",
@@ -162,18 +166,56 @@ _STYLE_RCPARAMS: dict[str, Any] = {
 }
 
 
-def _apply_style() -> None:
-    """Write Stage 6 defaults into ``plt.rcParams`` once.
+def _apply_style(config: PlotsConfig | None = None) -> None:
+    """Write Stage 6 defaults into ``plt.rcParams``.
 
-    Called exactly once at module import.  Idempotent — repeated calls
-    write the same values.  Downstream code wanting to opt out should call
+    Called once at module import with ``config=None`` so the hard-coded
+    module defaults (``_STYLE_RCPARAMS``) land in ``plt.rcParams`` without
+    introducing an import-time dependency on ``conf._schemas``.
+
+    When ``config`` is provided, ``figure.figsize`` and ``figure.dpi`` are
+    overridden from ``config.figsize`` / ``config.dpi``; this is how the
+    Stage 6 D5 Hydra knobs (``evaluation.plots.figsize``,
+    ``evaluation.plots.dpi``) actually reach matplotlib at runtime.  See
+    :func:`apply_plots_config` for the public entry point.
+
+    Idempotent — repeated calls write the same values for the same input.
+    Downstream code wanting to opt out entirely should call
     :func:`matplotlib.pyplot.rcdefaults` after importing this module, or
     override individual keys via ``plt.rcParams.update(...)``.
     """
-    plt.rcParams.update(_STYLE_RCPARAMS)
+    params = dict(_STYLE_RCPARAMS)
+    if config is not None:
+        params["figure.figsize"] = tuple(config.figsize)
+        params["figure.dpi"] = int(config.dpi)
+    plt.rcParams.update(params)
 
 
 _apply_style()
+
+
+def apply_plots_config(config: PlotsConfig) -> None:
+    """Re-apply the Stage 6 rcParams overlay with values from a ``PlotsConfig``.
+
+    Call this from a notebook or CLI after loading a Hydra config if you
+    want overrides of ``evaluation.plots.figsize`` or
+    ``evaluation.plots.dpi`` to take effect.  Without this call, the
+    module-default values written at import time remain in force and the
+    YAML knobs are decorative (Stage 6 D5 spec-drift caught in Phase 3
+    review N2).
+
+    Example
+    -------
+    >>> from bristol_ml.config import load_config
+    >>> from bristol_ml.evaluation.plots import apply_plots_config
+    >>> cfg = load_config()
+    >>> apply_plots_config(cfg.evaluation.plots)  # doctest: +SKIP
+
+    The palette (``OKABE_ITO`` qualitative, ``SEQUENTIAL_CMAP`` sequential,
+    ``DIVERGING_CMAP`` diverging) is *not* overridable here — Stage 6 D2
+    pins it to preserve the colourblind-safety guarantee.
+    """
+    _apply_style(config)
 
 
 # ---------------------------------------------------------------------------
@@ -580,9 +622,11 @@ def forecast_overlay(
 ) -> matplotlib.figure.Figure:
     """Actual-vs-prediction line plot with one line per named forecast.
 
-    Renders the ``actual`` series as a solid line plus one line per entry
-    in ``predictions_by_name``, each taking successive Okabe-Ito colours
-    (index 1 onwards — index 0 is reserved for the actual).  Legend is
+    Renders the ``actual`` series as a solid line in ``OKABE_ITO[2]`` (sky
+    blue) plus one line per entry in ``predictions_by_name``, each taking
+    successive Okabe-Ito colours skipping both ``OKABE_ITO[0]`` (black —
+    reserved for axes / reference lines) and ``OKABE_ITO[2]`` (sky blue —
+    used for the Actual series; reused would silently collide).  Legend is
     placed lower-right to match the Stage 4 notebook Cell 11 convention.
 
     Parameters
@@ -610,7 +654,11 @@ def forecast_overlay(
     fig, axes = _ensure_axes(ax)
 
     axes.plot(local_idx, actual.values, linewidth=1.6, color=OKABE_ITO[2], label="Actual")
-    palette = OKABE_ITO[1:] + OKABE_ITO[3:]  # skip OKABE_ITO[0] (black) and OKABE_ITO[2] (actual)
+    # Skip OKABE_ITO[0] (black, reserved for axes/reference lines) AND OKABE_ITO[2]
+    # (sky blue — the Actual colour above; reused would silently produce two
+    # indistinguishable lines).  Slice carefully: OKABE_ITO[1:] would include
+    # index 2 at position 1, re-introducing the collision for the 2nd prediction.
+    palette = OKABE_ITO[1:2] + OKABE_ITO[3:]
     for offset, (label, pred) in enumerate(predictions_by_name.items()):
         colour = palette[offset % len(palette)]
         # Align the prediction to the actual's index positionally — the helper
@@ -679,7 +727,9 @@ def forecast_overlay_with_band(
     Raises
     ------
     ValueError
-        If ``per_fold_errors`` lacks a ``horizon_h`` column.
+        If ``per_fold_errors`` lacks a ``horizon_h`` column, or if
+        ``quantiles`` is not a strictly ordered ``(lo, hi)`` pair within
+        ``[0.0, 1.0]``.
     """
     if "horizon_h" not in per_fold_errors.columns:
         raise ValueError(
@@ -687,11 +737,22 @@ def forecast_overlay_with_band(
             "run evaluate(..., return_predictions=True)"
         )
     q_lo_val, q_hi_val = float(quantiles[0]), float(quantiles[1])
+    # Reject reversed / equal / out-of-range quantiles at the boundary.  Pandas
+    # ``unstack`` preserves the input list order, so positional ``iloc`` access
+    # to the resulting DataFrame silently inverts the band when the caller
+    # passes e.g. ``quantiles=(0.9, 0.1)``.  Fail fast rather than render a
+    # misleading negative-height band.  (Phase 3 review N1.)
+    if not (0.0 <= q_lo_val < q_hi_val <= 1.0):
+        raise ValueError(
+            f"quantiles must be a (lo, hi) pair with 0 <= lo < hi <= 1; got {quantiles!r}."
+        )
     band = per_fold_errors.groupby("horizon_h")["error"].quantile([q_lo_val, q_hi_val]).unstack()
-    # Positional join: use the first len(point_prediction) horizons.
+    # Label-based column access (not ``iloc[:, 0/1]``) so the band stays
+    # correctly oriented regardless of the column order that ``unstack``
+    # happens to produce.  Defence-in-depth for the validation above.
     n = min(len(point_prediction), band.shape[0])
-    q_lo_series = band.iloc[:n, 0].to_numpy(dtype=np.float64)
-    q_hi_series = band.iloc[:n, 1].to_numpy(dtype=np.float64)
+    q_lo_series = band[q_lo_val].iloc[:n].to_numpy(dtype=np.float64)
+    q_hi_series = band[q_hi_val].iloc[:n].to_numpy(dtype=np.float64)
 
     idx = _require_tz_aware_datetime_index(actual, name="actual")
     local_idx = idx.tz_convert(display_tz)
@@ -925,6 +986,7 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         "forecast_overlay",
         "forecast_overlay_with_band",
         "benchmark_holdout_bar",
+        "apply_plots_config",
     ):
         print(f"  - {name}")
     print()

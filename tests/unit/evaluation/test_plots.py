@@ -1868,3 +1868,125 @@ def test_benchmark_holdout_bar_model_agnostic(
         )
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 review regressions
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_predictions_do_not_collide_with_actual_colour() -> None:
+    """Phase 3 review B1 regression: no prediction line may share the Actual colour.
+
+    Before the fix, ``forecast_overlay`` built ``palette = OKABE_ITO[1:] +
+    OKABE_ITO[3:]`` — a slice that still contained ``OKABE_ITO[2]`` (the sky-blue
+    Actual colour) at position 1, so the *second* prediction was drawn in the
+    same hex as Actual.  The notebook's Cell 15 passes three predictions
+    (Naive, Linear, NESO), so the live-demo surface quietly lost the ability
+    to distinguish Linear from Actual.  This regression pins: (a) Actual is
+    ``OKABE_ITO[2]``, and (b) no prediction line shares that colour.
+    """
+    import matplotlib.colors as mcolors
+
+    actual = _make_tz_aware_series(n=48, seed=0)
+    predictions_by_name = {
+        "Model A": _make_tz_aware_series(n=48, seed=1),
+        "Model B": _make_tz_aware_series(n=48, seed=2),
+        "Model C": _make_tz_aware_series(n=48, seed=3),
+    }
+
+    fig = _plots.forecast_overlay(actual, predictions_by_name)
+    try:
+        ax = fig.axes[0]
+        actual_colour = mcolors.to_hex(ax.lines[0].get_color()).lower()
+        prediction_colours = [mcolors.to_hex(line.get_color()).lower() for line in ax.lines[1:]]
+
+        assert actual_colour == _plots.OKABE_ITO[2].lower(), (
+            f"Actual series must be drawn in OKABE_ITO[2] (sky blue); got {actual_colour!r}."
+        )
+        for i, colour in enumerate(prediction_colours):
+            assert colour != actual_colour, (
+                f"Prediction line {i} uses {colour!r}, identical to Actual "
+                f"{actual_colour!r} — Phase 3 review B1 colour-collision regression."
+            )
+        assert len(set(prediction_colours)) == len(prediction_colours), (
+            f"Prediction lines must use distinct colours; got {prediction_colours!r}."
+        )
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "bad_quantiles",
+    [(0.9, 0.1), (0.5, 0.5), (-0.1, 0.5), (0.5, 1.1), (0.0, 0.0), (1.0, 1.0)],
+)
+def test_forecast_overlay_with_band_rejects_malformed_quantiles(
+    bad_quantiles: tuple[float, float],
+) -> None:
+    """Phase 3 review N1 regression: reject reversed / equal / out-of-range quantiles.
+
+    Before the fix, the helper used positional ``iloc[:, 0]`` / ``iloc[:, 1]``
+    access on a pandas-groupby-quantile result whose column order preserves
+    the input list order.  A caller passing ``quantiles=(0.9, 0.1)`` would
+    get a negative-height ``fill_between`` with no error.  The post-fix
+    contract raises ``ValueError`` with a message mentioning "quantiles" so
+    the misuse is caught at the boundary.
+    """
+    rng = np.random.default_rng(seed=0)
+    per_fold_errors = pd.DataFrame(
+        {"horizon_h": np.arange(24), "error": rng.standard_normal(24) * 100.0}
+    )
+    idx = pd.date_range("2024-06-01", periods=24, freq="h", tz="UTC")
+    actual = pd.Series(np.zeros(24), index=idx)
+    point = pd.Series(np.zeros(24), index=idx)
+
+    with pytest.raises(ValueError, match="quantiles"):
+        _plots.forecast_overlay_with_band(actual, point, per_fold_errors, quantiles=bad_quantiles)
+
+
+def test_apply_plots_config_propagates_figsize_and_dpi_to_rcparams() -> None:
+    """Phase 3 review N2 regression: ``PlotsConfig`` knobs must reach ``plt.rcParams``.
+
+    Plan D5 promises Hydra-configurable ``evaluation.plots.figsize`` and
+    ``dpi``.  Before the fix, the YAML knobs were decorative: ``plots.py``
+    never read ``PlotsConfig``; ``_apply_style`` hardcoded
+    ``_STYLE_RCPARAMS``.  ``apply_plots_config(cfg)`` is the public entry
+    point that wires a loaded config to ``matplotlib``.  Test isolates by
+    restoring the module defaults via ``_apply_style()`` in the ``finally``
+    block so subsequent tests that pin the 12x8 default still pass.
+    """
+    from conf._schemas import PlotsConfig
+
+    cfg = PlotsConfig(figsize=(16.0, 10.0), dpi=150)
+    try:
+        _plots.apply_plots_config(cfg)
+        # matplotlib stores figsize as list; compare via tuple().
+        assert tuple(plt.rcParams["figure.figsize"]) == (16.0, 10.0), (
+            "apply_plots_config must write PlotsConfig.figsize into "
+            "plt.rcParams['figure.figsize'] (Phase 3 review N2)."
+        )
+        assert plt.rcParams["figure.dpi"] == 150, (
+            "apply_plots_config must write PlotsConfig.dpi into "
+            "plt.rcParams['figure.dpi'] (Phase 3 review N2)."
+        )
+    finally:
+        _plots._apply_style()
+        # Sanity: the reset restored the module defaults so downstream tests
+        # that pin 12x8 do not see contamination from this test.
+        assert tuple(plt.rcParams["figure.figsize"]) == (12.0, 8.0)
+        assert plt.rcParams["figure.dpi"] == 110
+
+
+def test_apply_plots_config_exported_in_all() -> None:
+    """Phase 3 review N2: the public entry point is in ``__all__``.
+
+    The module already exports the seven helpers and three palette constants;
+    ``apply_plots_config`` is the public wiring for D5 Hydra overrides and
+    must be part of the documented public surface so ``from
+    bristol_ml.evaluation.plots import *`` picks it up in notebooks.
+    """
+    assert "apply_plots_config" in _plots.__all__, (
+        f"'apply_plots_config' missing from __all__={_plots.__all__!r} "
+        "(Phase 3 review N2 — public-surface contract)."
+    )
+    assert callable(_plots.apply_plots_config), "apply_plots_config must be a callable."

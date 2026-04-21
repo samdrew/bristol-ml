@@ -80,7 +80,9 @@ METRIC_REGISTRY: dict[str, MetricFn]
 def evaluate(model: Model, df: pd.DataFrame, splitter_cfg: SplitterConfig,
              metrics: Sequence[MetricFn], *,
              target_column: str = "nd_mw",
-             feature_columns: Sequence[str] | None = None) -> pd.DataFrame: ...
+             feature_columns: Sequence[str] | None = None,
+             return_predictions: bool = False,
+            ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]: ...
 ```
 
 **Benchmark helper** — three-way NESO comparison:
@@ -154,7 +156,7 @@ Each of these is swappable without touching downstream code. The index-array + p
 | `evaluation/metrics.py` | MAE, MAPE, RMSE, WAPE + `METRIC_REGISTRY` | 4 | Shipped | Pure `(y_true, y_pred) -> float`; fractions per DESIGN §5.3. D8/D9 zero-denominator policies raise. |
 | `evaluation/harness.py` | Fold-level evaluator `evaluate()` | 4 | Shipped | Holds the H-1 UTC guard; per-fold + summary loguru INFO logs. |
 | `evaluation/benchmarks.py` | NESO three-way `compare_on_holdout` + HH→hourly aligner | 4 | Shipped | D5 resolved in favour of an evaluation-layer sibling; a future peer-module refactor stays cheap because the public surface is two pure functions. |
-| `evaluation/plots.py` | Diagnostic-plot helpers: `residuals_vs_time`, `predicted_vs_actual`, `acf_residuals`, `error_heatmap_hour_weekday`, `forecast_overlay`, `forecast_overlay_with_band`, `benchmark_holdout_bar` | 6 | Shipped | Model-agnostic (AC-3) — inputs are `pd.Series` / `pd.DataFrame`, never a `Model` object. Okabe-Ito palette injected into `plt.rcParams` at import time (D2). `benchmark_holdout_bar` consumes `NesoBenchmarkConfig.holdout_start/_end` via a lazy `compare_on_holdout` import (D10). |
+| `evaluation/plots.py` | Diagnostic-plot helpers: `residuals_vs_time`, `predicted_vs_actual`, `acf_residuals`, `error_heatmap_hour_weekday`, `forecast_overlay`, `forecast_overlay_with_band`, `benchmark_holdout_bar`; plus `apply_plots_config(PlotsConfig)` to wire Hydra overrides | 6 | Shipped | Model-agnostic (AC-3) — inputs are `pd.Series` / `pd.DataFrame`, never a `Model` object. Okabe-Ito palette injected into `plt.rcParams` at import time (D2); `apply_plots_config` propagates `evaluation.plots.figsize` / `dpi` from a loaded `PlotsConfig` (D5; wired up at Phase 3 review N2). `benchmark_holdout_bar` consumes `NesoBenchmarkConfig.holdout_start/_end` via a lazy `compare_on_holdout` import (D10). |
 | `evaluation/drift.py` (tentative) | Post-deployment drift primitives | 18 | Planning | May live here or under `monitoring/`; decide at Stage 18. |
 
 ## Open questions

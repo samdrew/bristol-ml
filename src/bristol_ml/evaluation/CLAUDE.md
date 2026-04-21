@@ -9,7 +9,7 @@ three-way NESO benchmark; Stage 6 adds ``plots`` — a colourblind-safe
 diagnostic-plot helper library (residuals, ACF, forecast overlays,
 empirical uncertainty bands, and a fixed-window NESO bar chart).
 
-## Current surface (Stage 4)
+## Current surface (Stages 3–6)
 
 ### Splitter (Stage 3)
 
@@ -38,13 +38,18 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
 ### Harness (Stage 4)
 
 - `bristol_ml.evaluation.harness.evaluate(model, df, splitter_cfg,
-  metrics, *, target_column="nd_mw", feature_columns=None) ->
-  pd.DataFrame` — iterates the rolling-origin folds described by
+  metrics, *, target_column="nd_mw", feature_columns=None,
+  return_predictions=False) -> pd.DataFrame | tuple[pd.DataFrame,
+  pd.DataFrame]` — iterates the rolling-origin folds described by
   `splitter_cfg`, calls `model.fit` / `model.predict` per fold, and
   returns a long-form per-fold DataFrame. Columns: `fold_index`
   (`int`), `train_end` / `test_start` / `test_end` (timestamps from
   `df.index`), plus one float column per metric keyed by the metric
-  callable's `__name__`.
+  callable's `__name__`. When `return_predictions=True`, returns a
+  `(metrics_df, predictions_df)` tuple; `predictions_df` has one row
+  per (fold, horizon-index) with columns `["fold_index", "test_start",
+  "test_end", "horizon_h", "y_true", "y_pred", "error"]` (Stage 6 D9
+  — see the API growth trigger note below).
 - **H-1 guard (Stage 3 carry-over, implemented here in Stage 4):**
   `df.index` must be a `pandas.DatetimeIndex`; tz-naive is permitted,
   UTC-aware is permitted, any other timezone is rejected.
@@ -111,6 +116,14 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
   ax=None) -> Figure` — fixed-window bar chart for the NESO three-way
   benchmark comparison (Stage 6 D10 — wires up the
   `NesoBenchmarkConfig.holdout_start/_end` consumer added at Stage 4).
+- `bristol_ml.evaluation.plots.apply_plots_config(config: PlotsConfig)
+  -> None` — re-apply the rcParams overlay with ``figure.figsize`` and
+  ``figure.dpi`` sourced from a loaded ``PlotsConfig``. Call this from
+  a notebook or CLI after ``load_config()`` if you want Hydra overrides
+  of ``evaluation.plots.figsize`` / ``dpi`` to take effect; without
+  this call, the module-default values written at import time stay in
+  force (Stage 6 Phase 3 review N2 wired this up — D5's "Hydra-
+  configurable" promise was decorative before the fix).
 
 #### Plotting conventions
 
