@@ -52,14 +52,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from loguru import logger
-from statsmodels.tsa.statespace.sarimax import SARIMAXResultsWrapper
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResultsWrapper
 
+from bristol_ml.features.fourier import append_weekly_fourier
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import SarimaxConfig
 
@@ -104,20 +108,155 @@ class SarimaxModel:
     # ---------------------------------------------------------------------
 
     def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
-        """Fit SARIMAX on ``(features, target)``.  Filled in Task T4."""
-        raise NotImplementedError(
-            "SarimaxModel.fit lands in Stage 7 Task T4. "
-            "See docs/plans/active/07-sarimax.md §Task T4."
+        """Fit SARIMAX on the aligned ``(features, target)`` pair.
+
+        The fit path composes, in order:
+
+        1. Length-parity and index-timezone guards (surprise 2 requires
+           a tz-aware UTC index; raising here surfaces the wrong caller
+           configuration before statsmodels' opaque ``ValueWarning``).
+        2. Resolution of the regressor set: if
+           ``config.feature_columns`` is ``None`` every column in
+           ``features`` is taken; otherwise the configured tuple is used.
+        3. Weekly-Fourier append (plan D1/D3): when
+           ``config.weekly_fourier_harmonics > 0`` the
+           :func:`append_weekly_fourier` helper adds ``2*harmonics``
+           ``float64`` columns and the resolved feature-column tuple is
+           extended accordingly.
+        4. SARIMAX construction with **``freq="h"``** (surprise 2 fix)
+           and the spread ``config.sarimax_kwargs.model_dump()``.
+        5. ``.fit(disp=False)`` with a warnings-catch that re-emits any
+           :class:`~statsmodels.tools.sm_exceptions.ConvergenceWarning`
+           at ``loguru`` WARN level — convergence warnings are
+           informational per domain §R1, not fatal.
+
+        Re-calling ``fit`` discards the previous results wrapper entirely
+        (NFR-5).
+
+        Raises
+        ------
+        ValueError
+            If ``len(features) != len(target)``; or if ``features.index``
+            is not a tz-aware :class:`~pandas.DatetimeIndex`; or if the
+            index timezone is not UTC (the Stage 3 assembler contract
+            guarantees UTC — other timezones are out of scope); or if a
+            resolved feature column is missing from ``features``.
+        """
+        # --- 1. Guards ---------------------------------------------------
+        if len(features) != len(target):
+            raise ValueError(
+                "SarimaxModel.fit requires len(features) == len(target); "
+                f"got {len(features)} vs {len(target)}."
+            )
+        if not isinstance(features.index, pd.DatetimeIndex):
+            raise ValueError(
+                "SarimaxModel.fit requires a DatetimeIndex on features; "
+                f"got {type(features.index).__name__}."
+            )
+        if features.index.tz is None:
+            raise ValueError(
+                "SarimaxModel.fit requires a tz-aware DatetimeIndex on features "
+                "(the Stage 3 assembler contract guarantees UTC). Got tz-naive."
+            )
+        if str(features.index.tz) != "UTC":
+            raise ValueError(
+                "SarimaxModel.fit requires a UTC-tz DatetimeIndex on features "
+                "(the Stage 3 assembler contract); got "
+                f"tz={features.index.tz!r}. "
+                "Convert upstream via df.index = df.index.tz_convert('UTC')."
+            )
+
+        # --- 2. Feature-column resolution --------------------------------
+        features_with_fourier = self._append_fourier_if_configured(features)
+        resolved_columns = self._resolve_feature_columns(features_with_fourier)
+        missing = [c for c in resolved_columns if c not in features_with_fourier.columns]
+        if missing:
+            raise ValueError(
+                "SarimaxModel.fit: features DataFrame is missing configured "
+                f"columns {missing}. Supply every column named in "
+                "SarimaxConfig.feature_columns (or let the default resolve "
+                "them from the input frame)."
+            )
+
+        # --- 3. Build the numeric matrices --------------------------------
+        endog = pd.Series(
+            np.asarray(target, dtype=np.float64),
+            index=features.index,
+            name=target.name if target.name is not None else "target",
         )
+        exog = features_with_fourier[list(resolved_columns)].to_numpy(dtype=np.float64)
+
+        # --- 4. Construct SARIMAX with freq="h" (surprise 2) --------------
+        sm_model = SARIMAX(
+            endog=endog,
+            exog=exog if exog.size else None,
+            order=tuple(self._config.order),
+            seasonal_order=tuple(self._config.seasonal_order),
+            trend=self._config.trend,
+            freq="h",
+            **self._config.sarimax_kwargs.model_dump(),
+        )
+
+        # --- 5. Fit; capture convergence warnings -------------------------
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            results = sm_model.fit(disp=False)
+
+        for w in caught:
+            if issubclass(w.category, ConvergenceWarning):
+                logger.warning(
+                    "SarimaxModel.fit: convergence warning from statsmodels "
+                    "(informational per domain §R1): {}",
+                    str(w.message),
+                )
+
+        # --- 6. Publish state --------------------------------------------
+        self._results = results
+        self._feature_columns = tuple(resolved_columns)
+        self._fit_utc = datetime.now(UTC)
+        self._endog_name = str(target.name) if target.name is not None else "target"
 
     def predict(self, features: pd.DataFrame) -> pd.Series:
         """Return SARIMAX predictions indexed to ``features.index``.
 
-        Filled in Task T4.
+        Surprise 1 fix: ``SARIMAXResults.get_forecast(...).predicted_mean``
+        does *not* carry ``features.index``; it returns a Series on the
+        model's internal time axis.  We construct the returned Series
+        with the input's index directly so the harness's downstream
+        ``predictions_df = pd.concat(...)`` alignment works.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit` has not been called.
+        KeyError
+            If ``features`` (after the optional Fourier append) is
+            missing a column the model was fit on.
         """
-        raise NotImplementedError(
-            "SarimaxModel.predict lands in Stage 7 Task T4. "
-            "See docs/plans/active/07-sarimax.md §Task T4."
+        if self._results is None:
+            raise RuntimeError("SarimaxModel must be fit() before predict().")
+
+        features_with_fourier = self._append_fourier_if_configured(features)
+        missing = [c for c in self._feature_columns if c not in features_with_fourier.columns]
+        if missing:
+            raise KeyError(
+                f"SarimaxModel.predict: features DataFrame is missing columns "
+                f"the model was fit on: {missing}."
+            )
+        exog_test = features_with_fourier[list(self._feature_columns)].to_numpy(dtype=np.float64)
+
+        forecast_result = self._results.get_forecast(
+            steps=len(features),
+            exog=exog_test if exog_test.size else None,
+        )
+        predicted_values = np.asarray(forecast_result.predicted_mean, dtype=np.float64)
+
+        # Surprise 1: re-index to features.index rather than letting the
+        # statsmodels internal time axis leak through.
+        return pd.Series(
+            predicted_values,
+            index=features.index,
+            name=self._config.target_column,
         )
 
     def save(self, path: Path) -> None:
@@ -193,6 +332,58 @@ class SarimaxModel:
         if self._results is None:
             raise RuntimeError("SarimaxModel must be fit before accessing .results")
         return self._results
+
+    # ---------------------------------------------------------------------
+    # Internal helpers
+    # ---------------------------------------------------------------------
+
+    def _append_fourier_if_configured(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Append weekly-Fourier columns when ``weekly_fourier_harmonics > 0``.
+
+        The helper is deterministic given a UTC index (plan D1/D3 —
+        Dynamic Harmonic Regression).  When harmonics is zero this is a
+        no-op and we return a shallow copy so callers can attach columns
+        without ever mutating the input frame.
+        """
+        if self._config.weekly_fourier_harmonics <= 0:
+            return features.copy()
+        return append_weekly_fourier(
+            features,
+            period_hours=168,
+            harmonics=self._config.weekly_fourier_harmonics,
+            column_prefix="week",
+        )
+
+    def _resolve_feature_columns(self, features_with_fourier: pd.DataFrame) -> tuple[str, ...]:
+        """Return the ordered tuple of regressor columns for this fit.
+
+        - If ``config.feature_columns is None`` (the default) every
+          column in ``features_with_fourier`` is taken — this is the
+          "weather + calendar + Fourier" path that the Stage 7 notebook
+          exercises.
+        - If ``config.feature_columns`` is a tuple we append the Fourier
+          column names (when harmonics > 0) to it so the caller does not
+          have to know about them.
+        - An empty result means SARIMAX runs with ``exog=None`` — a
+          pure (S)ARIMA fit.  The fit path translates this to
+          ``exog=None`` on construction, so statsmodels handles it
+          cleanly.
+        """
+        if self._config.feature_columns is None:
+            return tuple(features_with_fourier.columns)
+        configured = tuple(self._config.feature_columns)
+        if self._config.weekly_fourier_harmonics > 0:
+            fourier_names = tuple(
+                name
+                for k in range(1, self._config.weekly_fourier_harmonics + 1)
+                for name in (f"week_sin_k{k}", f"week_cos_k{k}")
+            )
+            # Preserve configured order; append Fourier names only if
+            # not already in the configured tuple (edge case: caller
+            # spelled them out manually).
+            extra = tuple(n for n in fourier_names if n not in configured)
+            return configured + extra
+        return configured
 
 
 # ---------------------------------------------------------------------------
