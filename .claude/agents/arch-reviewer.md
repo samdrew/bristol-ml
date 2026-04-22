@@ -14,7 +14,7 @@ Given `plan.md` and the current diff, produce a conformance report:
 Do not rewrite code. Your job is to tell the orchestrator what needs
 attention.
 
-Your conformance check has four layers, in this order:
+Your conformance check has five layers, in this order:
   1. Does the diff satisfy every acceptance criterion in the plan?
   2. Does the diff's changes to `docs/architecture/layers/*.md` match
      what actually shipped? The layer doc's Contract section is
@@ -26,3 +26,13 @@ Your conformance check has four layers, in this order:
   4. Does anything in the diff contradict `docs/intent/DESIGN.md`?
      If yes, that is a blocker regardless of how good the code is —
      intent changes are a human decision, not a code-review outcome.
+  5. **Over-conformance check.** List code, tests, and docs in the
+     diff that go *beyond* the plan's acceptance criteria — things
+     the plan did not require and the intent did not name. Tag each
+     as `AC-aligned` (keep), `plan-polish` (author justifies or cuts),
+     or `premature-optimisation` (default = cut). Mirror the Phase-1
+     `@minimalist` four-tag taxonomy so the two reports line up;
+     `HOUSEKEEPING` and `RESTATES INTENT` rows do not appear here
+     because by definition they are AC-aligned. This catches the
+     implementation-time bloat that the Phase-1 scope diff cannot
+     see.

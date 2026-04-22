@@ -37,9 +37,27 @@ Enter Plan Mode. Spawn in parallel via the Task tool:
   - `codebase-explorer`    — maps relevant existing code
   - `domain-researcher`    — only if external research is needed
 
-Synthesise into `docs/plans/active/<slug>.md`. Use the schema in
-`CLAUDE.md`. Stop after writing the plan. Tell the human it's ready
-for review (`Ctrl+G`). Do not start Phase 2 until they say so.
+When the three research agents have returned, draft the decision
+table and NFR list internally — do NOT yet write the plan file —
+and spawn `minimalist` as a second-wave pre-synthesis critic. Pass
+it the intent path, the three research-artefact paths, and the
+draft decision set. Its output is a Scope Diff table tagging every
+decision / NFR / test / dependency / notebook cell as `RESTATES
+INTENT`, `PLAN POLISH`, `PREMATURE OPTIMISATION`, or `HOUSEKEEPING`,
+plus one closing "single highest-leverage cut" sentence.
+
+Persist the Scope Diff to
+`docs/lld/research/<NN>-<slug>-scope-diff.md` — the fourth Phase-1
+research artefact, same directory and naming convention as the
+three above. Reconsider each `PLAN POLISH` and `PREMATURE
+OPTIMISATION` row before binding it into the plan; the default
+disposition on `PREMATURE OPTIMISATION` is cut.
+
+Then synthesise into `docs/plans/active/<slug>.md`. Use the schema
+in `CLAUDE.md`; link the Scope Diff from the plan's preamble so the
+human sees both at Ctrl+G review. Stop after writing the plan.
+Tell the human it's ready for review. Do not start Phase 2 until
+they say so.
 
 ## Phase 2 — Implementation
 
