@@ -178,7 +178,8 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
     from bristol_ml.models.sarimax import SarimaxModel
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
+    from bristol_ml.models.scipy_parametric import ScipyParametricModel
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
 
     cfg = load_config(overrides=list(args.overrides))
 
@@ -198,8 +199,9 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
     if cfg.model is None:
         print(
-            "No model resolved. Ensure `model=linear`, `model=naive`, or "
-            "`model=sarimax` is in the resolved Hydra composition.",
+            "No model resolved. Ensure `model=linear`, `model=naive`, "
+            "`model=sarimax`, or `model=scipy_parametric` is in the "
+            "resolved Hydra composition.",
             file=sys.stderr,
         )
         return 2
@@ -259,6 +261,18 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
             sarimax_cfg = model_cfg
         primary = SarimaxModel(sarimax_cfg)
         primary_kind = "sarimax"
+    elif isinstance(model_cfg, ScipyParametricConfig):
+        # Stage 8: the parametric model's ``feature_columns`` field
+        # constrains *Fourier* columns generated inside the model, not
+        # the raw input columns (unlike Linear / SARIMAX).  So there is
+        # no resolved-feature-set promotion to mirror here — leave the
+        # Hydra-resolved config unmodified.  The harness's
+        # ``feature_columns=`` kwarg below still slices the raw frame
+        # down to ``feature_column_names`` (weather or weather+calendar
+        # per the active feature set), and the parametric model reads
+        # its temperature column from that slice.
+        primary = ScipyParametricModel(model_cfg)
+        primary_kind = "scipy_parametric"
     else:  # pragma: no cover — the discriminated union is exhaustive
         print(
             f"No harness factory for model type {type(model_cfg).__name__!r}.",
@@ -424,9 +438,9 @@ def _print_metric_table(df: pd.DataFrame) -> None:
 
 def _target_column(model_cfg: object) -> str:
     """Return the resolved model's target column (``"nd_mw"`` default)."""
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig
+    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
 
-    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig)):
+    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig, ScipyParametricConfig)):
         return model_cfg.target_column
     return "nd_mw"
 

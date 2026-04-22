@@ -20,6 +20,12 @@ dependencies = [
     "pandas>=2.2,<3",
     "loguru>=0.7,<1",
     "statsmodels>=0.14,<1",
+    # Stage 8 (D12): explicit scipy declaration.  scipy is transitively pulled
+    # in by statsmodels at present, but relying on that is fragile — a fresh
+    # venv resolving statsmodels from a wheel-only mirror could arrive
+    # without scipy's exposed C extensions.  1.13 is the first scipy release
+    # with formal NumPy 2.0 support; ``<2`` guards a hypothetical ABI break.
+    "scipy>=1.13,<2",
     "joblib>=1.4,<2",
     # Stage 6 (D3): matplotlib promoted from dev to runtime so
     # ``python -m bristol_ml.evaluation.plots --help`` works on non-dev installs

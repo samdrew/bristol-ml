@@ -539,10 +539,77 @@ class SarimaxConfig(BaseModel):
     sarimax_kwargs: SarimaxKwargs = Field(default_factory=SarimaxKwargs)
 
 
+class ScipyParametricConfig(BaseModel):
+    """Configuration for the SciPy parametric load model (Stage 8).
+
+    Stage 8 D1 picks a piecewise-linear double-hinge temperature response
+    (heating and cooling degree-day style, ``max(0, T_heat - T)`` and
+    ``max(0, T - T_cool)``) with Elexon-convention fixed hinge temperatures
+    (``T_heat = 15.5``, ``T_cool = 22.0`` °C).  On top of the two hinge
+    coefficients sit a base-load intercept ``alpha`` plus diurnal and weekly
+    Fourier harmonic pairs (Stage 8 D2, defaults ``diurnal=3``, ``weekly=2``).
+
+    ``feature_columns=None`` is **deliberately narrower here than in
+    SarimaxConfig**: the parametric model's design matrix is always just the
+    temperature column + the generated Fourier columns (D2 clarification —
+    Stage 5 day-of-week one-hots are excluded to avoid partial collinearity
+    with the weekly Fourier terms).  The field is retained for override-time
+    ablation experiments ("drop the weekly harmonics", "fit on a subset of
+    Fourier columns") but the default resolution narrows to the
+    temperature-plus-Fourier column set.
+
+    ``loss="linear"`` (plan D3) keeps ``curve_fit``'s Gaussian-pcov → CI
+    mapping rigorous; the other loss choices (``soft_l1`` / ``huber`` /
+    ``cauchy``) are available as CLI overrides but turn ``pcov`` into a
+    heuristic.  ``p0=None`` (plan D4) triggers deterministic data-driven
+    initialisation inside ``fit()``; passing an explicit tuple pins the
+    starting point (useful for reproducibility experiments).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union.
+    type: Literal["scipy_parametric"] = "scipy_parametric"
+    # Target column on the Stage 3 feature table.
+    target_column: str = "nd_mw"
+    # ``None`` + parametric design-matrix rule → only ``temperature_column`` +
+    # generated Fourier columns.  An explicit tuple narrows further.
+    feature_columns: tuple[str, ...] | None = None
+    # The temperature feature used for HDD/CDD computation; override if the
+    # feature table uses a different name (e.g. ``temp_c``).
+    temperature_column: str = "temperature_2m"
+    # D2 (plan §1): number of sin/cos harmonic pairs at the 24-hour diurnal
+    # cycle.  ``0`` disables the diurnal component entirely (ablation).
+    diurnal_harmonics: int = Field(default=3, ge=0, le=10)
+    # D2 (plan §1): number of sin/cos harmonic pairs at the 168-hour weekly
+    # cycle.  ``0`` disables the weekly component entirely (ablation).
+    weekly_harmonics: int = Field(default=2, ge=0, le=10)
+    # D1 (plan §1): heating-degree-day base temperature (°C).  Elexon
+    # convention = 15.5.  Fixed by D1, not a free parameter of curve_fit.
+    t_heat_celsius: float = 15.5
+    # D1 (plan §1): cooling-degree-day base temperature (°C).  Elexon
+    # convention = 22.0.  Fixed by D1, not a free parameter of curve_fit.
+    t_cool_celsius: float = 22.0
+    # D3 (plan §1): robust-loss selector passed through to
+    # ``scipy.optimize.least_squares`` when the user opts into a non-default
+    # loss.  ``"linear"`` keeps the standard pcov → Gaussian-CI mapping;
+    # ``"soft_l1"`` / ``"huber"`` / ``"cauchy"`` downweight outliers but turn
+    # the CI into a heuristic (see plan D5 notebook appendix).
+    loss: Literal["linear", "soft_l1", "huber", "cauchy"] = "linear"
+    # D6 (plan §1): maximum ``curve_fit`` function evaluations.  5000 is an
+    # order of magnitude above the convergence envelope for 13 parameters
+    # x 8760 rows; raise only if a pathological fold bounces off the cap.
+    max_iter: int = Field(default=5000, ge=1)
+    # D4 (plan §1): optional explicit starting point; ``None`` triggers the
+    # data-driven derivation inside ``fit()``.  Length must match the
+    # parameter count ``3 + 2*diurnal_harmonics + 2*weekly_harmonics``.
+    p0: tuple[float, ...] | None = None
+
+
 # ``AppConfig.model`` is a Pydantic discriminated union: exactly one of the
 # model variants is active per run (matching Hydra group-override semantics).
 # The ``type`` discriminator is written into the YAML by each Hydra group file.
-ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig
+ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig | ScipyParametricConfig
 
 
 class ModelMetadata(BaseModel):

@@ -34,7 +34,7 @@ Stages 2-19 are intentionally `planning` — briefs land when each stage becomes
 | 5 | Calendar features | `shipped` | [intent](../intent/05-calendar-features.md) | [plan](../plans/completed/05-calendar-features.md) | [features](../architecture/layers/features.md) · [ingestion](../architecture/layers/ingestion.md) | — | [retro](../lld/stages/05-calendar-features.md) |
 | 6 | Enhanced evaluation & viz | `shipped` | [intent](../intent/06-enhanced-evaluation.md) | [plan](../plans/completed/06-enhanced-evaluation.md) | [evaluation](../architecture/layers/evaluation.md) | — | [retro](../lld/stages/06-enhanced-evaluation.md) |
 | 7 | SARIMAX | `shipped` | [intent](../intent/07-sarimax.md) | [plan](../plans/completed/07-sarimax.md) | [models](../architecture/layers/models.md) | — | [retro](../lld/stages/07-sarimax.md) |
-| 8 | SciPy parametric | `planning` | [intent](../intent/08-scipy-parametric.md) | — | — | — | — |
+| 8 | SciPy parametric | `shipped` | [intent](../intent/08-scipy-parametric.md) | [plan](../plans/completed/08-scipy-parametric.md) | [models](../architecture/layers/models.md) | — | [retro](../lld/stages/08-scipy-parametric.md) |
 | 9 | Model registry | `planning` | [intent](../intent/09-model-registry.md) | — | — | — | — |
 | 10 | Simple NN | `planning` | [intent](../intent/10-simple-nn.md) | — | — | — | — |
 | 11 | Complex NN | `planning` | [intent](../intent/11-complex-nn.md) | — | — | — | — |

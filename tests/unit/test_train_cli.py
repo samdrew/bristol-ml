@@ -747,3 +747,54 @@ def test_train_cli_runs_with_model_sarimax(
         "stdout must contain 'Per-fold metrics for model=sarimax'; "
         f"stdout was:\n{out} (Stage 7 T6 AC-11)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 T6 — ScipyParametric dispatcher wiring (train CLI)
+# Plan: docs/plans/active/08-scipy-parametric.md §6 Task T6
+# ---------------------------------------------------------------------------
+
+
+def test_train_cli_runs_with_model_scipy_parametric(
+    warm_feature_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage 8 T6 (AC-7): ``train`` CLI exits 0 and prints ScipyParametric per-fold table.
+
+    Full-path integration smoke for the ``model=scipy_parametric`` CLI path.
+    Uses the same ``warm_feature_cache`` fixture as the other
+    ``test_train_cli_*`` tests.  The ``diurnal_harmonics=1`` and
+    ``weekly_harmonics=1`` overrides reduce the number of Fourier terms so
+    ``curve_fit`` completes quickly on the 90-day synthetic cache.
+    Tight rolling-origin parameters yield a single test fold.
+
+    Asserts:
+    - Exit code is 0 (the ScipyParametric dispatcher ran without error).
+    - Stdout contains ``"Per-fold metrics for model=scipy_parametric"`` —
+      confirming the inline ``ScipyParametricConfig`` branch was taken and the
+      per-fold table header is correctly parameterised.
+
+    Plan clause: docs/plans/active/08-scipy-parametric.md §6 Task T6 —
+    ``test_train_cli_runs_with_model_scipy_parametric``.
+    """
+    exit_code = _cli_main(
+        [
+            "model=scipy_parametric",
+            "model.diurnal_harmonics=1",
+            "model.weekly_harmonics=1",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=24",
+            "evaluation.rolling_origin.step=720",
+            "evaluation.rolling_origin.fixed_window=true",
+        ]
+    )
+
+    assert exit_code == 0, (
+        f"_cli_main must exit 0 for model=scipy_parametric on a warm feature cache; "
+        f"got exit_code={exit_code} (Stage 8 T6 AC-7)."
+    )
+    out = capsys.readouterr().out
+    assert "Per-fold metrics for model=scipy_parametric" in out, (
+        "stdout must contain 'Per-fold metrics for model=scipy_parametric'; "
+        f"stdout was:\n{out} (Stage 8 T6 AC-7)."
+    )
