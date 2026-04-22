@@ -369,16 +369,35 @@ class ScipyParametricModel:
             )
 
         # --- 5. curve_fit ----------------------------------------------
+        # Plan D3: ``cfg.loss`` must reach ``curve_fit``.  ``method="lm"`` is
+        # LM's native unconstrained solver and accepts ``maxfev`` + the
+        # default ``loss="linear"``; any non-linear (robust) loss requires
+        # ``method="trf"`` (scipy enforces this) and uses ``max_nfev`` as the
+        # iteration budget.  The Gaussian-CI reasoning in Cell 12 of the
+        # notebook only holds for ``loss="linear"``; choosing a robust loss
+        # is an informed override by the user.
         target_arr = np.asarray(target, dtype=np.float64)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            popt, pcov = curve_fit(
-                _parametric_fn,
-                design_matrix,
-                target_arr,
-                p0=p0,
-                maxfev=cfg.max_iter,
-            )
+            if cfg.loss == "linear":
+                popt, pcov = curve_fit(
+                    _parametric_fn,
+                    design_matrix,
+                    target_arr,
+                    p0=p0,
+                    method="lm",
+                    maxfev=cfg.max_iter,
+                )
+            else:
+                popt, pcov = curve_fit(
+                    _parametric_fn,
+                    design_matrix,
+                    target_arr,
+                    p0=p0,
+                    method="trf",
+                    loss=cfg.loss,
+                    max_nfev=cfg.max_iter,
+                )
 
         for w in caught:
             if issubclass(w.category, OptimizeWarning):

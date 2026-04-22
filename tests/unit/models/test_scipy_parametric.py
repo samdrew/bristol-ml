@@ -1459,3 +1459,108 @@ def test_scipy_parametric_conforms_to_model_protocol(
         "isinstance(model, Model) must still be True after fit(). "
         "Plan T7 / AC-1 / ``test_scipy_parametric_conforms_to_model_protocol``."
     )
+
+
+# ===========================================================================
+# Phase 3 review B-1 — ``cfg.loss`` must reach ``curve_fit``
+# (plan D3; regression guard for the silent-no-op discovered in review)
+# ===========================================================================
+
+
+def test_scipy_parametric_fit_loss_override_changes_fit() -> None:
+    """``cfg.loss != "linear"`` must alter ``popt`` relative to the OLS fit.
+
+    Plan D3 says ``cfg.loss`` controls the :func:`scipy.optimize.curve_fit`
+    solver: ``"linear"`` is the OLS-equivalent Gaussian-CI default,
+    ``"soft_l1"`` / ``"huber"`` / ``"cauchy"`` down-weight outliers so the
+    robust fit disagrees with the OLS fit when outliers are present.
+
+    Phase 3 review B-1 found that prior to the ``method="lm"`` /
+    ``method="trf"`` conditional wiring, ``cfg.loss`` was stored in
+    ``metadata.hyperparameters["loss"]`` but never reached ``curve_fit`` —
+    every run was OLS regardless of the config.  This test is the
+    regression guard: two fits on identical seeded data, one with
+    ``loss="linear"`` and one with ``loss="soft_l1"``, must produce
+    detectably different parameter vectors.
+
+    Construction
+    ------------
+    - 336-row (two weeks hourly) UTC frame, seed=17.
+    - Same 30-day-ish seasonal temperature sinusoid as
+      ``test_scipy_parametric_fit_recovers_temperature_coefficient_within_5pct``
+      so the heating hinge is well-exercised.
+    - True demand = ``alpha + beta_heat * HDD + beta_cool * CDD`` plus
+      N(0, 150) noise, **plus large outliers on ~5 % of rows**
+      (±3000 MW — an order of magnitude above the noise sigma).  These
+      outliers are what the robust loss is meant to down-weight.
+
+    Plan clause: Phase 3 review B-1 / plan D3.
+    """
+    rng = np.random.default_rng(seed=17)
+
+    n_rows = 336  # two weeks hourly
+    index = pd.date_range("2023-02-01 00:00", periods=n_rows, freq="h", tz="UTC")
+
+    # Seasonal-ish temperature sinusoid centred at 12 C +- 10 C, crosses
+    # T_heat=15.5 repeatedly so the hinge is identifiable.
+    temperature_2m = (
+        12.0
+        + 10.0 * np.sin(2.0 * np.pi * np.arange(n_rows) / n_rows)
+        + rng.normal(0, 1.5, size=n_rows)
+    )
+
+    alpha_true = 30_000.0
+    beta_heat_true = 120.0
+    beta_cool_true = 0.0
+    t_heat = 15.5
+    t_cool = 22.0
+    hdd = np.maximum(0.0, t_heat - temperature_2m)
+    cdd = np.maximum(0.0, temperature_2m - t_cool)
+
+    demand_clean = alpha_true + beta_heat_true * hdd + beta_cool_true * cdd
+    noise = rng.normal(0.0, 150.0, n_rows)
+
+    # Inject outliers on ~5 % of rows at +/-3000 MW.  This is the signal
+    # the robust loss is meant to absorb; OLS will swing towards them.
+    outlier_mask = rng.uniform(0.0, 1.0, size=n_rows) < 0.05
+    outlier_signs = rng.choice([-1.0, 1.0], size=n_rows)
+    outliers = np.where(outlier_mask, 3000.0 * outlier_signs, 0.0)
+
+    demand_obs = demand_clean + noise + outliers
+
+    features = pd.DataFrame({"temperature_2m": temperature_2m}, index=index)
+    target = pd.Series(demand_obs, index=index, name="nd_mw")
+
+    config_linear = ScipyParametricConfig(diurnal_harmonics=2, weekly_harmonics=1, loss="linear")
+    config_robust = ScipyParametricConfig(diurnal_harmonics=2, weekly_harmonics=1, loss="soft_l1")
+
+    model_linear = ScipyParametricModel(config_linear)
+    model_linear.fit(features, target)
+
+    model_robust = ScipyParametricModel(config_robust)
+    model_robust.fit(features, target)
+
+    popt_linear = np.asarray(model_linear.metadata.hyperparameters["param_values"], dtype=float)
+    popt_robust = np.asarray(model_robust.metadata.hyperparameters["param_values"], dtype=float)
+
+    assert popt_linear.shape == popt_robust.shape, (
+        f"Parameter vectors must have identical shape; got "
+        f"linear={popt_linear.shape}, robust={popt_robust.shape}."
+    )
+
+    # The robust fit MUST disagree with the OLS fit on outlier-contaminated
+    # data.  ``atol=1.0`` is generous (parameters are MW-scale, ~1e4) and
+    # still catches the silent-no-op bug — pre-fix, the two vectors were
+    # identical to machine precision.
+    assert not np.allclose(popt_linear, popt_robust, atol=1.0), (
+        "ScipyParametricConfig.loss is inert: loss='linear' and "
+        "loss='soft_l1' produced the same popt to atol=1.0 on "
+        "outlier-contaminated data.  cfg.loss must reach curve_fit "
+        "(plan D3; Phase 3 review B-1)."
+    )
+
+    # Also verify the metadata string reflects the loss that was actually
+    # used — guards against a regression where we fix the solver but
+    # forget to update the provenance record.
+    assert model_linear.metadata.hyperparameters["loss"] == "linear"
+    assert model_robust.metadata.hyperparameters["loss"] == "soft_l1"
