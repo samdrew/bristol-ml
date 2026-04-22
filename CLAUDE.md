@@ -144,6 +144,8 @@ Structural changes also update `docs/intent/DESIGN.md` §6 and `README.md` (user
 
 **When the right approach is unclear** (new model family, unusual data semantics), spawn `@researcher` before the implementing team. Findings land in `docs/lld/research/` and become input to the implementers' spawn prompts.
 
+**Scope-guard at Phase 1.** After the three Phase-1 research agents return and before the lead writes `docs/plans/active/NN-<slug>.md`, spawn `@minimalist` as a pre-synthesis critic. It reads the intent, the three research artefacts, and the draft decision set; emits a Scope Diff tagging every decision / NFR / test / dep / notebook cell as `RESTATES INTENT`, `PLAN POLISH`, `PREMATURE OPTIMISATION`, or `HOUSEKEEPING`; closes with one "single highest-leverage cut" sentence. Output is persisted to `docs/lld/research/NN-<slug>-scope-diff.md` as the fourth Phase-1 research artefact and linked from the plan's preamble, so the Ctrl+G reviewer sees both. The `@arch-reviewer` at Phase 3 applies the same four-tag taxonomy to the implementation diff to catch bloat added post-plan.
+
 
 ## Git protocol
 
