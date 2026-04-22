@@ -3,9 +3,9 @@
 This module is the **models layer**: the `Model` protocol that every
 estimator implements, the `ModelMetadata` provenance record, joblib-backed
 IO helpers, and the concrete model classes (`NaiveModel`, `LinearModel`,
-`SarimaxModel`).  Stage 4 introduces the layer; every subsequent modelling
-stage (5, 7, 8, 10, 11) adds further model classes that conform to the
-same protocol.
+`SarimaxModel`, `ScipyParametricModel`).  Stage 4 introduces the layer;
+every subsequent modelling stage (5, 7, 8, 10, 11) adds further model
+classes that conform to the same protocol.
 
 Read the layer contract in
 [`docs/architecture/layers/models.md`](../../../docs/architecture/layers/models.md)
@@ -29,6 +29,11 @@ concrete Stage 4 surface.
 - `bristol_ml.models.linear.LinearModel` — statsmodels OLS.
 - `bristol_ml.models.sarimax.SarimaxModel` — statsmodels SARIMAX with
   daily seasonal order and weekly Fourier exogenous regressors (Stage 7).
+- `bristol_ml.models.scipy_parametric.ScipyParametricModel` —
+  `scipy.optimize.curve_fit` fit of a hand-specified
+  `α + β_heat · HDD + β_cool · CDD + diurnal + weekly Fourier` form with
+  covariance-derived Gaussian 95 % CIs surfaced in
+  `ModelMetadata.hyperparameters` (Stage 8).
 
 ## Protocol semantics (load-bearing for every downstream stage)
 
@@ -99,11 +104,78 @@ state-space machinery — capture them here before you touch `sarimax.py`.
   SARIMAX is rejected at the research layer (Stage 7 research §R2:
   numerically unstable, slow to fit).
 
+## SciPy parametric specifics (Stage 8)
+
+`ScipyParametricModel` is the first `Model`-protocol implementer to carry
+covariance-derived confidence intervals as first-class provenance.  A few
+contract points are load-bearing for the Stage 8 demo moment and for any
+future estimator that wraps `scipy.optimize.curve_fit` — capture them here
+before you touch `scipy_parametric.py`.
+
+- **`_parametric_fn` must be module-level.**  `scipy.optimize.curve_fit`
+  does not pickle a local function, a lambda, or a bound method — any
+  inner definition would defeat `save_joblib` and break AC-2
+  (save/load round-trip).  `_parametric_fn`, `_derive_p0`, and
+  `_build_param_names` are therefore all module-level pure functions.
+  `test_parametric_fn_is_pickleable` is the regression guard
+  (Stage 8 plan surprise S2).
+- **`pcov`-inf WARNING, not silent vacuous CIs.**  When `curve_fit`
+  returns `pcov` with non-finite diagonal entries (under-determined fit
+  or redundant columns) `fit()` emits a structured loguru WARNING and
+  stores `float("inf")` in `metadata.hyperparameters["param_std_errors"]`
+  rather than letting `np.sqrt(np.diag(pcov))` silently produce `nan`.
+  This is NFR-4; `test_scipy_parametric_fit_logs_warning_on_singular_covariance`
+  is the regression guard (Stage 8 plan AC-6).
+- **`feature_columns` constrains *Fourier* columns, not raw inputs.**
+  Unlike `LinearConfig.feature_columns` / `SarimaxConfig.feature_columns`
+  (which name raw Stage 5 feature-table columns), the parametric model's
+  `feature_columns` field is a subset of the *generated*
+  `diurnal_sin_*` / `diurnal_cos_*` / `weekly_sin_*` / `weekly_cos_*`
+  columns — the temperature column is always implicit and required.
+  Raw column selection happens externally via
+  `harness.evaluate(..., feature_columns=...)` (the harness slices raw
+  columns before handing the frame to `fit`).  The train CLI's
+  `ScipyParametricConfig` branch logs an information-only line when
+  `feature_columns` is pre-set, a reminder of this inversion.
+  Plan D2 clarification captures the semantics.
+- **Fixed hinges, free slopes (plan D1).**  `T_heat = 15.5 °C` and
+  `T_cool = 22.0 °C` are configuration knobs, not fit parameters.  Only
+  `(α, β_heat, β_cool)` + the Fourier coefficients are free.  Fixing the
+  hinge temperatures removes the dominant identifiability foot-gun
+  (research §R5: base temperature drifting to the edge of support).
+  A notebook sensitivity sweep exhibits `T_heat ∈ {14, 15.5, 17}` as
+  pedagogy; the shipped config is the Elexon-convention fixed pair.
+- **Deterministic `p0` (plan D4).**  `p0` is derived from the training
+  data inside `fit()` — `α₀ = target.mean()`, `β_heat₀` from sub-10 °C
+  vs above-20 °C mean difference, `β_cool₀` from above-22 °C vs at-17 °C,
+  Fourier coefficients zero.  Satisfies NFR-3 (identical data →
+  identical `p0`) and avoids the pathological failure mode where a
+  rolling-origin fold with only-winter training data starts `β_cool` far
+  from any reasonable value.  `test_scipy_parametric_fit_same_data_same_params`
+  is the determinism guard (Stage 8 plan AC-9).
+- **Default `loss="linear"` keeps CIs Gaussian (plan D3/D5).**
+  `curve_fit`'s `soft_l1` / `huber` / `cauchy` loss functions are
+  available as CLI overrides but produce a `pcov` whose interpretation is
+  heuristic, not a rigorously Gaussian CI.  The shipped default is
+  `loss="linear"` so the notebook's "±Y MW per degree" claim is valid.
+  The notebook's Cell 12 appendix spells out the three Gaussian
+  assumptions (homoscedasticity — violated by peak-hour heteroscedasticity
+  in GB demand; near-linearity around the optimum — weak at hinge
+  transitions; no parameter at a bound).  Stage 10 owns bootstrap /
+  quantile-based alternatives.
+- **UTC-tz guard matches SARIMAX (plan D8).**
+  `_require_utc_datetimeindex(features, method=...)` is a private static
+  method on `ScipyParametricModel` — copied from SARIMAX rather than
+  unified across model classes in this stage.  A cross-model
+  consolidation of the guard is a separate refactor
+  (owner: models-layer housekeeping stage, not Stage 8).
+
 ## Running standalone
 
-    python -m bristol_ml.models.naive   --help
-    python -m bristol_ml.models.linear  --help
-    python -m bristol_ml.models.sarimax --help
+    python -m bristol_ml.models.naive           --help
+    python -m bristol_ml.models.linear          --help
+    python -m bristol_ml.models.sarimax         --help
+    python -m bristol_ml.models.scipy_parametric --help
 
 The `io.py` and `protocol.py` submodules are not standalone — they are
 consumed by the concrete models. This is intentional: the layer's public
@@ -118,6 +190,11 @@ CLIs are the models, not the plumbing.
 - Stage 7 plan — `docs/plans/completed/07-sarimax.md` §5 (SARIMAX config
   schema + call path) and §6 Tasks T3–T5 (scaffold, fit/predict,
   save/load + notebook); retro at `docs/lld/stages/07-sarimax.md`.
+- Stage 8 plan — `docs/plans/completed/08-scipy-parametric.md` §1 D1–D13
+  (functional form, harmonic counts, loss, `p0` strategy, CI derivation,
+  covariance save format, UTC guard, dispatcher dual-site repeat) and
+  §6 Tasks T2–T5 (module-level helpers, scaffold, fit/predict, save/load
+  + notebook); retro at `docs/lld/stages/08-scipy-parametric.md`.
 - Protocol rationale — `docs/architecture/decisions/0003-protocol-for-model-interface.md`
   (ADR filed in Task T10).
 - Intent — `docs/intent/04-linear-baseline.md` AC-2 (interface must be
