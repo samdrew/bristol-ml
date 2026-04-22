@@ -1,7 +1,7 @@
 """Build notebooks/08_scipy_parametric.ipynb programmatically.
 
 Stage 8 Task T5 notebook deliverable — follows the 13-cell recipe in
-``docs/plans/active/08-scipy-parametric.md`` §6 T5.
+``docs/plans/completed/08-scipy-parametric.md`` §6 T5.
 
 Generating the notebook from a Python script keeps cell source under
 version control as readable text and avoids the format-diff noise that
@@ -95,7 +95,7 @@ the fitted covariance matrix.  Cell 7's "value ± 1.96 · std" table is
 the punch line; Cell 12's assumptions appendix is the honesty clause.
 
 - **Intent:** `docs/intent/08-scipy-parametric.md`.
-- **Plan:** `docs/plans/active/08-scipy-parametric.md`.
+- **Plan:** `docs/plans/completed/08-scipy-parametric.md`.
 - **Previous stage:** Stage 7 SARIMAX — the flexible-but-opaque
   dynamic-harmonic-regression baseline against which this stage's
   parameter interpretability trade-off is framed.
