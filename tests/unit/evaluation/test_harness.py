@@ -826,3 +826,72 @@ def test_harness_cli_runs_with_model_sarimax(
         f"harness _cli_main must exit 0 with model=sarimax on a warm feature cache; "
         f"got exit_code={exit_code} (Stage 7 T6 AC-6)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 T6 — ScipyParametric dispatcher wiring (harness)
+# Plan: docs/plans/active/08-scipy-parametric.md §6 Task T6
+# ---------------------------------------------------------------------------
+
+
+def test_harness_build_model_dispatches_scipy_parametric_config() -> None:
+    """Stage 8 T6 (AC-7): dispatcher returns a ``ScipyParametricModel``.
+
+    Specifically: ``_build_model_from_config(ScipyParametricConfig(...))``
+    must return a ``ScipyParametricModel`` instance.
+
+    Directly instantiates a default ``ScipyParametricConfig()`` and passes it
+    to the module-private dispatcher.  Asserts the returned object is an
+    instance of ``ScipyParametricModel`` — not merely truthy — so that a
+    wrong-type return (e.g. ``LinearModel`` or ``None``) will fail.
+
+    Plan clause: docs/plans/active/08-scipy-parametric.md §6 Task T6 —
+    ``test_harness_build_model_dispatches_scipy_parametric_config``.
+    """
+    from bristol_ml.models.scipy_parametric import ScipyParametricModel
+    from conf._schemas import ScipyParametricConfig
+
+    cfg = ScipyParametricConfig()
+    result = _build_model_from_config(cfg)
+
+    assert isinstance(result, ScipyParametricModel), (
+        f"_build_model_from_config(ScipyParametricConfig()) must return a ScipyParametricModel; "
+        f"got {type(result)!r} (Stage 8 T6 AC-7)."
+    )
+
+
+def test_harness_cli_runs_with_model_scipy_parametric(
+    warm_feature_cache_for_harness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage 8 T6 (AC-7, AC-11): harness CLI exits 0 when ``model=scipy_parametric`` is selected.
+
+    Integration smoke.  Uses a warm 90-day synthetic feature cache and
+    deliberately small Fourier-harmonic counts (``diurnal_harmonics=1``,
+    ``weekly_harmonics=1``) to keep the ``curve_fit`` call fast on the
+    synthetic data.  The tight rolling-origin overrides (``min_train_periods=720``,
+    ``test_len=24``, ``step=720``, ``fixed_window=true``) give a single test fold
+    that completes within a few seconds.
+
+    A zero exit code confirms that the harness ``_build_model_from_config``
+    branch for ``ScipyParametricConfig`` is wired correctly end-to-end.
+
+    Plan clause: docs/plans/active/08-scipy-parametric.md §6 Task T6 —
+    ``test_harness_cli_runs_with_model_scipy_parametric``.
+    """
+    exit_code = _cli_main(
+        [
+            "model=scipy_parametric",
+            "model.diurnal_harmonics=1",
+            "model.weekly_harmonics=1",
+            "evaluation.rolling_origin.min_train_periods=720",
+            "evaluation.rolling_origin.test_len=24",
+            "evaluation.rolling_origin.step=720",
+            "evaluation.rolling_origin.fixed_window=true",
+        ]
+    )
+
+    assert exit_code == 0, (
+        f"harness _cli_main must exit 0 with model=scipy_parametric on a warm feature cache; "
+        f"got exit_code={exit_code} (Stage 8 T6 AC-7)."
+    )
