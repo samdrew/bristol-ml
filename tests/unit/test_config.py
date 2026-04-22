@@ -43,6 +43,7 @@ from conf._schemas import (
     ProjectConfig,
     SarimaxConfig,
     SarimaxKwargs,
+    ScipyParametricConfig,
     SplitterConfig,
 )
 
@@ -1398,3 +1399,131 @@ def test_config_loads_splitter_sarimax_overrides() -> None:
         f"Project default: min_train_periods must remain 8760 (one year of hourly data); "
         f"got {splitter.min_train_periods!r}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 T1 — ScipyParametricConfig schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_config_defaults_match_yaml() -> None:
+    """Guards plan §1 D1+D2+D3: ``ScipyParametricConfig()`` defaults match the YAML group file.
+
+    The YAML group file ``conf/model/scipy_parametric.yaml`` and the Pydantic
+    ``ScipyParametricConfig`` model must have the same defaults; a drift between
+    them is a silent correctness hazard (the YAML wins at Hydra-load time, the
+    Pydantic defaults win when the class is constructed directly).
+
+    Checked defaults:
+
+    - ``type == 'scipy_parametric'`` (discriminator tag).
+    - ``target_column == 'nd_mw'``.
+    - ``feature_columns is None`` — the parametric design-matrix rule narrows
+      this further at fit time (D2 clarification) but the config field default
+      stays permissive.
+    - ``temperature_column == 'temperature_2m'``.
+    - ``diurnal_harmonics == 3`` (D2).
+    - ``weekly_harmonics == 2`` (D2).
+    - ``t_heat_celsius == 15.5`` (D1 Elexon convention).
+    - ``t_cool_celsius == 22.0`` (D1 Elexon convention).
+    - ``loss == 'linear'`` (D3 — keeps Gaussian-pcov CI rigorous).
+    - ``max_iter == 5000`` (D6).
+    - ``p0 is None`` (D4 — triggers data-driven derivation inside fit()).
+
+    Cited criterion: plan §6 T1, ``test_scipy_parametric_config_defaults_match_yaml``.
+    """
+    cfg = ScipyParametricConfig()
+
+    assert cfg.type == "scipy_parametric", (
+        f"D10: type default must be 'scipy_parametric'; got {cfg.type!r}."
+    )
+    assert cfg.target_column == "nd_mw", (
+        f"target_column default must be 'nd_mw'; got {cfg.target_column!r}."
+    )
+    assert cfg.feature_columns is None, (
+        f"feature_columns default must be None; got {cfg.feature_columns!r}."
+    )
+    assert cfg.temperature_column == "temperature_2m", (
+        f"temperature_column default must be 'temperature_2m'; got {cfg.temperature_column!r}."
+    )
+    assert cfg.diurnal_harmonics == 3, (
+        f"D2: diurnal_harmonics default must be 3; got {cfg.diurnal_harmonics!r}."
+    )
+    assert cfg.weekly_harmonics == 2, (
+        f"D2: weekly_harmonics default must be 2; got {cfg.weekly_harmonics!r}."
+    )
+    assert cfg.t_heat_celsius == 15.5, (
+        f"D1: t_heat_celsius default must be 15.5 (Elexon); got {cfg.t_heat_celsius!r}."
+    )
+    assert cfg.t_cool_celsius == 22.0, (
+        f"D1: t_cool_celsius default must be 22.0 (Elexon); got {cfg.t_cool_celsius!r}."
+    )
+    assert cfg.loss == "linear", f"D3: loss default must be 'linear'; got {cfg.loss!r}."
+    assert cfg.max_iter == 5000, f"D6: max_iter default must be 5000; got {cfg.max_iter!r}."
+    assert cfg.p0 is None, f"D4: p0 default must be None; got {cfg.p0!r}."
+
+
+def test_scipy_parametric_config_rejects_extra_fields() -> None:
+    """Guards ``ConfigDict(extra='forbid')`` on ``ScipyParametricConfig`` (plan §6 T1)."""
+    with pytest.raises(ValidationError):
+        ScipyParametricConfig(spoof_field="bad")  # type: ignore[call-arg]
+
+
+def test_scipy_parametric_config_rejects_invalid_loss() -> None:
+    """Guards D3: unknown ``loss`` string must be rejected by the ``Literal[...]`` field.
+
+    The four accepted values are ``linear`` / ``soft_l1`` / ``huber`` /
+    ``cauchy``; anything else is a typo or a future addition that must first
+    reach the Pydantic schema before the YAML ships.
+    """
+    with pytest.raises(ValidationError):
+        ScipyParametricConfig(loss="nonsense")  # type: ignore[arg-type]
+
+
+def test_scipy_parametric_config_rejects_negative_harmonics() -> None:
+    """Guards ``Field(ge=0)`` on both harmonic counts.
+
+    Negative harmonic counts are physically meaningless; ``harmonics=0`` is the
+    documented no-op (ablation) path.
+    """
+    with pytest.raises(ValidationError):
+        ScipyParametricConfig(diurnal_harmonics=-1)
+    with pytest.raises(ValidationError):
+        ScipyParametricConfig(weekly_harmonics=-1)
+
+
+def test_model_config_discriminator_parses_scipy_parametric() -> None:
+    """Guards plan §1 D10: discriminated union dispatches ``type='scipy_parametric'`` correctly."""
+    app = AppConfig.model_validate(
+        {
+            "project": {"name": "bristol_ml", "seed": 0},
+            "model": {"type": "scipy_parametric"},
+        }
+    )
+
+    assert type(app.model).__name__ == "ScipyParametricConfig", (
+        f"D10: type='scipy_parametric' payload must resolve to ScipyParametricConfig; "
+        f"got {type(app.model).__name__!r}."
+    )
+    assert isinstance(app.model, ScipyParametricConfig)
+    assert app.model.type == "scipy_parametric"
+
+
+def test_config_loads_model_scipy_parametric_via_hydra() -> None:
+    """Guards AC-7 / D10: ``load_config(overrides=['model=scipy_parametric'])`` resolves.
+
+    Verifies that the ``conf/model/scipy_parametric.yaml`` Hydra group file is
+    correctly wired and populates ``cfg.model`` with D1 through D6 defaults.
+    """
+    cfg = load_config(overrides=["model=scipy_parametric"])
+
+    assert cfg.model is not None
+    assert isinstance(cfg.model, ScipyParametricConfig), (
+        f"expected ScipyParametricConfig; got {type(cfg.model).__name__!r}."
+    )
+    assert cfg.model.type == "scipy_parametric"
+    assert cfg.model.diurnal_harmonics == 3
+    assert cfg.model.weekly_harmonics == 2
+    assert cfg.model.t_heat_celsius == 15.5
+    assert cfg.model.t_cool_celsius == 22.0
+    assert cfg.model.loss == "linear"

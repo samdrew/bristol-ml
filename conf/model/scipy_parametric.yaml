@@ -1,0 +1,36 @@
+# @package model
+#
+# SciPy parametric load model (Stage 8).  Select at the CLI with
+#   python -m bristol_ml.train model=scipy_parametric
+#
+# Plan §1 D1: piecewise-linear double-hinge temperature response with fixed
+# heating / cooling base temperatures (Elexon convention).  Two free slope
+# coefficients ``beta_heat`` and ``beta_cool`` plus a base-load intercept
+# ``alpha``.  ``T_heat`` and ``T_cool`` are NOT optimised by curve_fit; adjust
+# only for sensitivity sweeps.
+#
+# Plan §1 D2: on top of the temperature response, diurnal and weekly Fourier
+# harmonics (default K=3 diurnal, K=2 weekly).  The design matrix is
+# deliberately narrow: only the temperature column + generated Fourier
+# columns.  Stage 5 calendar one-hots (dow_*, is_*) are excluded to avoid
+# partial collinearity with the weekly Fourier terms (D2 clarification).
+#
+# Plan §1 D3: ``loss: linear`` keeps curve_fit's Gaussian ``pcov`` → CI
+# mapping rigorous; switch to ``soft_l1`` / ``huber`` / ``cauchy`` only for
+# outlier-robustness exploration — the CIs then become heuristic (see the
+# notebook's "Assumptions behind these confidence intervals" appendix).
+#
+# Plan §1 D4: ``p0: null`` triggers deterministic data-driven initialisation
+# inside ``fit()``.  Passing an explicit tuple pins the starting point.
+
+type: scipy_parametric
+target_column: nd_mw
+feature_columns: null
+temperature_column: temperature_2m
+diurnal_harmonics: 3
+weekly_harmonics: 2
+t_heat_celsius: 15.5
+t_cool_celsius: 22.0
+loss: linear
+max_iter: 5000
+p0: null
