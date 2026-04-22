@@ -1,4 +1,4 @@
-"""Spec-derived tests for ``bristol_ml.models.scipy_parametric`` — Tasks T2 and T3.
+"""Spec-derived tests for ``bristol_ml.models.scipy_parametric`` — Tasks T2, T3, and T4.
 
 Every test is derived from:
 
@@ -6,6 +6,8 @@ Every test is derived from:
   helper tests.
 - ``docs/plans/active/08-scipy-parametric.md`` §Task T3 (lines 284-289): scaffold,
   metadata, and CLI tests.
+- ``docs/plans/active/08-scipy-parametric.md`` §Task T4 (lines 311-322): fit/predict
+  tests, acceptance criteria AC-4, AC-6, AC-8, AC-9.
 - Acceptance criteria AC-8 (``_require_utc_datetimeindex``) and AC-10 (CLI entrypoint),
   referenced in the plan §4.
 
@@ -28,6 +30,7 @@ import pickle
 import re
 import subprocess
 import sys
+from datetime import UTC
 
 import numpy as np
 import pandas as pd
@@ -371,3 +374,536 @@ def test_scipy_parametric_require_utc_raises_on_tz_naive_index() -> None:
         f"ValueError message must contain 'UTC'; got {str(exc_info.value)!r}. "
         "Plan T3 / AC-8 / plan D8."
     )
+
+
+# ===========================================================================
+# Task T4 — ScipyParametricModel.fit and .predict
+# (plan §Task T4, lines 311-322)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Shared synthetic-data helper for T4 tests
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_parametric_frame(
+    n_rows: int,
+    *,
+    rng: np.random.Generator | None = None,
+    temp_low: float = 5.0,
+    temp_high: float = 20.0,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Return ``(features_df, target_series)`` with a ``temperature_2m`` column.
+
+    - DatetimeIndex: tz-aware UTC, hourly, starting 2024-01-01.
+    - One ``float64`` column: ``temperature_2m`` drawn uniformly over
+      [temp_low, temp_high].
+    - Target: flat demand ~10 000 MW with light Gaussian noise (sigma=200 MW).
+    - Reproducible via ``numpy.random.default_rng(0)`` when ``rng=None``.
+
+    Used throughout T4 unless the test needs a specific temperature range or
+    known true parameters.
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+    temperature = rng.uniform(temp_low, temp_high, n_rows)
+    target_vals = 10_000.0 + rng.normal(0.0, 200.0, n_rows)
+    features_df = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target_series = pd.Series(target_vals, index=index, name="nd_mw")
+    return features_df, target_series
+
+
+# Default config for fast T4 tests (13 parameters — the shipped default).
+_DEFAULT_CONFIG = ScipyParametricConfig()
+
+# ---------------------------------------------------------------------------
+# 1. test_scipy_parametric_fit_populates_state
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_populates_state() -> None:
+    """After ``fit()``, state shapes and fit_utc are correct.
+
+    Checks three post-fit invariants:
+
+    1. ``_popt.shape == (n_params,)`` where
+       ``n_params == 3 + 2*diurnal_harmonics + 2*weekly_harmonics == 13``
+       for the default config (diurnal=3, weekly=2).
+    2. ``_pcov.shape == (n_params, n_params)`` — square covariance matrix.
+    3. ``_fit_utc`` is a tz-aware UTC ``datetime``.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_populates_state``.
+    """
+    features, target = _synthetic_parametric_frame(200)
+    config = _DEFAULT_CONFIG
+    model = ScipyParametricModel(config)
+    model.fit(features, target)
+
+    expected_n_params = 3 + 2 * config.diurnal_harmonics + 2 * config.weekly_harmonics
+    assert expected_n_params == 13, (
+        f"Precondition: default config must yield 13 parameters; got {expected_n_params}."
+    )
+
+    assert model._popt is not None, "_popt must be populated after fit() (T4 plan)."
+    assert model._popt.shape == (expected_n_params,), (
+        f"_popt.shape must be ({expected_n_params},) after fit(); "
+        f"got {model._popt.shape!r}. Plan T4 / ``test_scipy_parametric_fit_populates_state``."
+    )
+
+    assert model._pcov is not None, "_pcov must be populated after fit() (T4 plan)."
+    assert model._pcov.shape == (expected_n_params, expected_n_params), (
+        f"_pcov.shape must be ({expected_n_params}, {expected_n_params}) after fit(); "
+        f"got {model._pcov.shape!r}. Plan T4 / ``test_scipy_parametric_fit_populates_state``."
+    )
+
+    assert model._fit_utc is not None, "_fit_utc must be set after fit() (T4 plan)."
+
+    assert model._fit_utc.tzinfo is not None, (
+        "_fit_utc must be tz-aware after fit(). "
+        "Plan T4 / ``test_scipy_parametric_fit_populates_state``."
+    )
+    assert model._fit_utc.tzinfo == UTC or str(model._fit_utc.tzinfo) == "UTC", (
+        f"_fit_utc must be UTC; got tzinfo={model._fit_utc.tzinfo!r}. "
+        "Plan T4 / ``test_scipy_parametric_fit_populates_state``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. test_scipy_parametric_fit_is_reentrant_and_discards_prior_state
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_is_reentrant_and_discards_prior_state() -> None:
+    """Two fits on different data produce different ``popt``.
+
+    Confirms that the second call to ``fit()`` discards prior state entirely
+    (plan NFR-5) — re-entrancy is not just a "no exception raised" property
+    but a "prior popt is gone" property.  Two synthetic frames drawn from
+    different temperature distributions are used so the fitted temperature
+    coefficients are structurally different.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_is_reentrant_and_discards_prior_state``
+    / plan NFR-5.
+    """
+    rng = np.random.default_rng(7)
+
+    # First fit: cold-only temperatures → large heating response expected.
+    features1 = pd.DataFrame(
+        {"temperature_2m": rng.uniform(-5.0, 5.0, 200)},
+        index=pd.date_range("2024-01-01", periods=200, freq="h", tz="UTC"),
+    )
+    target1 = pd.Series(
+        15_000.0 + rng.normal(0, 200, 200),
+        index=features1.index,
+        name="nd_mw",
+    )
+
+    # Second fit: warm temperatures → different demand profile.
+    features2 = pd.DataFrame(
+        {"temperature_2m": rng.uniform(18.0, 30.0, 200)},
+        index=pd.date_range("2024-07-01", periods=200, freq="h", tz="UTC"),
+    )
+    target2 = pd.Series(
+        8_000.0 + rng.normal(0, 200, 200),
+        index=features2.index,
+        name="nd_mw",
+    )
+
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+    model.fit(features1, target1)
+    popt_first = model._popt.copy()  # type: ignore[union-attr]
+
+    model.fit(features2, target2)
+    popt_second = model._popt
+
+    assert not np.array_equal(popt_first, popt_second), (
+        "Two fits on structurally different data must produce different popt; "
+        "got identical popt — re-entrancy discards prior state but the optimiser "
+        "must also reflect the new data. "
+        "Plan T4 / ``test_scipy_parametric_fit_is_reentrant_and_discards_prior_state``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. test_scipy_parametric_fit_same_data_same_params  (AC-9)
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_same_data_same_params() -> None:
+    """Two fits on identical data produce bit-equal ``popt`` AND bit-equal ``pcov``.
+
+    Guards plan AC-9 / plan D4: the initial-parameter derivation is deterministic
+    (same data → same ``p0`` → same optimiser trajectory → same result).
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_same_data_same_params`` / AC-9 / plan D4.
+    """
+    features, target = _synthetic_parametric_frame(200)
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+
+    model.fit(features, target)
+    popt_a = model._popt.copy()  # type: ignore[union-attr]
+    pcov_a = model._pcov.copy()  # type: ignore[union-attr]
+
+    # Second fit on exactly the same data.
+    model.fit(features, target)
+    popt_b = model._popt
+    pcov_b = model._pcov
+
+    np.testing.assert_array_equal(
+        popt_a,
+        popt_b,
+        err_msg=(
+            "Two fits on identical data must produce bit-equal popt; "
+            "got different values — _derive_p0 must be deterministic. "
+            "Plan T4 / AC-9 / plan D4 / "
+            "``test_scipy_parametric_fit_same_data_same_params``."
+        ),
+    )
+    np.testing.assert_array_equal(
+        pcov_a,
+        pcov_b,
+        err_msg=(
+            "Two fits on identical data must produce bit-equal pcov; "
+            "got different values. "
+            "Plan T4 / AC-9 / ``test_scipy_parametric_fit_same_data_same_params``."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. test_scipy_parametric_predict_returns_series_with_target_column_name
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_predict_returns_series_with_target_column_name() -> None:
+    """Predicted Series ``.name`` equals ``config.target_column``.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_predict_returns_series_with_target_column_name``.
+    """
+    features, target = _synthetic_parametric_frame(200)
+    config = _DEFAULT_CONFIG  # target_column defaults to "nd_mw"
+    model = ScipyParametricModel(config)
+    model.fit(features, target)
+
+    pred = model.predict(features)
+    assert pred.name == config.target_column, (
+        f"pred.name must equal config.target_column ({config.target_column!r}); "
+        f"got {pred.name!r}. "
+        "Plan T4 / ``test_scipy_parametric_predict_returns_series_with_target_column_name``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. test_scipy_parametric_predict_before_fit_raises_runtime_error
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_predict_before_fit_raises_runtime_error() -> None:
+    """``predict()`` on an unfitted model raises ``RuntimeError`` with "fit" in message.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_predict_before_fit_raises_runtime_error``
+    / models CLAUDE.md "Predict-before-fit" guard.
+    """
+    features, _ = _synthetic_parametric_frame(48)
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        model.predict(features)
+
+    assert "fit" in str(exc_info.value).lower(), (
+        f"RuntimeError message must mention 'fit'; got {str(exc_info.value)!r}. "
+        "Plan T4 / ``test_scipy_parametric_predict_before_fit_raises_runtime_error``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. test_scipy_parametric_predict_length_matches_features
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_predict_length_matches_features() -> None:
+    """``len(pred) == len(features)`` passed to predict.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_predict_length_matches_features``.
+    """
+    features, target = _synthetic_parametric_frame(300)
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+    model.fit(features, target)
+
+    test_window = features.iloc[-36:]
+    pred = model.predict(test_window)
+
+    assert len(pred) == len(test_window), (
+        f"len(pred) must equal len(features) passed to predict; "
+        f"expected {len(test_window)}, got {len(pred)}. "
+        "Plan T4 / ``test_scipy_parametric_predict_length_matches_features``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. test_scipy_parametric_fit_raises_on_tz_naive_index  (AC-8)
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_raises_on_tz_naive_index() -> None:
+    """``fit()`` raises ``ValueError`` with "UTC" when features has a tz-naive index.
+
+    Guards AC-8 / plan D8.  Calling ``fit()`` directly (not just
+    ``_require_utc_datetimeindex``) to confirm the guard fires on the public
+    method path.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_raises_on_tz_naive_index`` / AC-8 / plan D8.
+    """
+    n = 100
+    naive_index = pd.date_range("2024-01-01", periods=n, freq="h")  # tz-naive
+    features = pd.DataFrame(
+        {"temperature_2m": np.linspace(5.0, 20.0, n)},
+        index=naive_index,
+    )
+    target = pd.Series(np.full(n, 10_000.0), index=naive_index, name="nd_mw")
+
+    assert features.index.tz is None, "Precondition: index must be tz-naive."
+
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+    with pytest.raises(ValueError) as exc_info:
+        model.fit(features, target)
+
+    assert "UTC" in str(exc_info.value), (
+        f"ValueError message must contain 'UTC'; got {str(exc_info.value)!r}. "
+        "Plan T4 / AC-8 / ``test_scipy_parametric_fit_raises_on_tz_naive_index``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. test_scipy_parametric_fit_logs_warning_on_singular_covariance  (AC-6)
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_logs_warning_on_singular_covariance() -> None:
+    """A pathologically near-singular fit triggers a loguru WARNING.
+
+    Strategy: use ``diurnal_harmonics=10, weekly_harmonics=10`` (43 parameters)
+    on 50 rows with a **vanishingly narrow temperature range** (10.00-10.01 °C).
+    The Fourier columns span the full 24/168-hour basis but the temperature
+    contribution is effectively degenerate, making the Jacobian rank-deficient.
+    ``curve_fit`` emits an ``OptimizeWarning`` ("Covariance of the parameters
+    could not be estimated") and returns a ``pcov`` full of ``inf``.  The
+    implementation captures this warning and re-emits it at loguru WARNING
+    level (plan NFR-4 / AC-6).
+
+    Note: using ``n < n_params`` causes ``scipy`` to raise a ``TypeError``
+    before reaching the curve-fit internals, bypassing the ``OptimizeWarning``
+    path entirely.  Using ``n >= n_params`` (here n=50, params=43) with
+    near-singular data reliably exercises the ``OptimizeWarning`` path.
+
+    Loguru-sink pattern from the plan §T4 (AC-6 note):
+
+    .. code-block:: python
+
+        captured = []
+        sink_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+        try:
+            ...
+        finally:
+            logger.remove(sink_id)
+        assert any("pcov" in str(m) or "non-finite" in str(m) for m in captured)
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_logs_warning_on_singular_covariance`` / AC-6 / NFR-4.
+    """
+    from loguru import logger
+
+    # 50 rows, 43 parameters — n > n_params avoids the scipy TypeError guard,
+    # but the near-zero temperature variance makes the fit near-singular.
+    n = 50
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    rng = np.random.default_rng(42)
+    features = pd.DataFrame(
+        # Vanishingly narrow temperature range → degenerate HDD/CDD columns.
+        {"temperature_2m": rng.uniform(10.0, 10.01, n)},
+        index=index,
+    )
+    target = pd.Series(10_000.0 + rng.normal(0, 1.0, n), index=index, name="nd_mw")
+
+    # 43 parameters (3 + 2*10 + 2*10) on 50 rows with near-zero temperature spread
+    # → rank-deficient Jacobian → OptimizeWarning → pcov full of inf.
+    under_config = ScipyParametricConfig(diurnal_harmonics=10, weekly_harmonics=10)
+    model = ScipyParametricModel(under_config)
+
+    captured: list[object] = []
+    sink_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+    try:
+        # The fit should succeed (n > n_params) but produce a degenerate pcov.
+        # Any unexpected exception is propagated so the assertion below clarifies
+        # the failure mode.
+        model.fit(features, target)
+    finally:
+        logger.remove(sink_id)
+
+    assert len(captured) > 0, (
+        "No loguru WARNING was emitted for a near-singular fit "
+        "(43 params, 50 rows, near-zero temperature variance). "
+        "The implementation must capture OptimizeWarning and re-emit at "
+        "loguru WARNING level (plan NFR-4 / AC-6 / "
+        "``test_scipy_parametric_fit_logs_warning_on_singular_covariance``)."
+    )
+    assert any(
+        "pcov" in str(m) or "non-finite" in str(m) or "identifiability" in str(m) for m in captured
+    ), (
+        f"loguru WARNING must mention 'pcov', 'non-finite', or 'identifiability'; "
+        f"captured: {[str(m)[:120] for m in captured]!r}. "
+        "Plan T4 / AC-6 / NFR-4 / "
+        "``test_scipy_parametric_fit_logs_warning_on_singular_covariance``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. test_scipy_parametric_fit_recovers_known_parameters_within_tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_recovers_known_parameters_within_tolerance() -> None:
+    """Fit recovers known alpha/beta_heat/beta_cool within stated tolerances.
+
+    Synthesises demand from known true parameters on a wide temperature range
+    (``np.linspace(-5, 30, 24*60)`` hourly across ~2 months) with light noise
+    (sigma=100 MW), fits with default config, and asserts:
+
+    - ``abs(popt[0] - 25000) / 25000 < 0.05`` — alpha within 5 %.
+    - ``abs(popt[1] - 120) / 120 < 0.10`` — beta_heat within 10 %.
+    - ``abs(popt[2] - 40) / 40 < 0.20`` — beta_cool within 20 %
+      (cooling signal is weaker / noisier).
+
+    True parameters: ``alpha=25000, beta_heat=120, beta_cool=40``.
+    Hinge temperatures: ``T_heat=15.5, T_cool=22.0`` (default config).
+    Fourier contributions: non-zero (generated from the UTC timestamps), but
+    the true Fourier coefficients are all zero so the fit can still converge
+    to the correct temperature response.  The wide temperature range (-5 °C to
+    30 °C) ensures both heating and cooling segments are well observed.
+
+    Plan clause: T4 plan §Task T4 named test
+    ``test_scipy_parametric_fit_recovers_known_parameters_within_tolerance``.
+    """
+    rng = np.random.default_rng(42)
+
+    n_rows = 24 * 60  # ~2 months of hourly data
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+
+    # Wide temperature range covering both heating and cooling segments.
+    temperature = np.linspace(-5.0, 30.0, n_rows)
+
+    # True parameters.
+    alpha_true = 25_000.0
+    beta_heat_true = 120.0
+    beta_cool_true = 40.0
+    t_heat = 15.5
+    t_cool = 22.0
+
+    hdd = np.maximum(0.0, t_heat - temperature)
+    cdd = np.maximum(0.0, temperature - t_cool)
+    # Fourier true coefficients are all zero — demand is purely temperature-driven.
+    demand_true = alpha_true + beta_heat_true * hdd + beta_cool_true * cdd
+    noise = rng.normal(0.0, 100.0, n_rows)
+    demand_obs = demand_true + noise
+
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand_obs, index=index, name="nd_mw")
+
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+    model.fit(features, target)
+
+    assert model._popt is not None, "_popt must be populated after fit()."
+    popt = model._popt
+
+    alpha_rel_err = abs(popt[0] - alpha_true) / alpha_true
+    beta_heat_rel_err = abs(popt[1] - beta_heat_true) / beta_heat_true
+    beta_cool_rel_err = abs(popt[2] - beta_cool_true) / beta_cool_true
+
+    assert alpha_rel_err < 0.05, (
+        f"alpha recovery failed: got popt[0]={popt[0]:.1f}, "
+        f"true={alpha_true}, relative error={alpha_rel_err:.4f} (tolerance 0.05). "
+        "Plan T4 / ``test_scipy_parametric_fit_recovers_known_parameters_within_tolerance``."
+    )
+    assert beta_heat_rel_err < 0.10, (
+        f"beta_heat recovery failed: got popt[1]={popt[1]:.1f}, "
+        f"true={beta_heat_true}, relative error={beta_heat_rel_err:.4f} (tolerance 0.10). "
+        "Plan T4 / ``test_scipy_parametric_fit_recovers_known_parameters_within_tolerance``."
+    )
+    assert beta_cool_rel_err < 0.20, (
+        f"beta_cool recovery failed: got popt[2]={popt[2]:.1f}, "
+        f"true={beta_cool_true}, relative error={beta_cool_rel_err:.4f} (tolerance 0.20). "
+        "Plan T4 / ``test_scipy_parametric_fit_recovers_known_parameters_within_tolerance``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. test_scipy_parametric_fit_single_fold_completes_under_10_seconds
+#     (@pytest.mark.slow, AC-4 + NFR-1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
+    """A single-fold fit on an 8760-row synthetic frame completes in ≤ 10 s.
+
+    Benchmark guard for plan D13 / AC-4 / NFR-1: ``curve_fit`` on 8760 rows
+    with 13 parameters (default config: diurnal=3, weekly=2) must complete
+    within 10 seconds on CI-class hardware.  The budget is an order of
+    magnitude above the expected fit time — if this test fails something
+    pathological is happening (e.g. the optimiser diverged and is running
+    5000 full iterations).
+
+    Marked ``@pytest.mark.slow`` and excluded from the default
+    ``uv run pytest`` run via ``addopts = "... -m 'not slow'"`` in
+    ``pyproject.toml``.  Run explicitly with ``uv run pytest -m slow``.
+
+    If this test fails, do not weaken the threshold — investigate the
+    convergence behaviour (D4 data-driven p0, D6 method="lm", maxfev=5000).
+
+    Plan clause: T4 plan §Task T4 / plan D13 / AC-4 / NFR-1.
+    """
+    import time
+
+    rng = np.random.default_rng(42)
+    n_rows = 8760  # one year of hourly data
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+
+    # Wide temperature range to exercise both heating and cooling segments.
+    temperature = 10.0 + 8.0 * np.sin(2.0 * np.pi * np.arange(n_rows) / (24.0 * 365.0))
+    temperature += rng.normal(0.0, 3.0, n_rows)
+
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+
+    # Target: temperature-response + Fourier + noise, scaled to ~10 000 MW.
+    hdd = np.maximum(0.0, 15.5 - temperature)
+    cdd = np.maximum(0.0, temperature - 22.0)
+    t = np.arange(n_rows, dtype=np.float64)
+    daily = 500.0 * np.sin(2.0 * np.pi * t / 24.0)
+    weekly = 300.0 * np.sin(2.0 * np.pi * t / 168.0)
+    demand = 10_000.0 + 80.0 * hdd + 30.0 * cdd + daily + weekly
+    demand += rng.normal(0.0, 200.0, n_rows)
+    target = pd.Series(demand, index=index, name="nd_mw")
+
+    model = ScipyParametricModel(_DEFAULT_CONFIG)
+
+    start = time.perf_counter()
+    model.fit(features, target)
+    elapsed_s = time.perf_counter() - start
+
+    assert elapsed_s <= 10.0, (
+        f"Single-fold ScipyParametricModel fit on {n_rows} rows took {elapsed_s:.2f} s "
+        f"(> 10 s budget). D13 / AC-4 / NFR-1 cost assumptions no longer hold. "
+        "Do not weaken the threshold — investigate convergence behaviour "
+        "(D4 data-driven p0, D6 method='lm', maxfev=5000). "
+        "Plan T4 / ``test_scipy_parametric_fit_single_fold_completes_under_10_seconds``."
+    )
+    # Sanity: the fit actually produced a result.
+    assert model._popt is not None, "_popt must be populated after fit()."
