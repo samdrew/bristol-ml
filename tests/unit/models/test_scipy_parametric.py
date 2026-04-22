@@ -907,3 +907,223 @@ def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
     )
     # Sanity: the fit actually produced a result.
     assert model._popt is not None, "_popt must be populated after fit()."
+
+
+# ===========================================================================
+# Task T5 — ScipyParametricModel.save and .load
+# (plan §Task T5, lines 349-354)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. test_scipy_parametric_save_unfitted_raises_runtime_error
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_save_unfitted_raises_runtime_error(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """``save()`` on an unfitted model raises ``RuntimeError`` with "unfitted" in message.
+
+    Constructs a default :class:`ScipyParametricModel` without calling
+    ``fit()`` and asserts that :meth:`save` raises ``RuntimeError`` whose
+    message contains "unfitted".
+
+    Matches the Stage 7 SARIMAX precedent
+    (``test_sarimax_save_unfitted_raises_runtime_error``).
+
+    Plan clause: T5 plan §Task T5 named test
+    ``test_scipy_parametric_save_unfitted_raises_runtime_error``.
+    """
+    model = ScipyParametricModel(ScipyParametricConfig())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        model.save(tmp_path / "x.joblib")
+
+    msg = str(exc_info.value)
+    assert "unfitted" in msg.lower() or "fit" in msg.lower(), (
+        f"RuntimeError message must mention 'unfitted' or 'fit'; "
+        f"got {msg!r}. "
+        "Plan T5 / ``test_scipy_parametric_save_unfitted_raises_runtime_error``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. test_scipy_parametric_save_load_roundtrip_predict_equal  (AC-2)
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_save_load_roundtrip_predict_equal(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Save/load round-trip produces bit-equal predictions on a held-out frame (AC-2).
+
+    Fit on 200 synthetic rows (tz-aware UTC, ``temperature_2m`` column,
+    ``diurnal_harmonics=1``, ``weekly_harmonics=1`` to keep the fit cheap).
+    Then:
+
+    1. Predict on a separate 48-row held-out window → ``predict_before``.
+    2. ``model.save(path)`` then ``ScipyParametricModel.load(path)``.
+    3. Predict on the same held-out window with the restored model →
+       ``predict_after``.
+    4. Assert ``np.allclose(predict_before, predict_after, atol=1e-12)``.
+    5. Also assert that ``restored._popt`` and ``model._popt`` are bit-equal
+       arrays (i.e. the exact parameter vector is preserved through joblib
+       serialisation).
+
+    Plan clause: T5 plan §Task T5 named test
+    ``test_scipy_parametric_save_load_roundtrip_predict_equal`` / AC-2.
+    """
+    config = ScipyParametricConfig(diurnal_harmonics=1, weekly_harmonics=1)
+    train_features, train_target = _synthetic_parametric_frame(200)
+    model = ScipyParametricModel(config)
+    model.fit(train_features, train_target)
+
+    # Build a 48-row held-out window immediately after the training window.
+    held_out_index = pd.date_range(
+        train_features.index[-1] + pd.Timedelta(hours=1),
+        periods=48,
+        freq="h",
+        tz="UTC",
+    )
+    rng = np.random.default_rng(99)
+    held_out = pd.DataFrame(
+        {"temperature_2m": rng.uniform(5.0, 20.0, 48)},
+        index=held_out_index,
+    )
+
+    predict_before = model.predict(held_out)
+
+    save_path = tmp_path / "parametric.joblib"
+    model.save(save_path)
+    restored = ScipyParametricModel.load(save_path)
+
+    predict_after = restored.predict(held_out)
+
+    np.testing.assert_allclose(
+        predict_before.to_numpy(),
+        predict_after.to_numpy(),
+        atol=1e-12,
+        err_msg=(
+            "Predictions from the restored model must be allclose (atol=1e-12) "
+            "to predictions from the pre-save model. "
+            "Plan T5 / AC-2 / "
+            "``test_scipy_parametric_save_load_roundtrip_predict_equal``."
+        ),
+    )
+
+    # Bit-exact popt comparison.
+    assert model._popt is not None, "Precondition: _popt must be set after fit()."
+    assert restored._popt is not None, "Restored model _popt must be non-None."
+    np.testing.assert_array_equal(
+        model._popt,
+        restored._popt,
+        err_msg=(
+            "Restored _popt must be bit-equal to the original _popt. "
+            "Plan T5 / AC-2 / "
+            "``test_scipy_parametric_save_load_roundtrip_predict_equal``."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. test_scipy_parametric_save_load_preserves_covariance_matrix  (AC-5)
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_save_load_preserves_covariance_matrix(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Save/load round-trip preserves ``_pcov`` and its metadata representation (AC-5).
+
+    After a round-trip:
+
+    1. ``np.array_equal(cov_before, restored._pcov)`` — bit-exact ``_pcov``
+       attribute.
+    2. ``metadata.hyperparameters["covariance_matrix"]`` nested-list equal
+       before and after (i.e. the ``pcov.tolist()`` representation stored
+       in metadata is stable through serialisation).
+
+    The plan's "bit-exact" contract means the nested list must compare as
+    exactly equal with ``==``; no floating-point tolerance is applied
+    because joblib round-trips numpy arrays bitwise.
+
+    Plan clause: T5 plan §Task T5 named test
+    ``test_scipy_parametric_save_load_preserves_covariance_matrix`` / AC-5 /
+    plan D7.
+    """
+    config = ScipyParametricConfig(diurnal_harmonics=1, weekly_harmonics=1)
+    features, target = _synthetic_parametric_frame(200)
+    model = ScipyParametricModel(config)
+    model.fit(features, target)
+
+    assert model._pcov is not None, "Precondition: _pcov must be set after fit()."
+    cov_before = model._pcov.copy()
+    cov_matrix_before: list[list[float]] = model.metadata.hyperparameters["covariance_matrix"]  # type: ignore[assignment]
+
+    save_path = tmp_path / "parametric_cov.joblib"
+    model.save(save_path)
+    restored = ScipyParametricModel.load(save_path)
+
+    # Bit-exact ndarray comparison.
+    assert restored._pcov is not None, "Restored model _pcov must be non-None."
+    np.testing.assert_array_equal(
+        cov_before,
+        restored._pcov,
+        err_msg=(
+            "Restored _pcov must be bit-equal to the original _pcov. "
+            "Plan T5 / AC-5 / plan D7 / "
+            "``test_scipy_parametric_save_load_preserves_covariance_matrix``."
+        ),
+    )
+
+    # Metadata nested-list equality.
+    cov_matrix_after: list[list[float]] = restored.metadata.hyperparameters["covariance_matrix"]  # type: ignore[assignment]
+    assert cov_matrix_before == cov_matrix_after, (
+        "metadata.hyperparameters['covariance_matrix'] nested-list must be equal "
+        "before and after the round-trip. "
+        "Plan T5 / AC-5 / plan D7 / "
+        "``test_scipy_parametric_save_load_preserves_covariance_matrix``."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. test_scipy_parametric_load_wrong_type_raises_type_error
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_load_wrong_type_raises_type_error(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """``ScipyParametricModel.load`` raises ``TypeError`` for a non-ScipyParametric artefact.
+
+    Fits a :class:`~bristol_ml.models.linear.LinearModel` on a minimal
+    synthetic frame, saves it to a path, then asserts that calling
+    ``ScipyParametricModel.load(path)`` raises ``TypeError``.
+
+    This mirrors the Stage 4 / Stage 7 precedent where ``SarimaxModel.load``
+    raises ``TypeError`` when handed the wrong artefact type.
+
+    Plan clause: T5 plan §Task T5 named test
+    ``test_scipy_parametric_load_wrong_type_raises_type_error``.
+    Imports: ``LinearModel`` at ``bristol_ml.models.linear``;
+    ``LinearConfig`` at ``conf._schemas``.
+    """
+    from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
+    from bristol_ml.models.linear import LinearModel
+    from conf._schemas import LinearConfig
+
+    n = 50
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    rng = np.random.default_rng(17)
+    weather_data = {col: rng.uniform(0.0, 1.0, n) for col, _ in WEATHER_VARIABLE_COLUMNS}
+    features = pd.DataFrame(weather_data, index=index)
+    target = pd.Series(10_000.0 + rng.normal(0, 200, n), index=index, name="nd_mw")
+
+    linear_model = LinearModel(LinearConfig())
+    linear_model.fit(features, target)
+
+    save_path = tmp_path / "linear_model.joblib"
+    linear_model.save(save_path)
+
+    with pytest.raises(TypeError):
+        ScipyParametricModel.load(save_path)
