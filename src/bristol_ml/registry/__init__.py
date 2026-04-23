@@ -30,6 +30,7 @@ Plan: ``docs/plans/active/09-model-registry.md``.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,8 +38,9 @@ from typing import Any
 import pandas as pd
 
 from bristol_ml.models.protocol import Model
+from bristol_ml.registry._dispatch import class_for_type as _class_for_type
 from bristol_ml.registry._dispatch import model_type as _model_type
-from bristol_ml.registry._fs import _atomic_write_run, _build_run_id
+from bristol_ml.registry._fs import _atomic_write_run, _build_run_id, _run_dir
 from bristol_ml.registry._git import _git_sha_or_none
 from bristol_ml.registry._schema import MetricSummary, SidecarFields
 
@@ -180,9 +182,57 @@ def _summarise_metrics(metrics_df: pd.DataFrame) -> dict[str, MetricSummary]:
 def load(run_id: str, *, registry_dir: Path | None = None) -> Model:
     """Load a registered run by ``run_id``.
 
-    Stub — Stage 9 T3 implements the body.
+    Reads the ``run.json`` sidecar, dispatches on the ``type`` field to the
+    concrete model class, and delegates to that class's ``load`` classmethod
+    (:class:`~bristol_ml.models.Model` protocol).  Returns the fitted model.
+
+    ``_NamedLinearModel`` case: per plan D16 (cut) the registry returns a
+    base :class:`~bristol_ml.models.linear.LinearModel`.  The dynamic name
+    is preserved on the sidecar's ``name`` field for reading but is not
+    re-applied to the loaded instance — sidecar name lookup stays the
+    source of truth for human-readable identifiers.
+
+    Parameters
+    ----------
+    run_id:
+        The identifier returned by :func:`save` for the run of interest.
+    registry_dir:
+        Override the default on-disk root.  ``None`` (default) uses
+        :data:`DEFAULT_REGISTRY_DIR`.
+
+    Returns
+    -------
+    Model
+        A fitted model instance; same class as the one originally
+        registered (except in the ``_NamedLinearModel`` case above).
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``run_id`` is not present under ``registry_dir`` or its
+        ``run.json`` / ``artefact/model.joblib`` is missing.
+    ValueError
+        If the sidecar's ``type`` field is not one of the four
+        registered model types.
     """
-    raise NotImplementedError("Stage 9 T3 implements registry.load.")
+    registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    run_dir = _run_dir(registry_root, run_id)
+    sidecar_path = run_dir / "run.json"
+    artefact_path = run_dir / "artefact" / "model.joblib"
+    if not sidecar_path.is_file():
+        raise FileNotFoundError(
+            f"No registered run at {run_dir!s}; expected a run.json sidecar. "
+            "Check the run_id with `python -m bristol_ml.registry list` or "
+            "pass registry_dir=..."
+        )
+    if not artefact_path.is_file():
+        raise FileNotFoundError(
+            f"Registered run {run_id!r} is missing its artefact at {artefact_path!s}. "
+            "The run directory is in a partial state; try re-saving."
+        )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    model_cls = _class_for_type(sidecar["type"])
+    return model_cls.load(artefact_path)
 
 
 def list_runs(

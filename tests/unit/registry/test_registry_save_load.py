@@ -447,6 +447,204 @@ def test_registry_save_rejects_unfitted_model(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# T3 — AC-2 round-trip: save + load + predict agreement to atol=1e-10
+# ---------------------------------------------------------------------------
+
+
+def _assert_round_trip_predict(
+    original: object,
+    loaded: object,
+    features: pd.DataFrame,
+    *,
+    atol: float = 1e-10,
+) -> None:
+    """Assert ``predict(features)`` agrees between original and loaded to ``atol``."""
+    predicted_original = original.predict(features)  # type: ignore[attr-defined]
+    predicted_loaded = loaded.predict(features)  # type: ignore[attr-defined]
+    np.testing.assert_allclose(
+        predicted_loaded.to_numpy(),
+        predicted_original.to_numpy(),
+        atol=atol,
+        err_msg=(
+            "registry.load round-trip broke predict() numerical equivalence; "
+            "the model artefact or dispatcher is dropping state."
+        ),
+    )
+
+
+def test_registry_load_round_trips_naive_model(tmp_path: Path) -> None:
+    """save + load + predict on ``NaiveModel`` agrees to atol=1e-10 (AC-2 round-trip)."""
+    cfg = NaiveConfig(strategy="same_hour_last_week", target_column="nd_mw")
+    model = NaiveModel(cfg)
+    n = 400
+    idx = _hourly_index(n)
+    features = pd.DataFrame({"t2m": np.arange(n, dtype=float) * 0.1}, index=idx)
+    target = pd.Series(np.arange(n, dtype=float), index=idx, name="nd_mw")
+    model.fit(features, target)
+
+    run_id = registry.save(
+        model,
+        _fake_metrics_df(),
+        feature_set="weather_only",
+        target="nd_mw",
+        registry_dir=tmp_path,
+    )
+    loaded = registry.load(run_id, registry_dir=tmp_path)
+
+    assert isinstance(loaded, NaiveModel)
+    # Use the tail of the fitted range for predictions (naive lookback=168).
+    predict_features = features.iloc[200:]
+    _assert_round_trip_predict(model, loaded, predict_features)
+
+
+def test_registry_load_round_trips_linear_model(tmp_path: Path) -> None:
+    """save + load + predict on ``LinearModel`` agrees to atol=1e-10 (AC-2 round-trip)."""
+    cfg = LinearConfig(feature_columns=("x1", "x2"), target_column="nd_mw", fit_intercept=True)
+    model = LinearModel(cfg)
+    n = 200
+    rng = np.random.default_rng(0)
+    idx = _hourly_index(n)
+    x1 = rng.standard_normal(n)
+    x2 = rng.standard_normal(n)
+    y = 2.0 * x1 + 3.0 * x2 + 1.0 + rng.normal(0.0, 0.01, n)
+    features = pd.DataFrame({"x1": x1, "x2": x2}, index=idx)
+    target = pd.Series(y, index=idx, name="nd_mw")
+    model.fit(features, target)
+
+    run_id = registry.save(
+        model,
+        _fake_metrics_df(),
+        feature_set="weather_only",
+        target="nd_mw",
+        registry_dir=tmp_path,
+    )
+    loaded = registry.load(run_id, registry_dir=tmp_path)
+
+    assert isinstance(loaded, LinearModel)
+    _assert_round_trip_predict(model, loaded, features)
+
+
+def test_registry_load_round_trips_sarimax_model(tmp_path: Path) -> None:
+    """save + load + predict on ``SarimaxModel`` agrees to atol=1e-10 (AC-2 round-trip)."""
+    cfg = SarimaxConfig(
+        order=(1, 0, 0),
+        seasonal_order=(0, 0, 0, 24),
+        weekly_fourier_harmonics=2,
+    )
+    model = SarimaxModel(cfg)
+    n = 200
+    rng = np.random.default_rng(0)
+    idx = _hourly_index(n)
+    temp_c = rng.normal(10.0, 5.0, n)
+    cloud_cover = rng.uniform(0.0, 1.0, n)
+    t = np.arange(n, dtype=np.float64)
+    target_vals = np.zeros(n)
+    target_vals[0] = 10_000.0
+    for i in range(1, n):
+        target_vals[i] = (
+            0.7 * target_vals[i - 1]
+            + 0.3 * 10_000.0
+            + 500.0 * np.sin(2.0 * np.pi * t[i] / 24.0)
+            + rng.normal(0.0, 200.0)
+        )
+    features = pd.DataFrame({"temp_c": temp_c, "cloud_cover": cloud_cover}, index=idx)
+    target = pd.Series(target_vals, index=idx, name="nd_mw")
+    model.fit(features, target)
+
+    run_id = registry.save(
+        model,
+        _fake_metrics_df(),
+        feature_set="weather_calendar",
+        target="nd_mw",
+        registry_dir=tmp_path,
+    )
+    loaded = registry.load(run_id, registry_dir=tmp_path)
+
+    assert isinstance(loaded, SarimaxModel)
+    _assert_round_trip_predict(model, loaded, features)
+
+
+def test_registry_load_round_trips_scipy_parametric_model(tmp_path: Path) -> None:
+    """save + load + predict on ``ScipyParametricModel`` agrees to atol=1e-10 (AC-2 round-trip)."""
+    cfg = ScipyParametricConfig()
+    model = ScipyParametricModel(cfg)
+    n = 500
+    rng = np.random.default_rng(0)
+    idx = _hourly_index(n)
+    temperature = rng.uniform(5.0, 20.0, n)
+    target_vals = 10_000.0 + rng.normal(0.0, 200.0, n)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=idx)
+    target = pd.Series(target_vals, index=idx, name="nd_mw")
+    model.fit(features, target)
+
+    run_id = registry.save(
+        model,
+        _fake_metrics_df(),
+        feature_set="weather_only",
+        target="nd_mw",
+        registry_dir=tmp_path,
+    )
+    loaded = registry.load(run_id, registry_dir=tmp_path)
+
+    assert isinstance(loaded, ScipyParametricModel)
+    _assert_round_trip_predict(model, loaded, features)
+
+
+# ---------------------------------------------------------------------------
+# T3 — load error branches
+# ---------------------------------------------------------------------------
+
+
+def test_registry_load_raises_on_missing_run_id(tmp_path: Path) -> None:
+    """``load`` on a non-existent ``run_id`` raises ``FileNotFoundError`` (plan T3)."""
+    with pytest.raises(FileNotFoundError, match="No registered run"):
+        registry.load("does_not_exist_20260101T0000", registry_dir=tmp_path)
+
+
+def test_registry_load_named_linear_returns_base_class(tmp_path: Path) -> None:
+    """Loading a ``_NamedLinearModel`` run returns a base ``LinearModel`` (plan D16, T3).
+
+    Guards the plan D16 cut — the dynamic name is preserved on the sidecar
+    for reading but is not re-applied to the loaded instance.  ``_NamedLinearModel.save``
+    delegates to the inner ``LinearModel.save``, so the on-disk artefact is
+    already a plain ``LinearModel``; the registry loads the base class and
+    the sidecar's ``name`` field carries the dynamic name forward.
+    """
+    # Import the wrapper from the train module (where it lives).
+    from bristol_ml.train import _NamedLinearModel
+
+    cfg = LinearConfig(feature_columns=("x1",), target_column="nd_mw", fit_intercept=True)
+    wrapper = _NamedLinearModel(cfg, metadata_name="linear-ols-weather-only")
+
+    n = 50
+    rng = np.random.default_rng(0)
+    idx = _hourly_index(n)
+    x1 = rng.standard_normal(n)
+    y = 2.0 * x1 + rng.normal(0.0, 0.01, n)
+    features = pd.DataFrame({"x1": x1}, index=idx)
+    target = pd.Series(y, index=idx, name="nd_mw")
+    wrapper.fit(features, target)
+
+    run_id = registry.save(
+        wrapper,  # type: ignore[arg-type]
+        _fake_metrics_df(),
+        feature_set="weather_only",
+        target="nd_mw",
+        registry_dir=tmp_path,
+    )
+
+    # Sidecar records the dynamic name …
+    sidecar = _read_sidecar(tmp_path / run_id)
+    assert sidecar["name"] == "linear-ols-weather-only"
+    assert sidecar["type"] == "linear"  # dispatched via class name, D16
+
+    # … but load returns the base LinearModel (not the wrapper).
+    loaded = registry.load(run_id, registry_dir=tmp_path)
+    assert isinstance(loaded, LinearModel)
+    assert not isinstance(loaded, _NamedLinearModel)
+
+
 def test_registry_save_rejects_unknown_model_class(tmp_path: Path) -> None:
     """``save()`` raises ``TypeError`` on a model whose class is not registered.
 
