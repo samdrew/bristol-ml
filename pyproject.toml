@@ -44,6 +44,13 @@ dev = [
     "vcrpy>=6,<8",
     "jupyter>=1,<2",
     "nbconvert>=7,<8",
+    # Stage 9 (D10): MLflow is a *test-only* dependency — the registry does
+    # not import it at runtime.  The PyFunc adapter at
+    # ``tests/integration/mlflow_adapter.py`` and the D10 round-trip test
+    # prove the mechanical-migration claim in the layer doc is falsifiable.
+    # Pinned to the 2.x line; a future MLflow 3.x PyFunc API change should
+    # be addressed at the version-bump boundary, not silently absorbed.
+    "mlflow>=2.14,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
