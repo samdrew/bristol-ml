@@ -91,7 +91,11 @@ def test_registry_run_is_loadable_via_mlflow_pyfunc_adapter(tmp_path: Path) -> N
     indicates the PyFunc adapter contract has drifted — do not weaken
     the tolerance.
     """
-    # Arrange — fit and register.
+    # Arrange — fit and register.  Redirect MLflow tracking URI into
+    # ``tmp_path`` so ``mlflow.pyfunc.save_model`` / ``load_model`` do not
+    # spawn a default ``./mlruns/0/`` experiment bucket in the repo root
+    # (MLflow's implicit behaviour whenever tracking is unset).
+    mlflow.set_tracking_uri(str(tmp_path / "mlflow_tracking"))
     registry_dir = tmp_path / "registry"
     cfg = NaiveConfig(strategy="same_hour_last_week", target_column="nd_mw")
     model = NaiveModel(cfg)

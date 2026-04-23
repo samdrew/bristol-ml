@@ -63,10 +63,12 @@ file + `os.replace` — mirroring the ingestion layer's
 `_atomic_write` idiom.
 
 **Security note.** joblib (like `pickle`) is not a safe deserialiser for
-untrusted inputs. Stage 4 only loads artefacts we wrote ourselves, so the
-audit burden of `skops.io` is disproportionate to the stage's demo focus.
-The Stage 9 registry is the inflection point for `skops.io` adoption;
-`io.py` carries a comment pointing the upgrade path.
+untrusted inputs. Stages 4–9 only load artefacts we wrote ourselves — the
+Stage 9 registry explicitly documents this in its layer doc — so the audit
+burden of `skops.io` is disproportionate to those stages' demo focus. The
+Stage 12 **serving** layer is the inflection point for `skops.io` adoption
+(Stage 9 plan D14); `io.py` carries a docstring note pointing the upgrade
+path there.
 
 ## SARIMAX specifics (Stage 7)
 
