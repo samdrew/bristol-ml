@@ -62,7 +62,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only imports
     from bristol_ml.models.protocol import Model
     from conf._schemas import SplitterConfig
 
-__all__ = ["evaluate"]
+__all__ = ["evaluate", "evaluate_and_keep_final_model"]
 
 
 #: Column order of the per-fold predictions frame returned by
@@ -311,6 +311,64 @@ def evaluate(
         return result, predictions_df
 
     return result
+
+
+def evaluate_and_keep_final_model(
+    model: Model,
+    df: pd.DataFrame,
+    splitter_cfg: SplitterConfig,
+    metrics: Sequence[MetricFn],
+    *,
+    target_column: str = "nd_mw",
+    feature_columns: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, Model]:
+    """Run rolling-origin evaluation and return the final-fold fitted model.
+
+    Identical to :func:`evaluate` in every respect except that the
+    ``model`` returned is the one the harness left in its fitted state
+    after the final fold — the Stage 9 registry (plan D17 / AC-2) saves
+    this model rather than re-fitting on the full training set.
+
+    Rationale (plan R2).  The leaderboard metric row is the cross-fold
+    mean; the final-fold fitted model is an honest representative of the
+    estimator the metrics describe.  Re-fitting on the full training
+    set would introduce a second fitted object whose own metrics are not
+    the ones in the sidecar.
+
+    Parameters
+    ----------
+    model:
+        See :func:`evaluate`.  On return the same instance carries the
+        state of its final-fold ``fit``.
+    df, splitter_cfg, metrics, target_column, feature_columns:
+        See :func:`evaluate`.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, Model]
+        ``(metrics_df, model)`` where ``metrics_df`` is the same
+        per-fold frame :func:`evaluate` returns and ``model`` is the
+        same fitted estimator passed in.  The tuple shape keeps this
+        function independent of :func:`evaluate`'s ``return_predictions``
+        overload — do not add a second boolean flag to ``evaluate``
+        (API-growth rule; see module ``CLAUDE.md``).
+
+    Raises
+    ------
+    See :func:`evaluate`.  Additionally, a configuration that produces
+    zero folds leaves ``model`` unfitted; downstream consumers should
+    check ``model.metadata.fit_utc is not None`` before registering.
+    """
+    metrics_df = evaluate(
+        model,
+        df,
+        splitter_cfg,
+        metrics,
+        target_column=target_column,
+        feature_columns=feature_columns,
+    )
+    assert isinstance(metrics_df, pd.DataFrame)
+    return metrics_df, model
 
 
 # ---------------------------------------------------------------------------
