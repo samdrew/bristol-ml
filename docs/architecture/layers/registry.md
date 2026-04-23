@@ -122,6 +122,8 @@ One `run.json` per run, UTF-8, `json.dumps(..., indent=2, allow_nan=True, ensure
 
 Strict validation on read would couple the layer to Pydantic; Stage 9 deliberately does not. If Stage 17 or 18 needs a validated read path, promote `SidecarFields` to a Pydantic model under `conf/_schemas.py` as a deliberate surface-widening decision rather than an accretion.
 
+**`allow_nan=True` caveat — CPython consumers only.** `json.dumps(..., allow_nan=True)` emits the tokens `Infinity`, `-Infinity`, and `NaN` for non-finite floats. These tokens are **not** valid per RFC 8259 / ECMA-404; CPython's `json.loads` accepts them (so `registry.load` and `registry.describe` round-trip cleanly), but strict parsers treat them differently: `jq` silently coerces `Infinity` to `1.797…e+308`, and Node's `JSON.parse` / Go's `encoding/json` reject the file outright. Stage 9 is pitched at CPython tooling — the `describe` CLI prints via `json.dumps` and downstream stages read via `registry.describe` — so this is acceptable for the Demo moment. Non-finite values only land in the sidecar when `ScipyParametricModel` fits a singular covariance (research R3), a rare diagnostic state. If a future stage needs tool-agnostic sidecars, encode `float("inf")` as the string `"Infinity"` and `NaN` as `null` inside `_summarise_metrics` and migrate Stage 9 runs on read. Flagged here so a Stage 12 serving-layer implementer who feeds the sidecar into a non-Python parser is not surprised.
+
 ## Public interface
 
 Four callables, exactly. `__all__` is tuple-pinned and structurally enforced by `test_registry_public_surface_does_not_exceed_four_callables`.

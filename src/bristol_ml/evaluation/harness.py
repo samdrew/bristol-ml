@@ -359,6 +359,9 @@ def evaluate_and_keep_final_model(
     zero folds leaves ``model`` unfitted; downstream consumers should
     check ``model.metadata.fit_utc is not None`` before registering.
     """
+    # ``return_predictions=False`` narrows ``evaluate``'s return type to
+    # ``pd.DataFrame`` via the overload — no runtime assertion needed; a
+    # bare ``assert`` would be stripped under ``python -O``.
     metrics_df = evaluate(
         model,
         df,
@@ -366,8 +369,8 @@ def evaluate_and_keep_final_model(
         metrics,
         target_column=target_column,
         feature_columns=feature_columns,
+        return_predictions=False,
     )
-    assert isinstance(metrics_df, pd.DataFrame)
     return metrics_df, model
 
 

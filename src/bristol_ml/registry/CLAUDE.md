@@ -114,7 +114,6 @@ The `--help` output documents the `--registry-dir` override.
 ## Cross-references
 
 - Layer contract — `docs/architecture/layers/registry.md` (Stage 9 T6).
-- Stage 9 plan — `docs/plans/active/09-model-registry.md` (active during
-  Stage 9; moves to `docs/plans/completed/` at merge).
+- Stage 9 plan — `docs/plans/completed/09-model-registry.md`.
 - Stage 9 retro — `docs/lld/stages/09-model-registry.md`.
 - Intent — `docs/intent/09-model-registry.md` (5 ACs + 8 Points).

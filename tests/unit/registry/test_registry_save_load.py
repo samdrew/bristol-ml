@@ -443,11 +443,6 @@ def test_registry_save_rejects_unfitted_model(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Defensive guard — unknown model class is rejected
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # T3 — AC-2 round-trip: save + load + predict agreement to atol=1e-10
 # ---------------------------------------------------------------------------
 
@@ -682,3 +677,51 @@ def test_registry_save_rejects_unknown_model_class(tmp_path: Path) -> None:
             target="nd_mw",
             registry_dir=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 post-review hardening — run_id path-traversal guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "malformed_run_id",
+    [
+        "../../etc/passwd",
+        "sub/dir",
+        "..",
+        ".",
+        "",
+        "/absolute/path",
+    ],
+)
+def test_registry_load_rejects_malformed_run_id(tmp_path: Path, malformed_run_id: str) -> None:
+    """``registry.load`` rejects run_ids that are not a single path fragment.
+
+    Guards against a caller passing a traversal string as ``run_id`` and
+    reading an arbitrary joblib file on disk.  A well-formed Stage 9
+    run_id is ``{model_name}_{YYYYMMDDTHHMM}`` — no separators.
+    """
+    with pytest.raises(ValueError, match="single path fragment"):
+        registry.load(malformed_run_id, registry_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "malformed_run_id",
+    [
+        "../../etc/passwd",
+        "sub/dir",
+        "..",
+        ".",
+        "",
+        "/absolute/path",
+    ],
+)
+def test_registry_describe_rejects_malformed_run_id(tmp_path: Path, malformed_run_id: str) -> None:
+    """``registry.describe`` rejects run_ids that are not a single path fragment.
+
+    Pair of :func:`test_registry_load_rejects_malformed_run_id` — both
+    read paths apply the same structural guard.
+    """
+    with pytest.raises(ValueError, match="single path fragment"):
+        registry.describe(malformed_run_id, registry_dir=tmp_path)

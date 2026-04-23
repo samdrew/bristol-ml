@@ -18,9 +18,10 @@ import subprocess
 def _git_sha_or_none() -> str | None:
     """Return the current git HEAD SHA (full 40-char hex) or ``None``.
 
-    Returns ``None`` when ``git`` is not on ``$PATH``, when the call times
-    out, or when the working directory is not inside a git tree (including
-    the CI-shallow-clone case where HEAD exists but ``rev-parse`` somehow
+    Returns ``None`` when ``git`` is not on ``$PATH``, when it exists but
+    is not executable (locked-down CI images), when the call times out, or
+    when the working directory is not inside a git tree (including the
+    CI-shallow-clone case where HEAD exists but ``rev-parse`` somehow
     fails — defensive rather than expected).
 
     The returned string is the raw ``git rev-parse HEAD`` output stripped of
@@ -35,7 +36,11 @@ def _git_sha_or_none() -> str | None:
             timeout=2.0,
             text=True,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
+        # ``OSError`` covers both a missing ``git`` binary
+        # (``FileNotFoundError``) and a present-but-non-executable one
+        # (``PermissionError``) without letting either propagate out of a
+        # ``save()`` call.
         return None
     if result.returncode != 0:
         return None

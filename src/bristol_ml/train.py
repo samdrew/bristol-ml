@@ -342,18 +342,21 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     # ``--no-register`` for notebook workflows that don't want to
     # accumulate runs on disk.  The run_id is printed so the facilitator
     # can feed it straight into ``python -m bristol_ml.registry describe``.
+    #
+    # Stage 9 Phase 3 review B1: failure to save is treated as
+    # catastrophic — the whole point of the Demo moment is an on-disk
+    # artefact, so a silent warning here would let a CI pipeline pass
+    # while the registry is empty.  We let the exception propagate so
+    # ``_cli_main`` returns a non-zero exit code.
     if not args.no_register and primary.metadata.fit_utc is not None:
-        try:
-            run_id = registry.save(
-                primary,
-                per_fold,
-                feature_set=fset.name,
-                target=target_column,
-                registry_dir=args.registry_dir,
-            )
-            print(f"Registered run_id: {run_id}")
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("registry.save failed: {}", exc)
+        run_id = registry.save(
+            primary,
+            per_fold,
+            feature_set=fset.name,
+            target=target_column,
+            registry_dir=args.registry_dir,
+        )
+        print(f"Registered run_id: {run_id}")
 
     # Three-way benchmark — only if the NESO forecast config *and* its
     # cache are both present.  This keeps the CLI useful offline without

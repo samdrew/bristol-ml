@@ -9,7 +9,7 @@ three-way NESO benchmark; Stage 6 adds ``plots`` — a colourblind-safe
 diagnostic-plot helper library (residuals, ACF, forecast overlays,
 empirical uncertainty bands, and a fixed-window NESO bar chart).
 
-## Current surface (Stages 3–6)
+## Current surface (Stages 3–6, 9)
 
 ### Splitter (Stage 3)
 
@@ -50,6 +50,19 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
   per (fold, horizon-index) with columns `["fold_index", "test_start",
   "test_end", "horizon_h", "y_true", "y_pred", "error"]` (Stage 6 D9
   — see the API growth trigger note below).
+- `bristol_ml.evaluation.harness.evaluate_and_keep_final_model(model,
+  df, splitter_cfg, metrics, *, target_column="nd_mw",
+  feature_columns=None) -> tuple[pd.DataFrame, Model]` — Stage 9
+  (plan D17) companion to `evaluate`.  Delegates to `evaluate()` and
+  additionally returns the model instance after the harness has left it
+  fitted on the final fold.  Introduced to give the registry
+  (`registry.save`) access to the fitted artefact without adding a
+  second boolean flag to `evaluate()` (H5 API-growth rule — see
+  "Harness output — API growth trigger" below).  The metrics DataFrame
+  is identical to the one `evaluate()` returns; the returned `model`
+  is the same object passed in, now carrying final-fold state.  A
+  zero-fold configuration leaves `model` unfitted; callers should
+  guard on `model.metadata.fit_utc is not None` before registering.
 - **H-1 guard (Stage 3 carry-over, implemented here in Stage 4):**
   `df.index` must be a `pandas.DatetimeIndex`; tz-naive is permitted,
   UTC-aware is permitted, any other timezone is rejected.

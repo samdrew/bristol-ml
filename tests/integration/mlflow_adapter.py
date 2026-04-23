@@ -34,6 +34,8 @@ import mlflow.pyfunc
 if TYPE_CHECKING:  # pragma: no cover — typing only
     import pandas as pd
 
+    from bristol_ml.models.protocol import Model
+
 __all__ = ("RegistryPyfuncAdapter", "package_run_as_pyfunc")
 
 
@@ -52,6 +54,13 @@ class RegistryPyfuncAdapter(mlflow.pyfunc.PythonModel):
     MLflow-PyFunc output therefore requires the same feature columns the
     original model was fitted on.
     """
+
+    def __init__(self) -> None:
+        # Initialised to ``None`` so that if MLflow ever calls ``predict``
+        # before a successful ``load_context`` (e.g. a deserialisation
+        # failure path) the error surfaces as an explicit ``RuntimeError``
+        # naming the lifecycle, not a bare ``AttributeError``.
+        self._model: Model | None = None
 
     def load_context(self, context: Any) -> None:
         """Load the wrapped model from the registry run directory.
@@ -84,6 +93,11 @@ class RegistryPyfuncAdapter(mlflow.pyfunc.PythonModel):
         delegate to the wrapped ``Model.predict`` unchanged.
         """
         del context, params  # unused — MLflow-API shape
+        if self._model is None:
+            raise RuntimeError(
+                "RegistryPyfuncAdapter.predict called before load_context — "
+                "MLflow did not populate context.artifacts['registry_run']."
+            )
         return self._model.predict(model_input)
 
 

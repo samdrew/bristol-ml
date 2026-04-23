@@ -25,17 +25,17 @@ implementation is deferred (intent §Out of scope) but the
 round-trip test (plan D10).
 
 Layer doc: ``docs/architecture/layers/registry.md``.
-Plan: ``docs/plans/active/09-model-registry.md``.
+Plan: ``docs/plans/completed/09-model-registry.md``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from bristol_ml.models.protocol import Model
@@ -65,6 +65,26 @@ DEFAULT_REGISTRY_DIR = Path("data/registry")
 _NON_METRIC_COLUMNS: frozenset[str] = frozenset(
     {"fold_index", "train_end", "test_start", "test_end"}
 )
+
+
+def _validate_run_id(run_id: str) -> None:
+    """Reject ``run_id`` values that would escape ``registry_dir`` on join.
+
+    A well-formed Stage 9 run_id is ``{model_name}_{YYYYMMDDTHHMM}`` — a
+    single filename fragment with no separators.  Any ``run_id`` that
+    contains ``/``, ``\\``, parent-directory markers, or an absolute path
+    would make ``registry_dir / run_id`` resolve outside ``registry_dir``;
+    the registry accepts local, author-written run_ids at Stage 9, but
+    the ``load`` / ``describe`` read paths are public API, so a one-line
+    structural guard keeps a malformed caller from triggering surprising
+    filesystem reads.
+    """
+    if run_id != Path(run_id).name or run_id in {"", ".", ".."}:
+        raise ValueError(
+            f"run_id must be a single path fragment, got {run_id!r}. "
+            "The registry expects the `{model_name}_{YYYYMMDDTHHMM}` "
+            "form returned by registry.save()."
+        )
 
 
 def save(
@@ -216,6 +236,7 @@ def load(run_id: str, *, registry_dir: Path | None = None) -> Model:
         If the sidecar's ``type`` field is not one of the four
         registered model types.
     """
+    _validate_run_id(run_id)
     registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
     run_dir = _run_dir(registry_root, run_id)
     sidecar_path = run_dir / "run.json"
@@ -247,8 +268,8 @@ def list_runs(
 ) -> list[dict[str, Any]]:
     """List registered runs with optional filters and sort.
 
-    Scans ``registry_dir`` with a single :func:`os.listdir`, reads every
-    ``run.json`` sidecar in a non-``.tmp_*`` subdirectory, applies the
+    Iterates ``registry_dir`` once (via :meth:`pathlib.Path.iterdir`), reads
+    every ``run.json`` sidecar in a non-``.tmp_*`` subdirectory, applies the
     exact-match filters (D7), and sorts by the named metric (D8).  Runs
     missing the ``sort_by`` metric are placed last regardless of
     ``ascending``.
@@ -319,7 +340,7 @@ def _sort_key(sidecar: dict[str, Any], metric_name: str, *, ascending: bool) -> 
     if summary is None or "mean" not in summary:
         return (1, 0.0)
     mean = float(summary["mean"])
-    if np.isnan(mean):
+    if math.isnan(mean):
         return (1, 0.0)
     return (0, mean if ascending else -mean)
 
@@ -345,6 +366,7 @@ def describe(run_id: str, *, registry_dir: Path | None = None) -> dict[str, Any]
     FileNotFoundError
         If no run with this ``run_id`` exists under ``registry_dir``.
     """
+    _validate_run_id(run_id)
     registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
     run_dir = _run_dir(registry_root, run_id)
     sidecar_path = run_dir / "run.json"
