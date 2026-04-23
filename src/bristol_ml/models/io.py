@@ -12,10 +12,14 @@ Writes are **atomic** — mirrors the ingestion layer's
 rename primitive on POSIX + NTFS).  A crash mid-write therefore leaves the
 previous artefact intact rather than producing a zero-byte file.
 
-Upgrade path: :mod:`skops.io` for secure artefacts once the Stage 9 registry
-lands.  joblib (like pickle) is *not* a safe deserialiser for untrusted
-inputs; at Stage 4 we only ever load artefacts we wrote ourselves, so the
-audit burden of skops is disproportionate to the stage's demo focus.
+Upgrade path: :mod:`skops.io` for secure artefacts at Stage 12 (serving),
+per Stage 9 plan D14 — Stage 12 is the first stage that loads artefacts
+from a path not controlled by the training author, which is the correct
+inflection point for the security upgrade.  joblib (like pickle) is *not*
+a safe deserialiser for untrusted inputs; Stages 4-11 only ever load
+artefacts we wrote ourselves (the Stage 9 registry explicitly documents
+this), so the audit burden of skops is disproportionate to those stages'
+demo focus.
 """
 
 from __future__ import annotations

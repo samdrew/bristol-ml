@@ -153,6 +153,23 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         nargs="*",
         help="Hydra overrides, e.g. model=naive evaluation.rolling_origin.step=168",
     )
+    parser.add_argument(
+        "--registry-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Override the Stage 9 registry root (default: data/registry). "
+            "Each invocation registers the final-fold fitted model here."
+        ),
+    )
+    parser.add_argument(
+        "--no-register",
+        action="store_true",
+        help=(
+            "Skip registry.save after evaluation — handy for notebook "
+            "experiments that do not want to accumulate runs on disk."
+        ),
+    )
     return parser
 
 
@@ -171,9 +188,10 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
     # Local imports keep ``--help`` lightweight — statsmodels + Hydra are
     # comparatively heavy.
+    from bristol_ml import registry
     from bristol_ml.config import load_config
     from bristol_ml.evaluation.benchmarks import compare_on_holdout
-    from bristol_ml.evaluation.harness import evaluate
+    from bristol_ml.evaluation.harness import evaluate_and_keep_final_model
     from bristol_ml.ingestion import neso_forecast as neso_forecast_mod
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
@@ -296,7 +314,12 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         [m.__name__ for m in metric_fns],
     )
 
-    per_fold = evaluate(
+    # Stage 9 D17: keep the final-fold fitted model so we can register it
+    # without re-fitting on the full training set (AC-2 + plan R2).  The
+    # harness wraps ``evaluate`` and returns (metrics_df, fitted_model) in
+    # one call — no second boolean flag was added to ``evaluate`` (H5
+    # API-growth rule in ``evaluation/CLAUDE.md``).
+    per_fold, primary = evaluate_and_keep_final_model(
         primary,
         df,
         split_cfg,
@@ -314,6 +337,26 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         f"({primary.metadata.name}, feature_set={fset.name}):"
     )
     _print_metric_table(per_fold)
+
+    # Stage 9 D17: register the final-fold model.  Gated behind
+    # ``--no-register`` for notebook workflows that don't want to
+    # accumulate runs on disk.  The run_id is printed so the facilitator
+    # can feed it straight into ``python -m bristol_ml.registry describe``.
+    #
+    # Stage 9 Phase 3 review B1: failure to save is treated as
+    # catastrophic — the whole point of the Demo moment is an on-disk
+    # artefact, so a silent warning here would let a CI pipeline pass
+    # while the registry is empty.  We let the exception propagate so
+    # ``_cli_main`` returns a non-zero exit code.
+    if not args.no_register and primary.metadata.fit_utc is not None:
+        run_id = registry.save(
+            primary,
+            per_fold,
+            feature_set=fset.name,
+            target=target_column,
+            registry_dir=args.registry_dir,
+        )
+        print(f"Registered run_id: {run_id}")
 
     # Three-way benchmark — only if the NESO forecast config *and* its
     # cache are both present.  This keeps the CLI useful offline without

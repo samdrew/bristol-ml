@@ -40,7 +40,7 @@ src/bristol_ml/
 ├── models/              # (deferred — Stages 4, 7, 8, 10, 11)
 ├── evaluation/          # (deferred — Stages 3, 4, 6)
 ├── llm/                 # (deferred — Stages 14, 15)
-├── registry/            # (deferred — Stage 9)
+├── registry/            # Stage 9 — filesystem-backed model registry (save, load, list_runs, describe)
 ├── serving/             # (deferred — Stage 12)
 └── monitoring/          # (deferred — Stage 18)
 

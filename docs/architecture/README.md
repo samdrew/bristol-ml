@@ -39,6 +39,7 @@ exists, not what's planned.
 | Features | [`layers/features.md`](./layers/features.md) |
 | Evaluation | [`layers/evaluation.md`](./layers/evaluation.md) |
 | Models | [`layers/models.md`](./layers/models.md) |
+| Registry | [`layers/registry.md`](./layers/registry.md) |
 
 ## Cross-cutting concerns
 

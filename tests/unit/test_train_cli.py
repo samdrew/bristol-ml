@@ -89,8 +89,19 @@ def warm_feature_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     a writable sandbox.  The feature-table parquet lands at
     ``tmp_path/weather_only.parquet`` (matching the default
     ``cache_filename``).
+
+    Stage 9 D17 hygiene: we also monkeypatch
+    :data:`bristol_ml.registry.DEFAULT_REGISTRY_DIR` so every train-CLI
+    test run registers into ``tmp_path/registry`` rather than polluting
+    the repo-level ``data/registry/`` with synthetic fold artefacts.
+    Tests that want to assert on the registry pass ``--registry-dir``
+    explicitly.
     """
     monkeypatch.setenv("BRISTOL_ML_CACHE_DIR", str(tmp_path))
+    # Stage 9 hygiene: redirect the registry root to the per-test tmpdir.
+    from bristol_ml import registry
+
+    monkeypatch.setattr(registry, "DEFAULT_REGISTRY_DIR", tmp_path / "registry")
     _write_feature_cache(tmp_path / "weather_only.parquet")
     return tmp_path
 
