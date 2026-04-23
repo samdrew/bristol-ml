@@ -175,12 +175,11 @@ def test_atomic_write_run_cleans_up_staging_on_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_verbs_list_describe_are_stubs_until_later_tasks() -> None:
-    """T2 + T3 implemented ``save`` + ``load``; ``list_runs`` / ``describe`` fill in at T4."""
-    with pytest.raises(NotImplementedError):
-        registry.list_runs()
-    with pytest.raises(NotImplementedError):
-        registry.describe("any")
+def test_registry_verbs_are_all_implemented() -> None:
+    """T2/T3/T4 have completed: all four verbs are non-stub callables."""
+    for name in registry.__all__:
+        obj = getattr(registry, name)
+        assert callable(obj), f"registry.{name} is not callable"
 
 
 def test_registry_exposes_default_registry_dir() -> None:

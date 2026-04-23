@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from bristol_ml.models.protocol import Model
@@ -246,14 +247,107 @@ def list_runs(
 ) -> list[dict[str, Any]]:
     """List registered runs with optional filters and sort.
 
-    Stub — Stage 9 T4 implements the body.
+    Scans ``registry_dir`` with a single :func:`os.listdir`, reads every
+    ``run.json`` sidecar in a non-``.tmp_*`` subdirectory, applies the
+    exact-match filters (D7), and sorts by the named metric (D8).  Runs
+    missing the ``sort_by`` metric are placed last regardless of
+    ``ascending``.
+
+    Parameters
+    ----------
+    target:
+        Exact-match filter on the sidecar's ``target`` field (D7).
+    model_type:
+        Exact-match filter on the sidecar's ``type`` field (D7).
+    feature_set:
+        Exact-match filter on the sidecar's ``feature_set`` field (D7).
+    sort_by:
+        Metric name to sort by (D8).  ``"mae"`` is the default — the
+        Demo-moment leaderboard is MAE-ascending by default.  ``None``
+        returns runs in the underlying filesystem order (undefined).
+    ascending:
+        When ``True`` (default), best metrics first.
+    registry_dir:
+        Override the default on-disk root.  ``None`` (default) uses
+        :data:`DEFAULT_REGISTRY_DIR`.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One sidecar dict per run.  Empty list if the directory does not
+        exist or contains no registered runs.
     """
-    raise NotImplementedError("Stage 9 T4 implements registry.list_runs.")
+    registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    if not registry_root.is_dir():
+        return []
+
+    runs: list[dict[str, Any]] = []
+    for child in registry_root.iterdir():
+        # Skip staging directories (D5) and any stray files.
+        if not child.is_dir() or child.name.startswith(".tmp_"):
+            continue
+        sidecar_path = child / "run.json"
+        if not sidecar_path.is_file():
+            # Partial / corrupt run — skip rather than crash the leaderboard.
+            continue
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        # Exact-match filters (D7).
+        if target is not None and sidecar.get("target") != target:
+            continue
+        if model_type is not None and sidecar.get("type") != model_type:
+            continue
+        if feature_set is not None and sidecar.get("feature_set") != feature_set:
+            continue
+        runs.append(sidecar)
+
+    if sort_by is None:
+        return runs
+    # Sort by the requested metric; missing keys go last regardless of direction.
+    return sorted(runs, key=lambda r: _sort_key(r, sort_by, ascending=ascending))
+
+
+def _sort_key(sidecar: dict[str, Any], metric_name: str, *, ascending: bool) -> tuple[int, float]:
+    """Return a ``(missing_flag, value)`` key: missing metrics always sort last.
+
+    The first element is ``0`` when the metric is present, ``1`` when it
+    is missing — so the missing-last rule holds in both ascending and
+    descending sorts.  The second element is the value itself (negated
+    for descending to match Python's sort-in-one-direction constraint).
+    """
+    metrics = sidecar.get("metrics", {})
+    summary = metrics.get(metric_name)
+    if summary is None or "mean" not in summary:
+        return (1, 0.0)
+    mean = float(summary["mean"])
+    if np.isnan(mean):
+        return (1, 0.0)
+    return (0, mean if ascending else -mean)
 
 
 def describe(run_id: str, *, registry_dir: Path | None = None) -> dict[str, Any]:
     """Return the full sidecar dict for one registered run.
 
-    Stub — Stage 9 T4 implements the body.
+    Parameters
+    ----------
+    run_id:
+        The identifier returned by :func:`save`.
+    registry_dir:
+        Override the default on-disk root.  ``None`` (default) uses
+        :data:`DEFAULT_REGISTRY_DIR`.
+
+    Returns
+    -------
+    dict[str, Any]
+        The parsed ``run.json`` sidecar.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no run with this ``run_id`` exists under ``registry_dir``.
     """
-    raise NotImplementedError("Stage 9 T4 implements registry.describe.")
+    registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    run_dir = _run_dir(registry_root, run_id)
+    sidecar_path = run_dir / "run.json"
+    if not sidecar_path.is_file():
+        raise FileNotFoundError(f"No registered run at {run_dir!s}; expected a run.json sidecar.")
+    return json.loads(sidecar_path.read_text(encoding="utf-8"))
