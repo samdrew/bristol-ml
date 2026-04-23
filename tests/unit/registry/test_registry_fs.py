@@ -175,10 +175,8 @@ def test_atomic_write_run_cleans_up_staging_on_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_verbs_are_stubs_until_later_tasks() -> None:
-    """T1 scaffolds the four verbs as stubs; T2..T4 fill them in."""
-    with pytest.raises(NotImplementedError):
-        registry.save(None, None, feature_set="x", target="y")  # type: ignore[arg-type]
+def test_registry_verbs_load_list_describe_are_stubs_until_later_tasks() -> None:
+    """T2 implemented ``save``; ``load`` / ``list_runs`` / ``describe`` fill in at T3/T4."""
     with pytest.raises(NotImplementedError):
         registry.load("any")
     with pytest.raises(NotImplementedError):
