@@ -16,11 +16,12 @@ for Stage 11 are:
   the Stage 9 registry's ``artefact/model.joblib`` file-path contract
   without any registry change.
 
-Task T1 (previous commit) scaffolded the class surface.  Task T2 (this
-commit) fills ``fit`` / ``predict`` with the hand-rolled training loop,
-the four-stream seed helper, the auto-device selector, and the
-``_make_mlp`` module-level module factory.  Task T3 will fill
-``save`` / ``load``.
+Task T1 scaffolded the class surface.  Task T2 filled ``fit`` /
+``predict`` with the hand-rolled training loop, the four-stream seed
+helper, the auto-device selector, and the ``_make_mlp`` module-level
+module factory.  Task T3 (this commit) fills ``save`` / ``load`` with
+the single-joblib-envelope layout (plan D5 revised) that plugs into
+the Stage 9 registry's ``artefact/model.joblib`` file-path contract.
 
 Running standalone::
 
@@ -667,35 +668,115 @@ class NnMlpModel:
         and provenance scalars (``seed_used``, ``best_epoch``,
         ``loss_history``, ``fit_utc``, ``device_resolved``).
 
-        Stub until Task T3.
+        The write is atomic — :func:`bristol_ml.models.io.save_joblib`
+        stages to a sibling ``.tmp`` and renames via :func:`os.replace`,
+        matching the Stage 4 contract.  No sibling ``model.pt`` or
+        ``hyperparameters.json`` is created — plan D5 revision (single
+        envelope) is structurally enforced by the T3 "single file" test.
 
         Raises
         ------
-        NotImplementedError
-            Always — T3 fills this in.
+        RuntimeError
+            If :meth:`fit` has not been called — save-before-fit is
+            undefined per the Stage 4 :class:`Model` protocol.
         """
-        raise NotImplementedError("NnMlpModel.save is implemented in Stage 10 Task T3.")
+        import io as _io
+
+        import torch
+
+        from bristol_ml.models.io import save_joblib
+
+        if self._module is None:
+            raise RuntimeError(
+                "NnMlpModel.save requires fit() to have been called first; "
+                "state_dict is undefined before fit."
+            )
+
+        # state_dict → bytes.  ``.cpu()`` on every tensor so the envelope
+        # is portable across devices; ``torch.load(..., map_location="cpu")``
+        # in :meth:`load` mirrors this.
+        cpu_state_dict = {k: v.detach().cpu() for k, v in self._module.state_dict().items()}
+        buf = _io.BytesIO()
+        torch.save(cpu_state_dict, buf)
+        state_dict_bytes: bytes = buf.getvalue()
+
+        envelope: dict[str, Any] = {
+            "state_dict_bytes": state_dict_bytes,
+            "config_dump": self._config.model_dump(),
+            "feature_columns": tuple(self._feature_columns),
+            "seed_used": self._seed_used,
+            "best_epoch": self._best_epoch,
+            "loss_history": list(self.loss_history_),
+            "fit_utc": self._fit_utc,
+            "device_resolved": self._device_resolved,
+        }
+        save_joblib(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> NnMlpModel:
         """Load a previously-saved :class:`NnMlpModel` from ``path``.
 
         Plan D5 (revised): reads the joblib envelope, reconstructs
-        :class:`NnMlpConfig` from ``config_dump``, instantiates an
-        ``NnMlpModel``, materialises the ``state_dict`` via
+        :class:`NnMlpConfig` from ``config_dump`` (Pydantic re-validation
+        catches schema drift), instantiates an ``NnMlpModel``, materialises
+        the ``state_dict`` via
         ``torch.load(BytesIO(state_dict_bytes), weights_only=True,
         map_location="cpu")``, and calls ``load_state_dict(strict=True)``.
         ``weights_only=True`` keeps PyTorch 2.6+'s safety rail active on
-        the inner bytes payload.
+        the inner bytes payload; ``strict=True`` is load-bearing for
+        plan R3 (a dropped buffer would silently break inverse-normalisation
+        at :meth:`predict` otherwise).
 
-        Stub until Task T3.
+        The loaded model lives on CPU regardless of the device it was
+        fitted on — :meth:`predict` moves tensors to ``self._device`` at
+        call time and the buffers ride along with the module.
 
         Raises
         ------
-        NotImplementedError
-            Always — T3 fills this in.
+        FileNotFoundError
+            If ``path`` does not exist (propagated from :mod:`joblib`).
         """
-        raise NotImplementedError("NnMlpModel.load is implemented in Stage 10 Task T3.")
+        import io as _io
+
+        import torch
+
+        from bristol_ml.models.io import load_joblib
+
+        envelope = load_joblib(path)
+
+        # Pydantic re-validation is the schema-drift guard (plan R2).
+        config = NnMlpConfig.model_validate(envelope["config_dump"])
+        model = cls(config)
+
+        # Rebuild the nn.Module with the same input_dim the fit used.
+        feature_cols: tuple[str, ...] = tuple(envelope["feature_columns"])
+        if not feature_cols:
+            raise ValueError(
+                "NnMlpModel.load: envelope carries empty feature_columns; "
+                "this envelope was not produced by a fitted NnMlpModel."
+            )
+        module = _make_mlp(input_dim=len(feature_cols), config=config)
+
+        # Materialise the saved state_dict on CPU and load strictly — a
+        # missing or extra key (e.g. a dropped scaler buffer) fails loudly
+        # here rather than silently skewing predictions later.
+        buf = _io.BytesIO(envelope["state_dict_bytes"])
+        state_dict = torch.load(buf, weights_only=True, map_location="cpu")
+        module.load_state_dict(state_dict, strict=True)
+
+        # Restore fit-state attributes.  ``loss_history_`` is rebuilt as a
+        # fresh list so mutations via the returned instance do not alias
+        # back into the envelope dict.
+        model._feature_columns = feature_cols
+        model._fit_utc = envelope.get("fit_utc")
+        model._device = torch.device("cpu")
+        model._device_resolved = envelope.get("device_resolved")
+        model._seed_used = envelope.get("seed_used")
+        model._best_epoch = envelope.get("best_epoch")
+        model._module = module
+        model.loss_history_ = [dict(e) for e in envelope.get("loss_history", [])]
+
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:
