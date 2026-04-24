@@ -159,11 +159,86 @@ Stage 11's design before Stage 11's requirements are understood.
 Stage 11 extends this sub-layer with the TCN family (`NnTemporalModel`)
 and fires the Stage 10 D10 extraction seam — the training-loop body now
 lives at `bristol_ml.models.nn._training.run_training_loop` and is
-shared by both `NnMlpModel` and `NnTemporalModel`.  Full TCN-specific
-gotchas (causal padding, weight-norm placement, `_SequenceDataset`
-lazy-window contract, single-joblib `seq_len` field) are added at
-Stage 11 T8.  The item worth capturing at T6-time is the
-**harness-factory catch-up**:
+shared by both `NnMlpModel` and `NnTemporalModel`.  The five Stage 10
+PyTorch gotchas above all carry forward unchanged (the temporal class
+re-applies the `sys.modules` install, the lazy torch import, the
+buffer-registration discipline, the `weights_only=True + map_location=
+"cpu"` load contract, and the single-joblib envelope).  The four
+gotchas that are *new at Stage 11* and that the Stage 12 / 17 reader
+cannot guess from `mlp.py` are:
+
+- **Causal padding via `F.pad(x, (left, 0))` *before* a `Conv1d(padding=
+  0)`, never `Conv1d(padding=...)`.**  The Bai et al. (2018) recipe.
+  `left = (kernel_size - 1) * dilation` is computed once per
+  `_TemporalBlockImpl` at `__init__` time.  Inside `forward`,
+  `F.pad(x, (self.left_pad, 0))` zero-pads only the left of the time
+  axis; the convolution then runs with `padding=0` so it cannot see
+  any input position strictly to the right of the current output
+  position.  The temptation is to set `padding=self.left_pad` directly
+  on `Conv1d` and skip the explicit `F.pad`.  Don't: PyTorch's `Conv1d`
+  pads symmetrically (left and right by the same amount), which leaks
+  the future into every output and silently breaks day-ahead
+  forecasting.  The regression guard is
+  `test_nn_temporal_causal_padding_does_not_leak_future` (synthetic
+  `inf`-at-future-index fixture; any right-pad leakage produces
+  `inf`/`nan` in the output, making the bug loud rather than silent).
+  Domain research §6 pitfall 4.
+- **Weight-norm via `torch.nn.utils.parametrizations.weight_norm`, not
+  `torch.nn.utils.weight_norm`.**  The latter has been deprecated since
+  PyTorch 2.1; the former is the parametrizations-API replacement.
+  `temporal.py` imports the parametrizations entry point first and
+  falls back to the legacy import for `torch < 2.1` (the project pins
+  `torch>=2.7,<3` so the fallback is dead code on the supported track,
+  but the structure documents the migration cost should the project
+  ever extend the floor).  The two APIs have **different `state_dict`
+  key shapes**: legacy stores `weight_g` / `weight_v`; parametrizations
+  stores `parametrizations.weight.original0` / `original1`.  An
+  artefact saved under one API does not load under the other —
+  `load_state_dict(strict=True)` catches the mismatch loudly.  If a
+  future torch version removes the legacy alias, every Stage-11-era
+  artefact still loads because we already use the parametrizations
+  path.  Plan R4.
+- **`_SequenceDataset` is a lazy-window `torch.utils.data.Dataset` —
+  do not eagerly materialise the full `(N - seq_len, seq_len,
+  n_features)` tensor.**  At the intent's default feature set (44
+  calendar + ~6 weather columns, 43 633 hourly rows, `seq_len=168`)
+  the eager tensor would cost ~1.4 GB; the lazy `__getitem__` path
+  holds the footprint at `N * n_features * 4` bytes (~10 MB).  The
+  class is defined inside `_build_sequence_dataset_class()` for the
+  same lazy-torch-import reason as `_NnMlpModuleImpl` (Gotcha 1
+  above) and is `sys.modules`-installed under
+  `__qualname__ = "_SequenceDatasetImpl"` so any future `pickle` /
+  `joblib` round-trip resolves the class by dotted path.  The dataset
+  yields **unscaled** `float32` tensors; normalisation happens inside
+  `_NnTemporalModuleImpl.forward()` via the four scaler buffers
+  (`feature_mean` / `feature_std` / `target_mean` / `target_std`)
+  registered the same way Stage 10 registers them — so the scalers
+  ride inside `state_dict()` and the strict-mode round-trip catches
+  any drift.  Plan D7 / codebase map §4.
+- **Single-joblib envelope gains one new field: `seq_len`.**  The
+  Stage 10 envelope (`state_dict_bytes` + `config_dump` +
+  `feature_columns` + `seed_used` + `best_epoch` + `loss_history` +
+  `fit_utc` + `device_resolved`) is preserved verbatim; Stage 11 adds
+  one more field, `seq_len: int`, *redundant* with `config_dump
+  ["seq_len"]` but explicit so the load path can sanity-check the
+  window size before reconstructing the module.  The reconstruction
+  path is: read envelope → instantiate `NnTemporalConfig` from
+  `config_dump` → assert envelope `seq_len == config.seq_len` →
+  rebuild `_NnTemporalModuleImpl(input_dim=len(feature_columns),
+  seq_len=config.seq_len, ...)` skeleton → `torch.load(BytesIO(
+  state_dict_bytes), weights_only=True, map_location="cpu")` →
+  `load_state_dict(strict=True)`.  The strict-mode call catches a
+  mismatch in *any* Conv1d kernel shape (so a saved 8-block × 128-channel
+  model cannot silently load into a 4-block × 32-channel skeleton —
+  the kernel shapes differ).  Regression guards:
+  `test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict`
+  (asserts the loaded `config.seq_len` matches byte-exact) and
+  `test_nn_temporal_save_writes_single_joblib_file_at_given_path`
+  (structural; no sibling files).  Plan D5 / R7.
+
+The other Stage 11 item worth surfacing — the harness-factory catch-up
+that landed *with* T6's dispatcher wiring rather than as a Stage 10
+hotfix — is filed as a one-stop discrepancy fix:
 
 - **D14 — Stage 10 harness-factory gap, closed at Stage 11 T6.**
   Stage 10 added an `NnMlpConfig` branch to `train.py`'s inline

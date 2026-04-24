@@ -126,9 +126,7 @@ def test_notebook_11_ablation_cell_covers_six_model_families() -> None:
     """
     cells = _load_notebook_cells()
     markdown_sources = [
-        "".join(cell.get("source", []))
-        for cell in cells
-        if cell["cell_type"] == "markdown"
+        "".join(cell.get("source", [])) for cell in cells if cell["cell_type"] == "markdown"
     ]
     closing_md = markdown_sources[-1]
     missing = [name for name in EXPECTED_MODEL_FAMILIES if name not in closing_md]
@@ -229,9 +227,9 @@ def _run_and_assert(executed_path: Path) -> None:
     env = dict(os.environ)
     repo_str = str(REPO_ROOT)
     src_str = str(REPO_ROOT / "src")
-    env["PYTHONPATH"] = os.pathsep.join(
-        [repo_str, src_str, env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([repo_str, src_str, env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -260,9 +258,7 @@ def _run_and_assert(executed_path: Path) -> None:
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     expected_markers = ("T7 Cell 4", "T7 Cell 6")
     for marker in expected_markers:
-        matching = [
-            cell for cell in code_cells if marker in "".join(cell.get("source", []))
-        ]
+        matching = [cell for cell in code_cells if marker in "".join(cell.get("source", []))]
         assert matching, (
             f"Expected a code cell containing marker {marker!r} in the "
             f"executed notebook; found none.  Did the cell labelling "
