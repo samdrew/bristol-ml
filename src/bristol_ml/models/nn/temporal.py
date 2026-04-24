@@ -1,9 +1,20 @@
-"""Temporal convolutional network model — Stage 11 (T2 scaffolding).
+"""Temporal convolutional network model — Stage 11.
 
-This commit (T2) lands the sequence-data pipeline — :class:`_SequenceDataset`
-— plus the :class:`~conf._schemas.NnTemporalConfig` Pydantic schema and the
-matching Hydra YAML group.  The actual :class:`NnTemporalModel` class
-(`fit`, `predict`, `save`, `load`, `metadata`) arrives in T3-T5.
+Implements the Stage 4 :class:`bristol_ml.models.Model` protocol via a
+PyTorch ``nn.Module``-backed Temporal Convolutional Network (TCN — the
+Bai-et-al.-2018 dilated-causal-conv recipe).  Stage 11 is the second
+torch-backed model family; Stage 10 (``mlp.py``) fired the D10 extraction
+seam with it, so the hand-rolled training loop and four-stream seed
+recipe now live in :mod:`bristol_ml.models.nn._training` and are shared
+between both families.
+
+T2 landed the sequence-data pipeline (:class:`_SequenceDataset`) plus the
+:class:`~conf._schemas.NnTemporalConfig` Pydantic schema and matching Hydra
+YAML group.  T3 (this commit) adds the class surface (``__init__``,
+``metadata``, and stubbed ``fit`` / ``predict`` / ``save`` / ``load``
+raising :class:`NotImplementedError`), plus the standalone CLI entry point
+(NFR-5).  T4 fills ``fit`` / ``predict`` with the TCN body + causal
+padding; T5 fills ``save`` / ``load`` with the single-joblib envelope.
 
 Design context (plan §1):
 
@@ -34,22 +45,40 @@ Design context (plan §1):
   the O(1) normalised scale); features are normalised *inside*
   ``forward()``.
 
-Running standalone (NFR-5; `fit` path not yet implemented — T3)::
+Running standalone (NFR-5)::
 
-    python -m bristol_ml.models.nn.temporal --help    # T3
+    python -m bristol_ml.models.nn.temporal --help
+    python -m bristol_ml.models.nn.temporal          # prints config schema
+
+The CLI prints the :class:`~conf._schemas.NnTemporalConfig` JSON schema
+plus the resolved defaults; it does **not** fit a model.  To train,
+use the train CLI with the ``nn_temporal`` model group::
+
+    python -m bristol_ml.train model=nn_temporal
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
+from collections.abc import Callable, Iterable
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
+
+from bristol_ml.models.protocol import ModelMetadata
+from conf._schemas import NnTemporalConfig
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only
     import torch
+    from torch import nn
     from torch.utils.data import Dataset
+
+__all__ = ["NnTemporalModel"]
 
 
 # ``_SequenceDataset`` is a ``torch.utils.data.Dataset`` subclass defined
@@ -223,3 +252,293 @@ def _SequenceDataset(
     """
     cls = _build_sequence_dataset_class()
     return cls(features, target, seq_len)
+
+
+# ---------------------------------------------------------------------------
+# ``NnTemporalModel`` — the public class (T3 scaffold; T4 fills fit/predict;
+# T5 fills save/load).
+# ---------------------------------------------------------------------------
+
+
+class NnTemporalModel:
+    """TCN conforming to the Stage 4 :class:`Model` protocol.
+
+    Stage 11 T3 (this commit) scaffolds the class surface: ``__init__``
+    stores the config and initialises empty fit-state, ``metadata``
+    returns a provenance record built from ``self._config`` plus whatever
+    fit-state is populated, and ``fit`` / ``predict`` / ``save`` / ``load``
+    are :class:`NotImplementedError` stubs pending T4 / T5.
+
+    See ``docs/architecture/layers/models-nn.md`` §"Stage 11 addition"
+    for the full contract; the five Stage 10 PyTorch gotchas in
+    ``src/bristol_ml/models/nn/CLAUDE.md`` all apply unchanged to this
+    class (``sys.modules`` install for pickleable modules, lazy
+    ``import torch``, scaler-buffer registration at module construction,
+    ``torch.load(..., weights_only=True, map_location="cpu")``,
+    single-joblib envelope).
+    """
+
+    def __init__(self, config: NnTemporalConfig) -> None:
+        """Store ``config`` and initialise empty fit-state.
+
+        Parameters
+        ----------
+        config:
+            Validated :class:`~conf._schemas.NnTemporalConfig`.  Pydantic's
+            ``frozen=True`` makes the reference shareable without
+            defensive copy; the receptive-field validator (plan D2 / R6)
+            already ran as part of validation.
+        """
+        self._config: NnTemporalConfig = config
+        # Populated on ``fit()`` (T4).
+        self._feature_columns: tuple[str, ...] = ()
+        self._fit_utc: datetime | None = None
+        self._device: torch.device | None = None
+        self._device_resolved: str | None = None
+        self._seed_used: int | None = None
+        self._best_epoch: int | None = None
+        # The fitted :class:`torch.nn.Module` — populated in ``fit`` (T4).
+        self._module: nn.Module | None = None
+        #: One dict per epoch after ``fit``; keys
+        #: ``{"epoch", "train_loss", "val_loss"}`` (plan D6 / AC-2).  Public
+        #: attribute (trailing underscore mirrors sklearn fitted-state
+        #: convention) so the notebook's live-plot callback and
+        #: :func:`bristol_ml.evaluation.plots.loss_curve` can consume it
+        #: without reaching into private state.  Same semantics as
+        #: Stage 10 ``NnMlpModel.loss_history_``.
+        self.loss_history_: list[dict[str, float]] = []
+
+    # ---------------------------------------------------------------------
+    # Protocol members
+    # ---------------------------------------------------------------------
+
+    def fit(
+        self,
+        features: pd.DataFrame,
+        target: pd.Series,
+        *,
+        seed: int | None = None,
+        epoch_callback: Callable[[dict[str, float]], None] | None = None,
+    ) -> None:
+        """Fit the TCN on the aligned ``(features, target)`` pair.
+
+        T3 ships this as a :class:`NotImplementedError` stub; T4 fills the
+        body with the Stage 10 training-pipeline recipe adapted to
+        sequences: four-stream seeding via
+        :func:`bristol_ml.models.nn._training._seed_four_streams`,
+        module construction (8-block dilated causal TCN per plan D1),
+        scaler-buffer fitting on the train slice, ``_SequenceDataset``
+        wrapping, internal 10 %-tail val split (Stage 10 D9 pattern
+        inherited — **no** D8 offset per the Scope Diff cut), and the
+        shared training loop via
+        :func:`bristol_ml.models.nn._training.run_training_loop`.
+        """
+        raise NotImplementedError("NnTemporalModel.fit is not implemented yet; lands in plan T4.")
+
+    def predict(self, features: pd.DataFrame) -> pd.Series:
+        """Return predictions indexed to the valid-window timestamps.
+
+        T3 ships this as a :class:`NotImplementedError` stub; T4 fills the
+        body with a single-batch forward pass over a
+        :class:`_SequenceDataset` wrapping ``features``, yielding one
+        prediction per valid window (windows that have both their full
+        ``seq_len`` of history *and* an aligned target index).
+
+        Raises
+        ------
+        RuntimeError
+            (Once implemented) if :meth:`fit` has not been called.
+        """
+        raise NotImplementedError(
+            "NnTemporalModel.predict is not implemented yet; lands in plan T4."
+        )
+
+    def save(self, path: Path) -> None:
+        """Serialise the fitted model to the registry-supplied file path.
+
+        T3 ships this as a :class:`NotImplementedError` stub; T5 fills the
+        body with the Stage 10 D5 envelope pattern inherited — a single
+        joblib artefact containing ``state_dict_bytes``, ``config_dump``,
+        ``feature_columns``, ``seq_len``, ``seed_used``, ``best_epoch``,
+        ``loss_history``, ``fit_utc``, ``device_resolved``.  The ``seq_len``
+        field is redundant with ``config_dump`` but rides alongside for
+        an explicit round-trip guard (plan R7).
+        """
+        raise NotImplementedError("NnTemporalModel.save is not implemented yet; lands in plan T5.")
+
+    @classmethod
+    def load(cls, path: Path) -> NnTemporalModel:
+        """Load a previously-saved :class:`NnTemporalModel` from ``path``.
+
+        T3 ships this as a :class:`NotImplementedError` stub; T5 fills the
+        body with the Stage 10 D5 load-path pattern: joblib envelope
+        read, Pydantic re-validation of ``config_dump``, module
+        reconstruction, ``torch.load(BytesIO(state_dict_bytes),
+        weights_only=True, map_location="cpu")``, and a strict
+        ``load_state_dict`` that fails loudly on any buffer / parameter
+        mismatch (plan R3).
+        """
+        raise NotImplementedError("NnTemporalModel.load is not implemented yet; lands in plan T5.")
+
+    @property
+    def metadata(self) -> ModelMetadata:
+        """Immutable provenance record for the most recent fit.
+
+        Before :meth:`fit` has been called, ``fit_utc`` is ``None`` and
+        ``feature_columns`` is empty — matching the Stage 4 protocol
+        convention and the Stage 10 ``NnMlpModel.metadata`` precedent.
+        Once fitted, ``hyperparameters`` carries the architecture
+        summary (``seq_len``, ``num_blocks``, ``channels``,
+        ``kernel_size``, ``dropout``, ``weight_norm``), the optimisation
+        knobs (``learning_rate``, ``weight_decay``, ``batch_size``,
+        ``max_epochs``, ``patience``), the resolved device (plan D6 /
+        Stage 10 D11), and the seed actually used (plan D6 / Stage 10
+        D7').  A downstream registry sidecar reader can reconstruct the
+        fit conditions without reaching into private attributes.
+        """
+        cfg = self._config
+        hyperparameters: dict[str, Any] = {
+            "target_column": cfg.target_column,
+            "seq_len": cfg.seq_len,
+            "num_blocks": cfg.num_blocks,
+            "channels": cfg.channels,
+            "kernel_size": cfg.kernel_size,
+            "dropout": cfg.dropout,
+            "weight_norm": cfg.weight_norm,
+            "learning_rate": cfg.learning_rate,
+            "weight_decay": cfg.weight_decay,
+            "batch_size": cfg.batch_size,
+            "max_epochs": cfg.max_epochs,
+            "patience": cfg.patience,
+            # ``device`` (config-requested) vs ``device_resolved`` (the
+            # actual device ``fit`` landed on after auto-select) are
+            # intentionally both recorded — same provenance split as
+            # Stage 10 ``NnMlpModel.metadata``.
+            "device": cfg.device,
+        }
+        if self._device_resolved is not None:
+            hyperparameters["device_resolved"] = self._device_resolved
+        if self._seed_used is not None:
+            hyperparameters["seed_used"] = self._seed_used
+        if self._best_epoch is not None:
+            hyperparameters["best_epoch"] = self._best_epoch
+        return ModelMetadata(
+            name=_build_metadata_name(cfg),
+            feature_columns=self._feature_columns,
+            fit_utc=self._fit_utc,
+            hyperparameters=hyperparameters,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Private helpers (module-level for testability and pickle safety).
+# ---------------------------------------------------------------------------
+
+
+def _build_metadata_name(config: NnTemporalConfig) -> str:
+    """Build a metadata ``name`` matching ``ModelMetadata.name``'s regex.
+
+    ``ModelMetadata.name`` is constrained to ``^[a-z][a-z0-9_.-]*$``.  The
+    format is ``nn-temporal-b{num_blocks}-c{channels}-k{kernel_size}`` —
+    e.g. ``nn-temporal-b8-c128-k3``, ``nn-temporal-b4-c32-k3`` for the
+    CPU override recipe.  Encodes enough of the architecture to be
+    greppable in a registry leaderboard without serialising every
+    hyperparameter.
+    """
+    return f"nn-temporal-b{config.num_blocks}-c{config.channels}-k{config.kernel_size}"
+
+
+# ---------------------------------------------------------------------------
+# CLI — ``python -m bristol_ml.models.nn.temporal``
+# ---------------------------------------------------------------------------
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m bristol_ml.models.nn.temporal",
+        description=(
+            "Print the NnTemporalConfig JSON schema and the resolved config. "
+            "Training and prediction are exercised via the evaluation "
+            "harness (see `python -m bristol_ml.train model=nn_temporal`)."
+        ),
+    )
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        help=("Hydra overrides, e.g. model.num_blocks=4 model.channels=32 model.device=cpu"),
+    )
+    return parser
+
+
+def _cli_main(argv: Iterable[str] | None = None) -> int:
+    """Standalone CLI entry point — DESIGN §2.1.1 / plan NFR-5.
+
+    Prints the :class:`~conf._schemas.NnTemporalConfig` JSON schema
+    followed by the resolved config summary.  Returns ``0`` on success,
+    ``2`` if a non-``nn_temporal`` model resolves from config (e.g. if
+    the caller forgot ``model=nn_temporal``).
+    """
+    import json
+
+    parser = _build_cli_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    from bristol_ml.config import load_config
+
+    print("NnTemporalConfig JSON schema:")
+    print(json.dumps(NnTemporalConfig.model_json_schema(), indent=2))
+    print()
+    print(
+        "To fit: python -m bristol_ml.train model=nn_temporal "
+        "evaluation.rolling_origin.fixed_window=true "
+        "evaluation.rolling_origin.step=168"
+    )
+
+    cfg = load_config(overrides=["model=nn_temporal", *list(args.overrides)])
+    if cfg.model is None or not isinstance(cfg.model, NnTemporalConfig):
+        print(
+            "No NnTemporalConfig resolved. Ensure `model=nn_temporal` or a "
+            "matching override is present; got "
+            f"{type(cfg.model).__name__ if cfg.model is not None else 'None'}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    nn_cfg = cfg.model
+    logger.info(
+        "NnTemporalConfig: seq_len={} num_blocks={} channels={} "
+        "kernel_size={} dropout={} weight_norm={} learning_rate={} "
+        "batch_size={} max_epochs={} patience={} device={} "
+        "target_column={}",
+        nn_cfg.seq_len,
+        nn_cfg.num_blocks,
+        nn_cfg.channels,
+        nn_cfg.kernel_size,
+        nn_cfg.dropout,
+        nn_cfg.weight_norm,
+        nn_cfg.learning_rate,
+        nn_cfg.batch_size,
+        nn_cfg.max_epochs,
+        nn_cfg.patience,
+        nn_cfg.device,
+        nn_cfg.target_column,
+    )
+    print()
+    print(f"seq_len={nn_cfg.seq_len}")
+    print(f"num_blocks={nn_cfg.num_blocks}")
+    print(f"channels={nn_cfg.channels}")
+    print(f"kernel_size={nn_cfg.kernel_size}")
+    print(f"dropout={nn_cfg.dropout}")
+    print(f"weight_norm={nn_cfg.weight_norm}")
+    print(f"learning_rate={nn_cfg.learning_rate}")
+    print(f"weight_decay={nn_cfg.weight_decay}")
+    print(f"batch_size={nn_cfg.batch_size}")
+    print(f"max_epochs={nn_cfg.max_epochs}")
+    print(f"patience={nn_cfg.patience}")
+    print(f"device={nn_cfg.device}")
+    print(f"target_column={nn_cfg.target_column}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — CLI wrapper
+    raise SystemExit(_cli_main())

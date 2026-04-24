@@ -639,7 +639,7 @@ Verified before T8's final commit.
 
 - [ ] All tests pass: `uv run pytest -q`. No skipped tests; no `xfail` without a linked issue.
 - [ ] Ruff + format + pre-commit clean: `uv run ruff check . && uv run ruff format --check . && uv run pre-commit run --all-files`.
-- [ ] `uv run python -m bristol_ml.models.nn.temporal --help` exits 0 and prints the resolved `NnTemporalConfig` schema, including `seq_len: 168`, `num_blocks: 6`, `channels: 64`, `kernel_size: 3` (NFR-5 + D1 + D2).
+- [ ] `uv run python -m bristol_ml.models.nn.temporal --help` exits 0 and prints the resolved `NnTemporalConfig` schema, including `seq_len: 168`, `num_blocks: 8`, `channels: 128`, `kernel_size: 3` (NFR-5 + D1 amended at Ctrl+G + D2).
 - [ ] `uv run python -m bristol_ml.train model=nn_temporal` leaves exactly one new `run_id` in `data/registry/`.
 - [ ] `uv run python -m bristol_ml.registry list --model-type nn_temporal` prints the new run.
 - [ ] `uv run python -m bristol_ml.registry describe <nn_temporal_run_id>` prints a sidecar whose `type` field is `"nn_temporal"`.
