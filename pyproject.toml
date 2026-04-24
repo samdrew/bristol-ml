@@ -33,6 +33,15 @@ dependencies = [
     # heatmap helper and the ``colorblind`` palette utilities (D1).
     "matplotlib>=3.8,<4",
     "seaborn>=0.13,<1",
+    # Stage 10 (D1): PyTorch for the small-MLP neural network.  The lower
+    # bound is ``>=2.7`` because CUDA 12.8 / Blackwell (RTX 5090, sm_120) is
+    # the dev host — cu128 wheels first landed on the 2.7 track.  On Linux
+    # ``torch`` resolves from the ``pytorch-cu128`` index declared below
+    # (CUDA-enabled wheel, ~2 GB); on macOS / Windows it resolves from PyPI
+    # (MPS-capable on Apple Silicon; CPU-only on Windows).  Plan D11's
+    # auto-select helper falls back to CPU on hosts without CUDA / MPS so
+    # the Stage 10 meetup demo works on any laptop.
+    "torch>=2.7,<3",
 ]
 
 [dependency-groups]
@@ -67,15 +76,33 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["bristol_ml", "conf"]
 
+# Stage 10 (D1): torch is installed from the PyTorch cu128 wheel index on
+# Linux (the dev-host Dockerfile targets ``nvidia/cuda:12.8.0`` / Blackwell)
+# and from PyPI on every other platform (MPS on Apple Silicon, CPU on
+# Windows).  ``explicit = true`` on the index means packages are only taken
+# from it when the ``sources`` table below opts them in — prevents any
+# unrelated dep silently moving to the pytorch index.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-# ``-m "not slow"`` excludes the ``@pytest.mark.slow`` benchmark guards from the
-# default suite (see Stage 7 T4 plan clause — ``test_sarimax_fit_single_fold_``
-# ``completes_under_60_seconds``).  Run them explicitly with ``uv run pytest -m slow``.
-addopts = "-ra --strict-markers --record-mode=none -m 'not slow'"
+# ``-m "not slow and not gpu"`` excludes both the ``@pytest.mark.slow``
+# benchmark guards (Stage 7 T4 clause) and the ``@pytest.mark.gpu``
+# CUDA-path tests (Stage 10 NFR-1 close-match) from the default suite.  Run
+# them explicitly with ``uv run pytest -m slow`` or ``uv run pytest -m gpu``.
+addopts = "-ra --strict-markers --record-mode=none -m 'not slow and not gpu'"
 markers = [
     "slow: benchmark/performance guards excluded from the default run; opt in with -m slow.",
+    "gpu: opt-in CUDA-path tests, skipped when torch.cuda.is_available() is False.",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:vcr.*",

@@ -30,12 +30,14 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
     from bristol_ml.models.io import load_joblib, save_joblib
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
+    from bristol_ml.models.nn.mlp import NnMlpModel
     from bristol_ml.models.protocol import Model, ModelMetadata
     from bristol_ml.models.sarimax import SarimaxModel
     from bristol_ml.models.scipy_parametric import ScipyParametricModel
     from conf._schemas import (
         LinearConfig,
         NaiveConfig,
+        NnMlpConfig,
         SarimaxConfig,
         ScipyParametricConfig,
     )
@@ -47,6 +49,8 @@ __all__ = [
     "ModelMetadata",
     "NaiveConfig",
     "NaiveModel",
+    "NnMlpConfig",
+    "NnMlpModel",
     "SarimaxConfig",
     "SarimaxModel",
     "ScipyParametricConfig",
@@ -87,7 +91,19 @@ def __getattr__(name: str) -> object:
         from bristol_ml.models.scipy_parametric import ScipyParametricModel
 
         return ScipyParametricModel
-    if name in {"NaiveConfig", "LinearConfig", "SarimaxConfig", "ScipyParametricConfig"}:
+    if name == "NnMlpModel":
+        # Stage 10: the ``nn`` sub-package's lazy re-export keeps ``torch``
+        # out of the import graph until this attribute is actually resolved.
+        from bristol_ml.models.nn.mlp import NnMlpModel
+
+        return NnMlpModel
+    if name in {
+        "NaiveConfig",
+        "LinearConfig",
+        "SarimaxConfig",
+        "ScipyParametricConfig",
+        "NnMlpConfig",
+    }:
         from conf import _schemas
 
         return getattr(_schemas, name)
