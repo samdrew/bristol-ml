@@ -195,9 +195,16 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     from bristol_ml.ingestion import neso_forecast as neso_forecast_mod
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
+    from bristol_ml.models.nn.mlp import NnMlpModel
     from bristol_ml.models.sarimax import SarimaxModel
     from bristol_ml.models.scipy_parametric import ScipyParametricModel
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
+    from conf._schemas import (
+        LinearConfig,
+        NaiveConfig,
+        NnMlpConfig,
+        SarimaxConfig,
+        ScipyParametricConfig,
+    )
 
     cfg = load_config(overrides=list(args.overrides))
 
@@ -218,8 +225,8 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     if cfg.model is None:
         print(
             "No model resolved. Ensure `model=linear`, `model=naive`, "
-            "`model=sarimax`, or `model=scipy_parametric` is in the "
-            "resolved Hydra composition.",
+            "`model=sarimax`, `model=scipy_parametric`, or `model=nn_mlp` "
+            "is in the resolved Hydra composition.",
             file=sys.stderr,
         )
         return 2
@@ -291,6 +298,17 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         # its temperature column from that slice.
         primary = ScipyParametricModel(model_cfg)
         primary_kind = "scipy_parametric"
+    elif isinstance(model_cfg, NnMlpConfig):
+        # Stage 10: the MLP consumes the raw feature frame exactly like
+        # SARIMAX / Linear, but feature-column promotion is a no-op at
+        # config-resolution time because :class:`NnMlpModel.fit` falls
+        # back to ``tuple(features.columns)`` when
+        # ``NnMlpConfig.feature_columns is None`` (plan §6 T2).  Keep
+        # the branch structurally parallel to ScipyParametric — no
+        # model_copy, no harness-arg plumbing change — so adding future
+        # model families stays mechanical.
+        primary = NnMlpModel(model_cfg)
+        primary_kind = "nn_mlp"
     else:  # pragma: no cover — the discriminated union is exhaustive
         print(
             f"No harness factory for model type {type(model_cfg).__name__!r}.",
@@ -481,9 +499,18 @@ def _print_metric_table(df: pd.DataFrame) -> None:
 
 def _target_column(model_cfg: object) -> str:
     """Return the resolved model's target column (``"nd_mw"`` default)."""
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
+    from conf._schemas import (
+        LinearConfig,
+        NaiveConfig,
+        NnMlpConfig,
+        SarimaxConfig,
+        ScipyParametricConfig,
+    )
 
-    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig, ScipyParametricConfig)):
+    if isinstance(
+        model_cfg,
+        (NaiveConfig, LinearConfig, SarimaxConfig, ScipyParametricConfig, NnMlpConfig),
+    ):
         return model_cfg.target_column
     return "nd_mw"
 
