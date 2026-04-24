@@ -154,6 +154,33 @@ more than "add one optimiser kwarg".  Do **not** ship a
 `BaseTorchModel` ABC at Stage 10 (scope-diff X7 cut); it would bind
 Stage 11's design before Stage 11's requirements are understood.
 
+## Stage 11 additions
+
+Stage 11 extends this sub-layer with the TCN family (`NnTemporalModel`)
+and fires the Stage 10 D10 extraction seam — the training-loop body now
+lives at `bristol_ml.models.nn._training.run_training_loop` and is
+shared by both `NnMlpModel` and `NnTemporalModel`.  Full TCN-specific
+gotchas (causal padding, weight-norm placement, `_SequenceDataset`
+lazy-window contract, single-joblib `seq_len` field) are added at
+Stage 11 T8.  The item worth capturing at T6-time is the
+**harness-factory catch-up**:
+
+- **D14 — Stage 10 harness-factory gap, closed at Stage 11 T6.**
+  Stage 10 added an `NnMlpConfig` branch to `train.py`'s inline
+  dispatcher but did not add the matching branch to
+  `bristol_ml.evaluation.harness._build_model_from_config`.  The gap
+  was latent — the train CLI was the only user of `NnMlpModel` at the
+  time — but the Stage-11 codebase-map §1.4 flagged it as a
+  one-line discrepancy that would bite anyone driving `model=nn_mlp`
+  through the harness CLI directly.  Stage 11 T6 adds *both* the new
+  `NnTemporalConfig` branch (plan D13 clause iii) *and* the missing
+  `NnMlpConfig` branch in the same commit, titled `Stage 11 T6:
+  dispatcher wiring for nn_temporal + Stage 10 NnMlpConfig catch-up`.
+  The dispatch-test coverage in
+  `tests/unit/evaluation/test_harness.py` now includes a regression
+  guard (`test_harness_build_model_from_config_dispatches_nn_mlp_after_catch_up`)
+  so a Stage-10-style gap cannot recur for a third NN family.
+
 ## Running standalone
 
     python -m bristol_ml.models.nn          --help

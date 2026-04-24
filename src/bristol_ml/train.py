@@ -196,12 +196,14 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
     from bristol_ml.models.nn.mlp import NnMlpModel
+    from bristol_ml.models.nn.temporal import NnTemporalModel
     from bristol_ml.models.sarimax import SarimaxModel
     from bristol_ml.models.scipy_parametric import ScipyParametricModel
     from conf._schemas import (
         LinearConfig,
         NaiveConfig,
         NnMlpConfig,
+        NnTemporalConfig,
         SarimaxConfig,
         ScipyParametricConfig,
     )
@@ -225,8 +227,8 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
     if cfg.model is None:
         print(
             "No model resolved. Ensure `model=linear`, `model=naive`, "
-            "`model=sarimax`, `model=scipy_parametric`, or `model=nn_mlp` "
-            "is in the resolved Hydra composition.",
+            "`model=sarimax`, `model=scipy_parametric`, `model=nn_mlp`, "
+            "or `model=nn_temporal` is in the resolved Hydra composition.",
             file=sys.stderr,
         )
         return 2
@@ -309,6 +311,16 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         # model families stays mechanical.
         primary = NnMlpModel(model_cfg)
         primary_kind = "nn_mlp"
+    elif isinstance(model_cfg, NnTemporalConfig):
+        # Stage 11: the TCN consumes the same raw feature frame the MLP
+        # does (Pattern A exogenous handling per plan D3); feature-column
+        # promotion is a no-op for the same reason the MLP branch gives
+        # — :class:`NnTemporalModel.fit` falls back to
+        # ``tuple(features.columns)`` when
+        # ``NnTemporalConfig.feature_columns is None``.  Branch kept
+        # structurally parallel to the MLP branch (plan D13 clause ii).
+        primary = NnTemporalModel(model_cfg)
+        primary_kind = "nn_temporal"
     else:  # pragma: no cover — the discriminated union is exhaustive
         print(
             f"No harness factory for model type {type(model_cfg).__name__!r}.",
@@ -503,13 +515,21 @@ def _target_column(model_cfg: object) -> str:
         LinearConfig,
         NaiveConfig,
         NnMlpConfig,
+        NnTemporalConfig,
         SarimaxConfig,
         ScipyParametricConfig,
     )
 
     if isinstance(
         model_cfg,
-        (NaiveConfig, LinearConfig, SarimaxConfig, ScipyParametricConfig, NnMlpConfig),
+        (
+            NaiveConfig,
+            LinearConfig,
+            SarimaxConfig,
+            ScipyParametricConfig,
+            NnMlpConfig,
+            NnTemporalConfig,
+        ),
     ):
         return model_cfg.target_column
     return "nd_mw"
