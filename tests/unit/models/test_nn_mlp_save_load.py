@@ -288,3 +288,56 @@ def test_nn_mlp_load_rejects_state_dict_with_missing_buffer(tmp_path: Path) -> N
 
     with pytest.raises(RuntimeError, match=r"(?i)missing|target_std"):
         NnMlpModel.load(artefact_path)
+
+
+# ===========================================================================
+# 6. test_nn_mlp_module_impl_is_pickleable  (CR-1: lazy-class pickleability)
+# ===========================================================================
+
+
+def test_nn_mlp_module_impl_is_pickleable() -> None:
+    """Guards the ``_NnMlpModuleImpl`` lazy-class pickleability contract.
+
+    ``_build_nn_module_class`` defines the :class:`torch.nn.Module`
+    subclass inside a function body (so ``torch`` stays lazily imported).
+    For :func:`pickle` / :func:`torch.save` to round-trip an *instance*
+    of that class, the class itself must be resolvable at its patched
+    ``__module__`` / ``__qualname__`` — which means it has to be
+    installed as an attribute of :mod:`bristol_ml.models.nn.mlp`, not
+    just name-patched.
+
+    Without the ``sys.modules[__name__]._NnMlpModuleImpl = ...`` install
+    line, :func:`pickle.dumps` on an instance raises ``AttributeError:
+    Can't get attribute '_NnMlpModuleImpl' on <module ...>`` — a hazard
+    that the current save path happens to dodge (the envelope carries
+    ``state_dict_bytes`` + scalars, not the module object) but would
+    ambush any future use of the class with joblib / pickle / copy.
+
+    Stage 8 precedent: ``test_parametric_fn_is_pickleable``.
+    Plan clause: Stage 10 Phase 3 review (code-reviewer CR-1 / CR-2 /
+    arch-reviewer Nit-2).
+    """
+    import pickle
+
+    from bristol_ml.models.nn.mlp import _build_nn_module_class
+
+    cls = _build_nn_module_class()
+    instance = cls(input_dim=4, hidden_sizes=(8,), activation="relu", dropout=0.0)
+
+    # (a) The class is resolvable by its patched dotted path.
+    assert cls.__module__ == "bristol_ml.models.nn.mlp"
+    assert cls.__qualname__ == "_NnMlpModuleImpl"
+
+    # (b) Pickle round-trip on the instance succeeds (the guardrail).
+    payload = pickle.dumps(instance)
+    restored = pickle.loads(payload)
+
+    # (c) The restored module is the same subclass and exposes the same
+    # four scaler buffers — proving both the class and the registered
+    # buffers round-tripped cleanly.
+    assert type(restored) is cls
+    for buf_name in ("feature_mean", "feature_std", "target_mean", "target_std"):
+        assert buf_name in dict(restored.named_buffers()), (
+            f"pickle round-trip lost buffer {buf_name!r} — the scaler "
+            "buffers must ride inside state_dict (plan D4 / R3)."
+        )

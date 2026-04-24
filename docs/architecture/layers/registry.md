@@ -26,7 +26,7 @@ The load-bearing design constraint is intent AC-1 — *"save, load, list, maybe 
 | Git-SHA capture helper | ✓ | — |
 | Four-verb Python API: `save`, `load`, `list_runs`, `describe` | ✓ | — |
 | Leaderboard CLI (`python -m bristol_ml.registry list`) | ✓ | — |
-| Type-dispatched `load` (naive / linear / sarimax / scipy_parametric) | ✓ (registry-local dispatcher in `_dispatch.py`) | — |
+| Type-dispatched `load` (naive / linear / sarimax / scipy_parametric / nn_mlp) | ✓ (registry-local dispatcher in `_dispatch.py`) | — |
 | Hosted registry (MLflow / W&B) as a runtime dependency | — | deferred (DESIGN §10; test-only PyFunc adapter proves the graduation path, plan D10) |
 | Model promotion / staging (dev → staging → prod) | — | out of scope (intent §Out of scope) |
 | Versioning beyond last-write-wins | — | out of scope (intent §Out of scope; plan D2) |
@@ -87,7 +87,7 @@ One `run.json` per run, UTF-8, `json.dumps(..., indent=2, allow_nan=True, ensure
 {
   "run_id": "linear-ols-weather-only_20260423T1430",
   "name": "linear-ols-weather-only",                        // ModelMetadata.name (possibly _NamedLinearModel dynamic name)
-  "type": "linear",                                         // "naive" | "linear" | "sarimax" | "scipy_parametric"
+  "type": "linear",                                         // "naive" | "linear" | "sarimax" | "scipy_parametric" | "nn_mlp"
   "feature_set": "weather_only",                            // caller-supplied kwarg (required)
   "target": "nd_mw",                                        // caller-supplied kwarg (required)
   "feature_columns": ["temperature_2m", "dewpoint_2m"],     // from ModelMetadata, ordered
@@ -110,7 +110,7 @@ One `run.json` per run, UTF-8, `json.dumps(..., indent=2, allow_nan=True, ensure
 |-------|--------|------|-------|
 | `run_id` | Computed | `str` | `{metadata.name}_{YYYYMMDDTHHMM}`. Same value as the parent directory name. |
 | `name` | `model.metadata.name` | `str` | Includes the `_NamedLinearModel` dynamic name (e.g. `linear-ols-weather-only`) verbatim. Sidecar is the source of truth for human-readable names; `load()` does **not** re-apply a dynamic wrapper. |
-| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`. Read at `load()` to pick the correct concrete class. |
+| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`, `"nn_mlp"`. Read at `load()` to pick the correct concrete class. |
 | `feature_set` | Caller kwarg | `str` | AC-3 explicit: the registry cannot infer which of the Stage 5 feature sets was in play. |
 | `target` | Caller kwarg | `str` | AC-3 explicit: same rationale. Enables D7 filtering. |
 | `feature_columns` | `model.metadata.feature_columns` | `list[str]` | Ordered list of training-column names. |
@@ -180,6 +180,7 @@ Python's `list` builtin would be shadowed inside the module if the exported symb
 | `"linear"` | `bristol_ml.models.linear.LinearModel` |
 | `"sarimax"` | `bristol_ml.models.sarimax.SarimaxModel` |
 | `"scipy_parametric"` | `bristol_ml.models.scipy_parametric.ScipyParametricModel` |
+| `"nn_mlp"` | `bristol_ml.models.nn.mlp.NnMlpModel` |
 
 The `_NamedLinearModel` wrapper that `train.py` uses for named linear variants dispatches to `"linear"` (via `_CLASS_NAME_TO_TYPE`); `load()` returns a base `LinearModel`, not a re-wrapped `_NamedLinearModel`. The sidecar's `name` field preserves the dynamic name for readers — sidecar-name lookup is the source of truth for the human-readable identifier, not the loaded instance's type.
 

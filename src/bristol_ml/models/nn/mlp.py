@@ -228,9 +228,17 @@ def _build_nn_module_class() -> type[nn.Module]:
     Cached in :data:`_nn_mlp_module_cls` after first construction so
     repeated ``fit`` calls don't re-build the class object.  The class
     is defined inside a function because ``torch`` is imported lazily
-    (to keep the CLI / scaffold path cheap); the defined class is
-    pickleable because its ``__module__`` / ``__qualname__`` are
-    explicitly set to the import path ``bristol_ml.models.nn.mlp``.
+    (to keep the CLI / scaffold path cheap); pickleability across the
+    save/load round-trip is achieved by (a) setting ``__module__`` /
+    ``__qualname__`` to the import path ``bristol_ml.models.nn.mlp``
+    **and** (b) installing the class as a module attribute on
+    :mod:`bristol_ml.models.nn.mlp` before returning it, so that
+    :func:`pickle`'s ``getattr(module, qualname)`` lookup succeeds.
+    Without the module-attribute install the name patch is a lie —
+    :func:`pickle.dumps` raises ``AttributeError`` on the instance.
+    The regression guard is
+    ``test_nn_mlp_module_impl_is_pickleable`` (Stage 8 precedent:
+    ``test_parametric_fn_is_pickleable``).
     """
     global _nn_mlp_module_cls
     if _nn_mlp_module_cls is not None:
@@ -301,6 +309,12 @@ def _build_nn_module_class() -> type[nn.Module]:
 
     _NnMlpModuleImpl.__module__ = "bristol_ml.models.nn.mlp"
     _NnMlpModuleImpl.__qualname__ = "_NnMlpModuleImpl"
+    # Install into the module's namespace so pickle's
+    # ``getattr(sys.modules[__module__], __qualname__)`` lookup resolves
+    # — without this, the name-patch above is a lie and any attempt to
+    # pickle an instance raises AttributeError.  Guarded by
+    # ``test_nn_mlp_module_impl_is_pickleable``.
+    sys.modules[__name__]._NnMlpModuleImpl = _NnMlpModuleImpl  # type: ignore[attr-defined]
     _nn_mlp_module_cls = _NnMlpModuleImpl
     return _NnMlpModuleImpl
 
@@ -571,13 +585,16 @@ class NnMlpModel:
                 val_loss = float(loss_fn(y_val_hat, y_val_norm).detach().cpu().item())
 
             entry = {
-                "epoch": float(epoch),
+                "epoch": int(epoch),
                 "train_loss": train_loss,
                 "val_loss": val_loss,
             }
             loss_history.append(entry)
             if epoch_callback is not None:
-                epoch_callback(entry)
+                # Defensive copy — we do not trust an external callback
+                # not to mutate the dict, which would corrupt
+                # ``loss_history_`` and the live-curve payload.
+                epoch_callback(dict(entry))
 
             if val_loss < best_val_loss - 1e-12:
                 best_val_loss = val_loss

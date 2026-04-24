@@ -50,15 +50,25 @@ Every teammate touching this module must know these five things before
 they open `mlp.py`.  They are not obvious if you have only worked with
 the scipy / statsmodels models.
 
-- **`_NnMlpModule` is module-level, not nested.**  `torch.nn.Module`
-  subclasses must be pickleable for the `state_dict` round-trip to
-  work under joblib.  A nested-class definition inside `_make_mlp`
-  would defeat `NnMlpModel.save` (the `state_dict_bytes` payload is
-  fine, but any helper that pickles a non-tensor object next to it
-  — e.g. the full envelope dict — needs the class to be importable
-  by dotted path).  Keep `_NnMlpModule` module-level; it is the same
-  discipline that `ScipyParametricModel._parametric_fn` required at
-  Stage 8.
+- **`_NnMlpModuleImpl` is a lazy-built class, *installed* onto the
+  module.**  `torch` is imported lazily (next gotcha), so the
+  `torch.nn.Module` subclass is defined inside
+  `_build_nn_module_class()` rather than at module top-level.  That
+  would normally defeat pickleability: `pickle` resolves a class via
+  `getattr(sys.modules[cls.__module__], cls.__qualname__)`, which
+  fails on a closure-scoped class.  The factory therefore does three
+  things before returning the class: (i) patches
+  `__module__ = "bristol_ml.models.nn.mlp"`, (ii) patches
+  `__qualname__ = "_NnMlpModuleImpl"`, and (iii) *installs* the class
+  into `sys.modules[__name__]` so the `getattr` lookup resolves.
+  Without step (iii) the name-patch is a lie and
+  `pickle.dumps(instance)` raises `AttributeError`.  The current save
+  path does not pickle an `nn.Module` instance (the envelope carries
+  only `state_dict_bytes` + scalars), but any future use with joblib /
+  pickle / `copy.deepcopy` would trip on it — so the guarantee is
+  load-bearing.  Regression guard:
+  `test_nn_mlp_module_impl_is_pickleable` (Stage 8 precedent:
+  `test_parametric_fn_is_pickleable`).
 - **Torch is imported lazily, not at module load.**  `mlp.py` imports
   `torch` inside function bodies (`_select_device`,
   `_seed_four_streams`, `_make_mlp`) and guards the class-level type
@@ -166,8 +176,7 @@ under `type = "nn_mlp"` automatically (plan D2 clause iii / v).
 - Parent layer contract — `docs/architecture/layers/models.md` (the
   `Model` protocol + `ModelMetadata` + joblib IO shared by every
   family).
-- Stage 10 plan — `docs/plans/active/10-simple-nn.md` (moved to
-  `completed/` at T7).  Key decisions: D3 (architecture defaults),
+- Stage 10 plan — `docs/plans/completed/10-simple-nn.md`.  Key decisions: D3 (architecture defaults),
   D4 (scaler buffers), D5 revised (single-joblib envelope), D6 (loss
   history + `epoch_callback` seam), D7' (four-stream reproducibility),
   D8 (cold start), D9 (internal 10 % val tail + best-epoch restore),

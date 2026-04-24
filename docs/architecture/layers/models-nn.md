@@ -17,8 +17,8 @@
   interfaces), §2.1.4 (config outside code), §2.1.5 (idempotence — cold
   start per fold), §2.1.6 (provenance — device, seed, best-epoch), §2.1.7
   (tests at boundaries).
-- **Key plan:** [`docs/plans/active/10-simple-nn.md`](../../plans/active/10-simple-nn.md)
-  (moved to `completed/` at T7) — decisions D1 (dependency), D3
+- **Key plan:** [`docs/plans/completed/10-simple-nn.md`](../../plans/completed/10-simple-nn.md)
+  — decisions D1 (dependency), D3
   (architecture defaults), D4 (normalisation), D5 (artefact envelope),
   D6 (loss-curve surfacing), D7' (reproducibility), D8 (cold start),
   D9 (early stopping), D10 (training-loop ownership), D11 (device),
@@ -373,9 +373,8 @@ Each of these is swappable without touching downstream code.
 
 - [`docs/intent/10-simple-nn.md`](../../intent/10-simple-nn.md) — the
   five ACs + "Points for consideration".
-- [`docs/plans/active/10-simple-nn.md`](../../plans/active/10-simple-nn.md)
-  (moved to `completed/` at T7) — twelve decisions, five NFRs, scope
-  diff.
+- [`docs/plans/completed/10-simple-nn.md`](../../plans/completed/10-simple-nn.md)
+  — twelve decisions, five NFRs, scope diff.
 - [`docs/lld/stages/10-simple-nn.md`](../../lld/stages/10-simple-nn.md)
   — Stage 10 retrospective.
 - [`docs/lld/research/10-simple-nn-requirements.md`](../../lld/research/10-simple-nn-requirements.md),

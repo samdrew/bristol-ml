@@ -172,12 +172,26 @@ before you touch `scipy_parametric.py`.
   consolidation of the guard is a separate refactor
   (owner: models-layer housekeeping stage, not Stage 8).
 
+## Neural-network sub-layer (Stage 10+)
+
+The `models/nn/` package is the **neural-network sub-layer** introduced at
+Stage 10 (`NnMlpModel` — simple MLP, first PyTorch family).  It follows the
+same `Model` protocol as every other family; the sub-layer exists to name
+the PyTorch-specific conventions (training loop, four-stream seed recipe,
+`state_dict`-inside-joblib artefact envelope) that Stage 11's temporal
+architecture will inherit.
+
+- Sub-layer contract — `docs/architecture/layers/models-nn.md`.
+- Module guide — `src/bristol_ml/models/nn/CLAUDE.md`.
+
 ## Running standalone
 
     python -m bristol_ml.models.naive           --help
     python -m bristol_ml.models.linear          --help
     python -m bristol_ml.models.sarimax         --help
     python -m bristol_ml.models.scipy_parametric --help
+    python -m bristol_ml.models.nn              --help
+    python -m bristol_ml.models.nn.mlp          --help
 
 The `io.py` and `protocol.py` submodules are not standalone — they are
 consumed by the concrete models. This is intentional: the layer's public
@@ -187,6 +201,7 @@ CLIs are the models, not the plumbing.
 
 - Layer contract — `docs/architecture/layers/models.md` (Stage 4 lands the
   initial version; Stage 7 updates the SARIMAX column).
+- NN sub-layer contract — `docs/architecture/layers/models-nn.md` (Stage 10).
 - Stage 4 plan — `docs/plans/completed/04-linear-baseline.md` §5 (public
   API surface) and §6 Tasks T2–T4.
 - Stage 7 plan — `docs/plans/completed/07-sarimax.md` §5 (SARIMAX config
@@ -197,6 +212,8 @@ CLIs are the models, not the plumbing.
   covariance save format, UTC guard, dispatcher dual-site repeat) and
   §6 Tasks T2–T5 (module-level helpers, scaffold, fit/predict, save/load
   + notebook); retro at `docs/lld/stages/08-scipy-parametric.md`.
+- Stage 10 plan — `docs/plans/completed/10-simple-nn.md`; retro at
+  `docs/lld/stages/10-simple-nn.md`.
 - Protocol rationale — `docs/architecture/decisions/0003-protocol-for-model-interface.md`
   (ADR filed in Task T10).
 - Intent — `docs/intent/04-linear-baseline.md` AC-2 (interface must be

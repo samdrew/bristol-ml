@@ -279,8 +279,10 @@ def test_nn_mlp_different_seeds_produce_different_state_dicts() -> None:
 def test_nn_mlp_fit_populates_loss_history_per_epoch() -> None:
     """Guards AC-3: ``loss_history_`` grows by one dict per epoch.
 
-    Each entry is a dict with keys ``{"epoch", "train_loss", "val_loss"}``
-    all of type float.  The ``epoch`` value is 1-indexed and monotonic.
+    Each entry is a dict with keys ``{"epoch", "train_loss", "val_loss"}``.
+    The ``epoch`` value is an ``int`` (plan D6 — notebook pedagogy
+    expects a 1-indexed counter, not ``1.0`` etc.) and 1-indexed
+    monotonic; ``train_loss`` / ``val_loss`` are finite ``float``.
 
     Plan clause: T2 §Task T2 named test / AC-3 / D6.
     """
@@ -300,8 +302,17 @@ def test_nn_mlp_fit_populates_loss_history_per_epoch() -> None:
             f"loss_history_[{i - 1}] keys must be {{'epoch','train_loss','val_loss'}}; "
             f"got {set(entry.keys())!r}."
         )
-        assert entry["epoch"] == float(i), (
-            f"loss_history_[{i - 1}]['epoch'] must be {float(i)}; got {entry['epoch']!r}."
+        # ``epoch`` is int per plan D6 — guard against a regression
+        # back to the ``float(epoch)`` value that shipped at T2.  The
+        # stricter ``type(...) is int`` (not ``isinstance``) rejects
+        # the ``bool`` subclass of ``int``, which would be a
+        # meaningless but syntactically-valid regression.
+        assert type(entry["epoch"]) is int, (
+            f"loss_history_[{i - 1}]['epoch'] must be int (plan D6); "
+            f"got {type(entry['epoch']).__name__}."
+        )
+        assert entry["epoch"] == i, (
+            f"loss_history_[{i - 1}]['epoch'] must be {i}; got {entry['epoch']!r}."
         )
         for key in ("train_loss", "val_loss"):
             assert isinstance(entry[key], float), (
@@ -320,12 +331,15 @@ def test_nn_mlp_fit_populates_loss_history_per_epoch() -> None:
 def test_nn_mlp_fit_invokes_epoch_callback_when_provided() -> None:
     """Guards AC-3: ``epoch_callback`` is invoked once per appended history entry.
 
-    The callback receives the *same* dict that is appended to
-    ``loss_history_`` — the live-plot seam in the notebook relies on
-    that identity so the plot updates in lock-step with the stored
-    history.
+    The callback receives a dict that *equals* the matching
+    ``loss_history_`` entry, but is a defensive copy — mutating the
+    dict inside the callback must not corrupt the stored history or
+    the live-plot payload.  The live-plot seam in the notebook reads
+    the same keys (``epoch`` / ``train_loss`` / ``val_loss``) from
+    whichever copy it was handed.
 
     Plan clause: T2 §Task T2 named test / AC-3 / X4 re-scoped.
+    Defensive-copy clause: Stage 10 Phase 3 review (code-reviewer N-3).
     """
     features, target = _tiny_fixture()
     cfg = _cpu_config(max_epochs=3, patience=10)
@@ -334,6 +348,10 @@ def test_nn_mlp_fit_invokes_epoch_callback_when_provided() -> None:
 
     def cb(entry: dict[str, float]) -> None:
         received.append(entry)
+        # Deliberately mutate the received dict — a defensive copy
+        # on the production side means this must not corrupt the
+        # stored ``loss_history_`` entry.
+        entry["train_loss"] = float("nan")
 
     model = NnMlpModel(cfg)
     model.fit(features, target, seed=0, epoch_callback=cb)
@@ -343,11 +361,20 @@ def test_nn_mlp_fit_invokes_epoch_callback_when_provided() -> None:
         f"got {len(received)} calls for max_epochs={cfg.max_epochs}."
     )
     for rx, stored in zip(received, model.loss_history_, strict=True):
-        assert rx == stored, (
-            "Each dict passed to epoch_callback must equal the matching "
-            "loss_history_ entry (the live-plot seam contract)."
+        # rx was mutated above — the stored history must not have been.
+        assert math.isfinite(stored["train_loss"]), (
+            "loss_history_ entries must be defensively copied before "
+            "being handed to epoch_callback — external mutation of the "
+            "callback argument just clobbered the stored entry's "
+            "train_loss."
+        )
+        assert rx is not stored, (
+            "epoch_callback must receive a defensive copy, not the "
+            "same dict object that is appended to loss_history_ "
+            "(Stage 10 Phase 3 review — code-reviewer N-3)."
         )
         assert set(rx.keys()) == {"epoch", "train_loss", "val_loss"}
+        assert set(stored.keys()) == {"epoch", "train_loss", "val_loss"}
 
 
 # ===========================================================================
@@ -536,3 +563,54 @@ def test_nn_mlp_predict_before_fit_raises_runtime_error() -> None:
     model = NnMlpModel(_cpu_config())
     with pytest.raises(RuntimeError, match="fit"):
         model.predict(features)
+
+
+# ===========================================================================
+# Bonus — val slice is the contiguous 10 % tail (plan D9 / rolling origin)
+# Phase 3 arch-reviewer N-3: make the implicit D9 contract explicit — the
+# val tail must be the last ``max(1, n // 10)`` rows of ``features`` /
+# ``target`` in time order.  A silent regression (e.g. to a shuffled or
+# stratified split) would leak future information into the val loss and
+# destroy the rolling-origin semantics the harness relies on.
+# ===========================================================================
+
+
+def test_nn_mlp_val_slice_is_contiguous_tail_of_train() -> None:
+    """Guards plan D9: val tail is the contiguous last 10 % of train rows.
+
+    The private split slices raw numpy positionally:
+    ``X_train = X_arr[:n_train]`` / ``X_val = X_arr[n_train:]`` with
+    ``n_val = max(1, n // 10)``.  We pin down this contract from the
+    outside by comparing the fitted ``feature_mean`` buffer to the
+    mean of the first ``n - n_val`` rows of the input features —
+    equality under float32 tolerance proves the train slice (and by
+    complement the val slice) matched the positional tail split.
+
+    Plan clause: Stage 10 plan D9 / Stage 10 Phase 3 review (arch-reviewer N-3).
+    """
+    import torch
+
+    features, target = _tiny_fixture(n=60, n_features=3, seed=0)
+    cfg = _cpu_config(max_epochs=1, patience=10)
+    model = NnMlpModel(cfg)
+    model.fit(features, target, seed=0)
+
+    n = len(features)
+    n_val = max(1, n // 10)
+    n_train = n - n_val
+
+    expected_mean = features.iloc[:n_train].to_numpy(dtype=np.float32).mean(axis=0)
+    got_mean = model._module.feature_mean.detach().cpu().numpy()
+
+    # Strict float32 equality: both quantities are computed by
+    # ``ndarray.mean(axis=0)`` on the same raw bytes — the only way this
+    # can diverge is if the train slice is not ``X_arr[:n_train]``.
+    assert torch.equal(
+        torch.from_numpy(expected_mean),
+        torch.from_numpy(got_mean),
+    ), (
+        "NnMlpModel.fit: feature_mean buffer must be the mean of the first "
+        f"{n_train} rows (plan D9 — val tail is the contiguous last "
+        f"{n_val} rows).  A shuffled split would leak future rows into the "
+        "val loss and destroy the rolling-origin semantics."
+    )
