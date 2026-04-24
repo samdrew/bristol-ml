@@ -1,0 +1,60 @@
+# @package model
+#
+# Temporal convolutional network (TCN) — Stage 11.  Select at the CLI with
+#   uv run python -m bristol_ml.train model=nn_temporal
+#
+# Plan §1 D1 sizes the defaults for the Blackwell dev host (CUDA 12.8 /
+# cu128 wheels, inherited from Stage 10 D1).  ~800 k parameters on ~8 760
+# training rows — large enough to meaningfully exceed the MLP's capacity
+# without crossing into over-fit territory (weight-norm + dropout=0.2 as
+# the capacity-regularisation trade).  Receptive field closed-form at these
+# defaults: 1 + 2*(kernel_size-1)*(2**num_blocks - 1) = 1021 steps, which
+# covers the weekly cycle (168 h) with ~6x headroom.
+#
+# CPU-only demo?  A tractable override recipe (~10 min on a 4-core laptop
+# per plan NFR-2 / domain research §8) is:
+#
+#   uv run python -m bristol_ml.train model=nn_temporal \
+#     model.num_blocks=4 model.channels=32 model.batch_size=32 \
+#     model.max_epochs=20 model.device=cpu
+#
+# The layer doc (docs/architecture/layers/models-nn.md §"Stage 11 addition")
+# and the notebook preamble cell repeat this recipe.  Observed CUDA
+# wall-clock at defaults: < 5 min on Blackwell.  Observed CPU wall-clock
+# at the override recipe: < 10 min on a 4-core laptop.  Both numbers are
+# recorded in docs/lld/stages/11-complex-nn.md as the stage retro.
+#
+# Plan §1 D2 ``seq_len: 168`` anchors the weekly cycle.  A Pydantic
+# @model_validator rejects configurations where ``seq_len`` is small
+# relative to the architecture's receptive field — the heuristic is loose
+# (``seq_len >= max(2*kernel_size, receptive_field // 8)``) but catches
+# the common footgun of keeping 8-block CUDA defaults while trimming
+# ``seq_len`` alone.
+#
+# Plan §1 D3 Pattern A exogenous handling — every feature column rides
+# inside the sequence window.  ``feature_columns: null`` → the harness
+# passes the full weather + calendar feature set; set an explicit list
+# for ablation experiments.
+#
+# Plan §1 D6 reproducibility inherits Stage 10 D7' unchanged: four-stream
+# seeding + ``cudnn.deterministic`` on CUDA.  AC-4 ``torch.allclose`` bar
+# applies cross-device.  Pin ``device: cpu`` for the NFR-1 CPU bit-identity
+# test; pin ``device: cuda`` to force GPU use when both CUDA and MPS
+# are detected.
+
+type: nn_temporal
+target_column: nd_mw
+feature_columns: null
+seq_len: 168
+num_blocks: 8
+channels: 128
+kernel_size: 3
+dropout: 0.2
+weight_norm: true
+learning_rate: 1.0e-3
+weight_decay: 0.0
+batch_size: 256
+max_epochs: 100
+patience: 10
+seed: null
+device: auto

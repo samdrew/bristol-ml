@@ -33,13 +33,11 @@ import unittest.mock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # ---------------------------------------------------------------------------
 # Imports-under-test — keep them tuple-form to mirror the pattern in
 # ``test_nn_mlp_fit_predict.py`` (single import per module).
 # ---------------------------------------------------------------------------
-
 from bristol_ml.models.nn._training import _seed_four_streams, run_training_loop
 from bristol_ml.models.nn.mlp import NnMlpModel
 from conf._schemas import NnMlpConfig
@@ -56,19 +54,14 @@ def _tiny_fixture(
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Return a deterministic ``(features, target)`` pair for structural fit tests.
 
-    60 rows × 3 features satisfies the 10 % val-tail split (n_val = 6,
+    60 rows x 3 features satisfies the 10 % val-tail split (n_val = 6,
     n_train = 54) with comfortable room, and keeps each test well inside
     a one-second budget.  The data function is immaterial to the structural
     assertions.
     """
     rng = np.random.default_rng(seed)
     X = rng.standard_normal(size=(n, n_features)).astype(np.float64)
-    y = (
-        0.7 * X[:, 0]
-        - 0.3 * X[:, 1]
-        + 0.5 * np.sin(X[:, 2])
-        + 0.05 * rng.standard_normal(size=n)
-    )
+    y = 0.7 * X[:, 0] - 0.3 * X[:, 1] + 0.5 * np.sin(X[:, 2]) + 0.05 * rng.standard_normal(size=n)
     index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
     features = pd.DataFrame(X, columns=[f"f{i}" for i in range(n_features)], index=index)
     target = pd.Series(y, index=index, name="nd_mw")
@@ -157,7 +150,8 @@ def test_nn_mlp_fit_calls_shared_run_training_loop() -> None:
     module-level name that is never called — so the spy would record zero
     calls, and this test would fail.
 
-    Plan clause: Stage 11 T1 / D4 / AC-2 ("test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction").
+    Plan clause: Stage 11 T1 / D4 / AC-2
+    (``test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction``).
     """
     # Import the real implementation so the spy can delegate to it.
     real_run_training_loop = run_training_loop
