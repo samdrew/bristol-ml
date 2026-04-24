@@ -1001,29 +1001,165 @@ class NnTemporalModel:
     def save(self, path: Path) -> None:
         """Serialise the fitted model to the registry-supplied file path.
 
-        T3 ships this as a :class:`NotImplementedError` stub; T5 fills the
-        body with the Stage 10 D5 envelope pattern inherited — a single
-        joblib artefact containing ``state_dict_bytes``, ``config_dump``,
-        ``feature_columns``, ``seq_len``, ``seed_used``, ``best_epoch``,
-        ``loss_history``, ``fit_utc``, ``device_resolved``.  The ``seq_len``
-        field is redundant with ``config_dump`` but rides alongside for
-        an explicit round-trip guard (plan R7).
+        Plan D5: ``path`` is the single joblib-artefact file path (the
+        Stage 9 registry hard-codes ``artefact/model.joblib`` — see
+        ``src/bristol_ml/registry/_fs.py::_atomic_write_run``).  The
+        envelope written carries the ``state_dict`` bytes (via
+        ``torch.save`` to a ``BytesIO`` — scaler buffers ride inside),
+        the ``NnTemporalConfig.model_dump()``, the resolved feature
+        column tuple, the ``seq_len`` (redundant with ``config_dump`` but
+        rides alongside for the explicit round-trip guard — plan R7),
+        the warmup-prefix DataFrame (so :meth:`predict` can produce one
+        prediction per input row after a load — evaluation-layer §5
+        length-match contract), and the provenance scalars
+        (``seed_used``, ``best_epoch``, ``loss_history``, ``fit_utc``,
+        ``device_resolved``).
+
+        The write is atomic — :func:`bristol_ml.models.io.save_joblib`
+        stages to a sibling ``.tmp`` and renames via :func:`os.replace`,
+        matching the Stage 4 contract.  No sibling ``model.pt`` or
+        ``hyperparameters.json`` file is created — the D5 single-envelope
+        disposition is structurally enforced by
+        ``test_nn_temporal_save_writes_single_joblib_file_at_given_path``.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit` has not been called — save-before-fit is
+            undefined per the Stage 4 :class:`Model` protocol.
         """
-        raise NotImplementedError("NnTemporalModel.save is not implemented yet; lands in plan T5.")
+        import io as _io
+
+        import torch
+
+        from bristol_ml.models.io import save_joblib
+
+        if self._module is None or self._warmup_features is None:
+            raise RuntimeError(
+                "NnTemporalModel.save requires fit() to have been called first; "
+                "state_dict and warmup prefix are undefined before fit."
+            )
+
+        # state_dict → bytes.  ``.cpu()`` on every tensor so the envelope
+        # is portable across devices; ``torch.load(..., map_location="cpu")``
+        # in :meth:`load` mirrors this (Stage 10 D5 recipe inherited).
+        cpu_state_dict = {k: v.detach().cpu() for k, v in self._module.state_dict().items()}
+        buf = _io.BytesIO()
+        torch.save(cpu_state_dict, buf)
+        state_dict_bytes: bytes = buf.getvalue()
+
+        envelope: dict[str, Any] = {
+            "state_dict_bytes": state_dict_bytes,
+            "config_dump": self._config.model_dump(),
+            "feature_columns": tuple(self._feature_columns),
+            # ``seq_len`` is redundant with ``config_dump["seq_len"]`` but
+            # rides alongside for the explicit round-trip guard (plan R7
+            # / test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict).
+            "seq_len": int(self._config.seq_len),
+            # Warmup prefix — ``predict`` prepends this to the input
+            # features so a loaded model still yields
+            # ``len(predict) == len(features)`` (evaluation-layer §5).
+            "warmup_features": self._warmup_features.copy(),
+            "seed_used": self._seed_used,
+            "best_epoch": self._best_epoch,
+            "loss_history": list(self.loss_history_),
+            "fit_utc": self._fit_utc,
+            "device_resolved": self._device_resolved,
+        }
+        save_joblib(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> NnTemporalModel:
         """Load a previously-saved :class:`NnTemporalModel` from ``path``.
 
-        T3 ships this as a :class:`NotImplementedError` stub; T5 fills the
-        body with the Stage 10 D5 load-path pattern: joblib envelope
-        read, Pydantic re-validation of ``config_dump``, module
-        reconstruction, ``torch.load(BytesIO(state_dict_bytes),
-        weights_only=True, map_location="cpu")``, and a strict
-        ``load_state_dict`` that fails loudly on any buffer / parameter
-        mismatch (plan R3).
+        Plan D5: reads the joblib envelope, reconstructs
+        :class:`NnTemporalConfig` from ``config_dump`` (Pydantic
+        re-validation catches schema drift — plan R2), instantiates an
+        ``NnTemporalModel``, materialises the ``state_dict`` via
+        ``torch.load(BytesIO(state_dict_bytes), weights_only=True,
+        map_location="cpu")``, and calls ``load_state_dict(strict=True)``.
+        ``weights_only=True`` keeps PyTorch 2.6+'s safety rail active on
+        the inner bytes payload; ``strict=True`` is load-bearing for
+        plan R3 (a dropped scaler buffer would silently break
+        inverse-normalisation at :meth:`predict` otherwise).
+
+        The loaded model lives on CPU regardless of the device it was
+        fitted on — :meth:`predict` moves tensors to ``self._device`` at
+        call time and the buffers ride along with the module.  The
+        warmup-prefix DataFrame is restored so ``predict`` yields
+        ``len(predict) == len(features)`` (evaluation-layer §5).
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``path`` does not exist (propagated from :mod:`joblib`).
+        ValueError
+            If the envelope is missing ``feature_columns`` (a structural
+            signal it was not produced by a fitted ``NnTemporalModel``)
+            or if the envelope's ``seq_len`` disagrees with the one in
+            ``config_dump`` (plan R7 explicit round-trip guard).
         """
-        raise NotImplementedError("NnTemporalModel.load is not implemented yet; lands in plan T5.")
+        import io as _io
+
+        import torch
+
+        from bristol_ml.models.io import load_joblib
+
+        envelope = load_joblib(path)
+
+        # Pydantic re-validation — schema-drift guard (plan R2).
+        config = NnTemporalConfig.model_validate(envelope["config_dump"])
+
+        # Explicit round-trip guard (plan R7): the top-level ``seq_len``
+        # field and the value inside ``config_dump`` must agree.
+        envelope_seq_len = envelope.get("seq_len")
+        if envelope_seq_len is not None and int(envelope_seq_len) != int(config.seq_len):
+            raise ValueError(
+                "NnTemporalModel.load: envelope seq_len field "
+                f"({envelope_seq_len}) disagrees with config_dump seq_len "
+                f"({config.seq_len}); artefact is corrupted (plan R7)."
+            )
+
+        model = cls(config)
+
+        # Rebuild the nn.Module with the same input_dim the fit used.
+        feature_cols: tuple[str, ...] = tuple(envelope["feature_columns"])
+        if not feature_cols:
+            raise ValueError(
+                "NnTemporalModel.load: envelope carries empty feature_columns; "
+                "this envelope was not produced by a fitted NnTemporalModel."
+            )
+        module = _make_tcn(input_dim=len(feature_cols), config=config)
+
+        # Materialise the saved state_dict on CPU and load strictly — a
+        # missing or extra key (e.g. a dropped scaler buffer) fails
+        # loudly here rather than silently skewing predictions later.
+        buf = _io.BytesIO(envelope["state_dict_bytes"])
+        state_dict = torch.load(buf, weights_only=True, map_location="cpu")
+        module.load_state_dict(state_dict, strict=True)
+
+        # Restore fit-state attributes.  ``loss_history_`` is rebuilt as
+        # a fresh list so mutations via the returned instance do not
+        # alias back into the envelope dict.  The warmup-prefix
+        # DataFrame is defensively copied for the same reason.
+        model._feature_columns = feature_cols
+        model._fit_utc = envelope.get("fit_utc")
+        model._device = torch.device("cpu")
+        model._device_resolved = envelope.get("device_resolved")
+        model._seed_used = envelope.get("seed_used")
+        model._best_epoch = envelope.get("best_epoch")
+        model._module = module
+        warmup = envelope.get("warmup_features")
+        if warmup is None:
+            raise ValueError(
+                "NnTemporalModel.load: envelope is missing the warmup_features "
+                "field; this artefact predates the Stage 11 T5 envelope schema "
+                "or was produced by code that violated the save contract."
+            )
+        model._warmup_features = warmup.copy()
+        model.loss_history_ = [dict(e) for e in envelope.get("loss_history", [])]
+
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:
