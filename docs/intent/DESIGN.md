@@ -249,7 +249,10 @@ bristol-ml-reference/
     │   └── decisions/           # MADR ADRs (append-only by convention)
     │       ├── 0001-use-hydra-plus-pydantic.md
     │       └── 0002-filesystem-registry-first.md
-    ├── stages/                  # Per-stage navigational hub (entry point for "implement Stage N")
+    ├── plans/                   # Per-stage implementation plans
+    │   ├── active/              # Plans for approval or implementation
+    │   └── completed/           # Plans where they are fully implemented    
+    ├── stages/                  # Deprecated in favour of plans/
     │   ├── README.md            # Index across all stages (Warn: status transitions only)
     │   └── NN-<slug>.md         # Allow: living work brief per stage
     └── lld/                     # Allow: low-level design
