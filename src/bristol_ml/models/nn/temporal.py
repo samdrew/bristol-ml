@@ -10,11 +10,12 @@ between both families.
 
 T2 landed the sequence-data pipeline (:class:`_SequenceDataset`) plus the
 :class:`~conf._schemas.NnTemporalConfig` Pydantic schema and matching Hydra
-YAML group.  T3 (this commit) adds the class surface (``__init__``,
-``metadata``, and stubbed ``fit`` / ``predict`` / ``save`` / ``load``
-raising :class:`NotImplementedError`), plus the standalone CLI entry point
-(NFR-5).  T4 fills ``fit`` / ``predict`` with the TCN body + causal
-padding; T5 fills ``save`` / ``load`` with the single-joblib envelope.
+YAML group.  T3 added the class surface (``__init__``, ``metadata``,
+standalone CLI entry point) with ``fit`` / ``predict`` / ``save`` /
+``load`` as :class:`NotImplementedError` stubs.  T4 (this commit) fills
+``fit`` and ``predict`` with the TCN body, causal padding, and the
+shared training-loop integration; T5 fills ``save`` / ``load`` with the
+single-joblib envelope.
 
 Design context (plan §1):
 
@@ -62,7 +63,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -70,15 +71,105 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from bristol_ml.models.nn._training import _seed_four_streams, run_training_loop
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import NnTemporalConfig
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only
     import torch
     from torch import nn
-    from torch.utils.data import Dataset
+    from torch.utils.data import DataLoader, Dataset
 
 __all__ = ["NnTemporalModel"]
+
+
+# ---------------------------------------------------------------------------
+# Valid device strings (plan D6 / Stage 10 D11 inheritance).  Duplicated
+# from ``mlp.py`` rather than imported so a future ``_select_device``
+# consolidation into ``_training.py`` is a mechanical search-and-replace
+# and the log message family ("NnTemporalModel: ...") stays honest.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_DEVICES: tuple[str, ...] = ("auto", "cpu", "cuda", "mps")
+
+
+def _select_device(preference: str) -> torch.device:
+    """Resolve a ``NnTemporalConfig.device`` string to a concrete :class:`torch.device`.
+
+    Stage 10 D11 inheritance — same resolution order as
+    :func:`bristol_ml.models.nn.mlp._select_device`.  Duplicated here so
+    the INFO log line names the right model family and so a future
+    consolidation into ``_training.py`` stays mechanical.
+
+    Resolution order when ``preference == "auto"``:
+
+    1. :func:`torch.cuda.is_available` → ``cuda``;
+    2. :func:`torch.backends.mps.is_available` → ``mps``;
+    3. ``cpu``.
+
+    Explicit values (``"cpu"`` / ``"cuda"`` / ``"mps"``) are honoured
+    verbatim; unknown values raise :class:`ValueError` rather than
+    falling back silently to CPU.
+    """
+    import torch
+
+    if preference not in _ALLOWED_DEVICES:
+        raise ValueError(
+            f"NnTemporalConfig.device must be one of {_ALLOWED_DEVICES!r}; got {preference!r}."
+        )
+    if preference == "auto":
+        if torch.cuda.is_available():
+            resolved = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            resolved = torch.device("mps")
+        else:
+            resolved = torch.device("cpu")
+    else:
+        resolved = torch.device(preference)
+    logger.info(
+        "NnTemporalModel: device preference={!r} resolved to {!r}.",
+        preference,
+        str(resolved),
+    )
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Helper — DataLoader device wrapper
+# ---------------------------------------------------------------------------
+
+
+class _DeviceDataLoader:
+    """Iterable adapter that moves each batch from a ``DataLoader`` to ``device``.
+
+    The Stage 10 MLP's ``fit`` pre-loads the training tensors onto the
+    resolved device *before* constructing the :class:`TensorDataset`, so
+    its DataLoader already yields device tensors and
+    :func:`run_training_loop`'s docstring-level "batches already on
+    device" contract holds trivially.  Stage 11's :class:`_SequenceDataset`
+    returns CPU tensors (from numpy via :func:`torch.from_numpy`) because
+    pre-loading all windows onto the GPU would reconstruct the
+    eagerly-materialised memory footprint plan D7 cut (domain research
+    §4).  We therefore move each batch at iteration time; on CPU this is
+    a no-op, on CUDA / MPS it is a single ``.to(device)`` per batch.
+
+    Iterable semantics (not generator): :meth:`__iter__` returns a fresh
+    iterator on each call so the outer epoch loop inside
+    :func:`run_training_loop` can re-iterate across epochs.  A bare
+    generator returned by ``yield`` at module level would be exhausted
+    after one epoch and silently stop training.
+    """
+
+    def __init__(self, loader: DataLoader, device: torch.device) -> None:
+        self._loader = loader
+        self._device = device
+
+    def __iter__(self) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
+        for x_batch, y_batch in self._loader:
+            yield x_batch.to(self._device), y_batch.to(self._device)
+
+    def __len__(self) -> int:
+        return len(self._loader)
 
 
 # ``_SequenceDataset`` is a ``torch.utils.data.Dataset`` subclass defined
@@ -255,6 +346,245 @@ def _SequenceDataset(
 
 
 # ---------------------------------------------------------------------------
+# TCN module (plan D1 — dilated causal conv stack, Bai et al. 2018 recipe).
+# Lazy-built for the same reason as :class:`_SequenceDataset` — keeps the
+# scaffold / CLI import path torch-free.  The installed class follows the
+# Stage 10 Gotcha 1 pickleability recipe (``__module__`` / ``__qualname__``
+# patched + module-level ``sys.modules`` install).
+# ---------------------------------------------------------------------------
+
+_nn_temporal_module_cls: type[nn.Module] | None = None
+
+
+def _build_temporal_module_class() -> type[nn.Module]:
+    """Return the :class:`torch.nn.Module` subclass used by the TCN.
+
+    Cached in :data:`_nn_temporal_module_cls` after first construction so
+    repeated :meth:`NnTemporalModel.fit` calls don't re-build the class
+    object.  The class is defined inside a function because ``torch`` is
+    imported lazily; pickleability across the save/load round-trip is
+    achieved by (a) setting ``__module__`` / ``__qualname__`` to the
+    import path and (b) installing the class as a module attribute on
+    :mod:`bristol_ml.models.nn.temporal` before returning it.  Same
+    recipe as Stage 10 ``_NnMlpModuleImpl`` — see
+    ``src/bristol_ml/models/nn/CLAUDE.md`` "PyTorch specifics" gotcha 1.
+
+    The ``_TemporalBlockImpl`` inner class (a single residual TCN block)
+    is also installed onto ``sys.modules[__name__]`` so a future
+    ``torch.save`` on a module instance that contains a block survives
+    the full getattr-based pickle protocol.
+    """
+    global _nn_temporal_module_cls
+    if _nn_temporal_module_cls is not None:
+        return _nn_temporal_module_cls
+
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+
+    try:
+        # PyTorch 2.1+ moved ``weight_norm`` to the parametrizations API.
+        from torch.nn.utils.parametrizations import weight_norm as _weight_norm
+    except ImportError:  # pragma: no cover — torch < 2.1 fallback
+        from torch.nn.utils import weight_norm as _weight_norm
+
+    class _TemporalBlockImpl(nn.Module):
+        """Single residual TCN block with left-only causal padding.
+
+        Two stacked dilated ``Conv1d`` layers, each followed by
+        :class:`~torch.nn.LayerNorm` (over the channel dimension — not
+        over time, which would leak BatchNorm-style running statistics
+        across timesteps per domain §6 pitfall 4), ReLU, and dropout.
+        A 1x1 convolution provides the residual skip when the channel
+        count changes between the block's input and output.
+
+        Causal padding is realised via :func:`torch.nn.functional.pad`
+        with ``pad = (left, 0)`` — right-side zero, left-side
+        ``(kernel_size - 1) * dilation`` — applied *before* a
+        ``Conv1d(padding=0)`` call.  This is the Bai et al. 2018 recipe
+        with the domain §6 pitfall-4 mitigation wired in by construction:
+        the convolution cannot see any input position strictly to the
+        right of the current output position, no matter the dilation.
+        """
+
+        def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            *,
+            kernel_size: int,
+            dilation: int,
+            dropout: float,
+            weight_norm: bool,
+        ) -> None:
+            super().__init__()
+            self.kernel_size = kernel_size
+            self.dilation = dilation
+            self.left_pad = (kernel_size - 1) * dilation
+
+            conv1 = nn.Conv1d(
+                in_channels, out_channels, kernel_size=kernel_size, padding=0, dilation=dilation
+            )
+            conv2 = nn.Conv1d(
+                out_channels, out_channels, kernel_size=kernel_size, padding=0, dilation=dilation
+            )
+            if weight_norm:
+                conv1 = _weight_norm(conv1)
+                conv2 = _weight_norm(conv2)
+            self.conv1 = conv1
+            self.conv2 = conv2
+            # LayerNorm(channels) applied to ``x.transpose(1, 2)`` (shape
+            # ``(B, L, C)``) normalises across C for each (B, L) pair —
+            # the conventional TCN choice.
+            self.norm1 = nn.LayerNorm(out_channels)
+            self.norm2 = nn.LayerNorm(out_channels)
+            self.dropout1 = nn.Dropout(p=dropout)
+            self.dropout2 = nn.Dropout(p=dropout)
+            # ReLU is stateless; one module shared across both
+            # activations is fine but instantiating two matches
+            # weight-norm placement conventions in Bai 2018.
+            self.relu1 = nn.ReLU()
+            self.relu2 = nn.ReLU()
+            if in_channels == out_channels:
+                self.downsample: nn.Module | None = None
+            else:
+                self.downsample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """``x: (B, C_in, L)`` → ``(B, C_out, L)`` with causal receptive field."""
+            residual = x if self.downsample is None else self.downsample(x)
+
+            y = F.pad(x, (self.left_pad, 0))
+            y = self.conv1(y)
+            # LayerNorm over channels: transpose (B, C, L) ↔ (B, L, C).
+            y = self.norm1(y.transpose(1, 2)).transpose(1, 2)
+            y = self.relu1(y)
+            y = self.dropout1(y)
+
+            y = F.pad(y, (self.left_pad, 0))
+            y = self.conv2(y)
+            y = self.norm2(y.transpose(1, 2)).transpose(1, 2)
+            y = self.relu2(y)
+            y = self.dropout2(y)
+
+            return y + residual
+
+    class _NnTemporalModuleImpl(nn.Module):
+        """TCN with z-score input + target buffers (plan D1 + D5 + Stage 10 D4).
+
+        Forward signature: ``(B, seq_len, n_features)`` in → ``(B,)`` out,
+        both ``float32``.  The output is in **normalised target space**;
+        the caller (:meth:`NnTemporalModel.predict`) applies the inverse
+        ``y = y_norm * target_std + target_mean`` transform.  Training
+        loss is computed against the **normalised** target yielded by the
+        ``_SequenceDataset`` wrapper (MSELoss operates on O(1) scale,
+        matching Stage 10's convention).
+        """
+
+        def __init__(
+            self,
+            *,
+            input_dim: int,
+            seq_len: int,
+            num_blocks: int,
+            channels: int,
+            kernel_size: int,
+            dropout: float,
+            weight_norm: bool,
+        ) -> None:
+            super().__init__()
+            self.input_dim = input_dim
+            self.seq_len = seq_len
+            self.num_blocks = num_blocks
+            self.channels = channels
+            self.kernel_size = kernel_size
+            self.dropout_p = dropout
+            self.weight_norm = weight_norm
+
+            # Scaler buffers — registered deterministically at construction
+            # time so ``load_state_dict(strict=True)`` has the keys in
+            # place before the loaded bytes overwrite them (Stage 10 D4
+            # / Gotcha 3).  Placeholder zeros/ones keep pre-fit inference
+            # numerically finite; :meth:`NnTemporalModel.fit` overwrites
+            # them from the training slice's column statistics.
+            self.register_buffer("feature_mean", torch.zeros(input_dim))
+            self.register_buffer("feature_std", torch.ones(input_dim))
+            self.register_buffer("target_mean", torch.zeros(1))
+            self.register_buffer("target_std", torch.ones(1))
+
+            blocks: list[nn.Module] = []
+            in_ch = input_dim
+            for block_idx in range(num_blocks):
+                dilation = 2**block_idx
+                blocks.append(
+                    _TemporalBlockImpl(
+                        in_ch,
+                        channels,
+                        kernel_size=kernel_size,
+                        dilation=dilation,
+                        dropout=dropout,
+                        weight_norm=weight_norm,
+                    )
+                )
+                in_ch = channels
+            self.blocks: nn.ModuleList = nn.ModuleList(blocks)
+            # 1x1 head maps channel axis down to 1 scalar per timestep;
+            # the forward pass then reads the last timestep only.
+            self.head: nn.Module = nn.Conv1d(channels, 1, kernel_size=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """``x: (B, seq_len, n_features)`` → ``(B,)`` normalised predictions."""
+            # Normalise features via the scaler buffers (plan D5).
+            z = (x - self.feature_mean) / self.feature_std
+            # Transpose to the (B, C, L) layout Conv1d expects.
+            y = z.transpose(1, 2)
+            for block in self.blocks:
+                y = block(y)
+            # (B, channels, L) → (B, 1, L) → (B, 1) → (B,).
+            y = self.head(y)
+            y = y[:, :, -1]
+            return y.squeeze(-1)
+
+    _TemporalBlockImpl.__module__ = "bristol_ml.models.nn.temporal"
+    _TemporalBlockImpl.__qualname__ = "_TemporalBlockImpl"
+    _NnTemporalModuleImpl.__module__ = "bristol_ml.models.nn.temporal"
+    _NnTemporalModuleImpl.__qualname__ = "_NnTemporalModuleImpl"
+    # Install into module namespace so pickle's
+    # ``getattr(sys.modules[__module__], __qualname__)`` lookup resolves
+    # — Stage 10 Gotcha 1 inherited.  Without this, any future
+    # ``copy.deepcopy`` on a fitted ``NnTemporalModel`` raises
+    # ``AttributeError`` despite the ``__module__`` patch.
+    sys.modules[__name__]._TemporalBlockImpl = _TemporalBlockImpl  # type: ignore[attr-defined]
+    sys.modules[__name__]._NnTemporalModuleImpl = _NnTemporalModuleImpl  # type: ignore[attr-defined]
+    _nn_temporal_module_cls = _NnTemporalModuleImpl
+    return _NnTemporalModuleImpl
+
+
+def _make_tcn(input_dim: int, config: NnTemporalConfig) -> nn.Module:
+    """Construct a TCN :class:`torch.nn.Module` from ``config``.
+
+    Thin factory that routes through :func:`_build_temporal_module_class`
+    so the :class:`torch.nn.Module` subclass is only defined after
+    ``torch`` has been imported — keeps the scaffold / CLI import path
+    torch-free.  The returned module's ``input_dim`` attribute is
+    load-bearing for the save/load round-trip (T5): the loaded
+    envelope carries ``feature_columns`` and the reconstruction path
+    calls ``_make_tcn(len(feature_columns), config)`` to rebuild a
+    key-compatible module before ``load_state_dict(strict=True)``.
+    """
+    cls = _build_temporal_module_class()
+    return cls(
+        input_dim=input_dim,
+        seq_len=config.seq_len,
+        num_blocks=config.num_blocks,
+        channels=config.channels,
+        kernel_size=config.kernel_size,
+        dropout=config.dropout,
+        weight_norm=config.weight_norm,
+    )
+
+
+# ---------------------------------------------------------------------------
 # ``NnTemporalModel`` — the public class (T3 scaffold; T4 fills fit/predict;
 # T5 fills save/load).
 # ---------------------------------------------------------------------------
@@ -299,6 +629,12 @@ class NnTemporalModel:
         self._best_epoch: int | None = None
         # The fitted :class:`torch.nn.Module` — populated in ``fit`` (T4).
         self._module: nn.Module | None = None
+        # Last ``seq_len`` rows of the training feature frame — prepended
+        # to the predict input so every predict row receives a window of
+        # ``seq_len`` history.  Gives the harness the
+        # ``len(predict) == len(features)`` length-match it needs
+        # (evaluation-layer contract §5).  Populated in ``fit`` (T4).
+        self._warmup_features: pd.DataFrame | None = None
         #: One dict per epoch after ``fit``; keys
         #: ``{"epoch", "train_loss", "val_loss"}`` (plan D6 / AC-2).  Public
         #: attribute (trailing underscore mirrors sklearn fitted-state
@@ -322,35 +658,344 @@ class NnTemporalModel:
     ) -> None:
         """Fit the TCN on the aligned ``(features, target)`` pair.
 
-        T3 ships this as a :class:`NotImplementedError` stub; T4 fills the
-        body with the Stage 10 training-pipeline recipe adapted to
-        sequences: four-stream seeding via
-        :func:`bristol_ml.models.nn._training._seed_four_streams`,
-        module construction (8-block dilated causal TCN per plan D1),
-        scaler-buffer fitting on the train slice, ``_SequenceDataset``
-        wrapping, internal 10 %-tail val split (Stage 10 D9 pattern
-        inherited — **no** D8 offset per the Scope Diff cut), and the
-        shared training loop via
-        :func:`bristol_ml.models.nn._training.run_training_loop`.
+        Pipeline (mirrors Stage 10 :meth:`NnMlpModel.fit` modulo the
+        sequence-window step):
+
+        1. Shape / length guard — ``len(features) == len(target)`` and
+           ``len(features) > seq_len`` (otherwise no valid window exists).
+        2. Feature-column resolution (``config.feature_columns`` wins
+           when set; otherwise the full input-frame column order is used,
+           matching the Linear / SARIMAX / MLP convention).
+        3. Device selection via :func:`_select_device` and four-stream
+           seeding via
+           :func:`bristol_ml.models.nn._training._seed_four_streams`
+           (plan D6 / Stage 10 D7' inheritance).
+        4. Train / validation split — an **internal 10 % tail** of the
+           training slice (Stage 10 D9 pattern; **no D8 offset** per the
+           Scope Diff cut).  The tail length is clamped to
+           ``max(seq_len + 1, n // 10)`` so the val partition always yields
+           at least one window.
+        5. Scaler buffers (``feature_mean`` / ``feature_std`` /
+           ``target_mean`` / ``target_std``) fitted from the train
+           partition only.  Zero-variance feature columns are clamped to
+           ``std=1`` and logged (a zero-std column would otherwise make
+           the z-score produce ``inf`` / ``nan``).
+        6. Module construction via :func:`_make_tcn` and movement to the
+           resolved device; the scaler buffers are copied in via
+           ``register_buffer`` so they ride inside ``state_dict()``.
+        7. ``_SequenceDataset`` for train + val (plan D7 lazy windowing),
+           wrapped in :class:`torch.utils.data.DataLoader` (seeded via a
+           :class:`torch.Generator`, ``num_workers=0``) and then
+           :class:`_DeviceDataLoader` so each batch reaches the resolved
+           device at iteration time (:func:`run_training_loop`'s
+           batches-already-on-device contract).  Training operates on
+           the **normalised** target (MSE scale O(1)); features are
+           normalised inside ``forward``.
+        8. Shared training loop via
+           :func:`bristol_ml.models.nn._training.run_training_loop` —
+           Adam + MSELoss, patience-based early stopping, best-epoch
+           weight restore via a strict ``load_state_dict``.
+        9. Re-entrancy: ``loss_history_`` / ``_best_epoch`` / ``_module``
+           are discarded at the top of ``fit`` — the cold-start-per-fold
+           contract (Stage 10 D8 pattern inherited).  ``_warmup_features``
+           is overwritten with the last ``seq_len`` rows of the training
+           features so :meth:`predict` can prepend them.
+
+        Parameters
+        ----------
+        features:
+            Feature frame; ``features.index`` is not constrained here
+            (the harness passes a UTC-aware ``DatetimeIndex`` but the
+            dataset converts to numpy and discards the index).
+        target:
+            Aligned target series; ``len(target) == len(features)``.
+        seed:
+            Optional seed override.  ``None`` uses ``config.seed``
+            (which may itself be ``None`` — in that case the per-fold
+            determinism is the caller's responsibility, or ``0`` is used
+            as the deterministic fallback so a bare ``fit(X, y)`` call
+            is still reproducible).
+        epoch_callback:
+            Optional callable invoked after each epoch with the dict
+            ``{"epoch", "train_loss", "val_loss"}`` — the live-plot seam
+            for the notebook's Demo moment (plan D6 / AC-3).
         """
-        raise NotImplementedError("NnTemporalModel.fit is not implemented yet; lands in plan T4.")
+        import torch
+        from torch import nn, optim
+        from torch.utils.data import DataLoader
+
+        # --- 1. Guards --------------------------------------------------
+        if len(features) != len(target):
+            raise ValueError(
+                "NnTemporalModel.fit requires len(features) == len(target); "
+                f"got {len(features)} vs {len(target)}."
+            )
+        if len(features) == 0:
+            raise ValueError("NnTemporalModel.fit requires at least one training row.")
+
+        cfg = self._config
+
+        if len(features) <= cfg.seq_len:
+            raise ValueError(
+                "NnTemporalModel.fit requires len(features) > seq_len so at "
+                "least one window + aligned target exists; got "
+                f"len(features)={len(features)} vs seq_len={cfg.seq_len}."
+            )
+
+        # --- 2. Feature-column resolution ------------------------------
+        if cfg.feature_columns is not None:
+            feature_cols: tuple[str, ...] = tuple(cfg.feature_columns)
+            missing = [c for c in feature_cols if c not in features.columns]
+            if missing:
+                raise ValueError(
+                    "NnTemporalModel.fit: configured feature_columns not "
+                    f"present in features: {missing!r}.  Available: "
+                    f"{list(features.columns)!r}."
+                )
+            X_df = features[list(feature_cols)]
+        else:
+            feature_cols = tuple(features.columns)
+            X_df = features
+
+        # --- 3. Device + seed ------------------------------------------
+        device = _select_device(cfg.device)
+        effective_seed = seed if seed is not None else cfg.seed
+        if effective_seed is None:
+            # Fall back to a deterministic default so a bare ``fit(X, y)``
+            # is still reproducible; the harness path passes the per-fold
+            # seed explicitly.
+            effective_seed = 0
+        _seed_four_streams(int(effective_seed), device)
+
+        # --- 4. Train / val tail split ---------------------------------
+        # Stage 10 D9 pattern inherited; val tail clamped to
+        # ``seq_len + 1`` so at least one validation window exists.  No
+        # D8 offset — the Scope Diff cut (plan §Scope Diff / X-entries).
+        n = len(X_df)
+        n_val = max(cfg.seq_len + 1, n // 10)
+        n_train = n - n_val
+        if n_train <= cfg.seq_len:
+            raise ValueError(
+                "NnTemporalModel.fit: after splitting off a val tail of "
+                f"{n_val} rows, the train slice has only {n_train} rows, "
+                f"which is not > seq_len={cfg.seq_len}. Need at least "
+                f"{2 * cfg.seq_len + 2} total rows."
+            )
+
+        train_X_df = X_df.iloc[:n_train]
+        train_y = target.iloc[:n_train]
+        val_X_df = X_df.iloc[n_train:]
+        val_y = target.iloc[n_train:]
+
+        # --- 5. Scaler buffers (plan D5 / Stage 10 D4 inheritance) -----
+        train_X_np = np.asarray(train_X_df.to_numpy(), dtype=np.float32)
+        feat_mean = train_X_np.mean(axis=0).astype(np.float32)
+        feat_std = train_X_np.std(axis=0).astype(np.float32)
+        zero_var_mask = feat_std < 1e-12
+        if zero_var_mask.any():
+            zero_cols = [feature_cols[i] for i in np.where(zero_var_mask)[0]]
+            logger.info(
+                "NnTemporalModel.fit: zero-variance feature columns clamped to std=1: {}.",
+                zero_cols,
+            )
+            feat_std = np.where(zero_var_mask, 1.0, feat_std).astype(np.float32)
+
+        train_y_np = np.asarray(train_y.to_numpy(), dtype=np.float32)
+        tgt_mean = float(train_y_np.mean())
+        tgt_std = float(train_y_np.std())
+        if tgt_std < 1e-12:
+            logger.warning(
+                "NnTemporalModel.fit: target std is ~0 on the train slice; clamping to 1."
+            )
+            tgt_std = 1.0
+
+        # --- 6. Module construction ------------------------------------
+        module = _make_tcn(input_dim=len(feature_cols), config=cfg)
+        with torch.no_grad():
+            module.feature_mean.copy_(torch.from_numpy(feat_mean))  # type: ignore[union-attr]
+            module.feature_std.copy_(torch.from_numpy(feat_std))  # type: ignore[union-attr]
+            module.target_mean.copy_(  # type: ignore[union-attr]
+                torch.tensor([tgt_mean], dtype=torch.float32)
+            )
+            module.target_std.copy_(  # type: ignore[union-attr]
+                torch.tensor([tgt_std], dtype=torch.float32)
+            )
+        module = module.to(device)
+
+        # --- 7. DataLoaders (plan D7 lazy windowing) -------------------
+        # Pre-normalise the target so MSE loss operates on O(1) scale;
+        # features are normalised inside ``forward`` via the scaler
+        # buffers (plan D5 / Stage 10 D4 inheritance).
+        train_y_norm = pd.Series(
+            ((train_y_np - tgt_mean) / tgt_std).astype(np.float32),
+            index=train_y.index,
+        )
+        val_y_np = np.asarray(val_y.to_numpy(), dtype=np.float32)
+        val_y_norm = pd.Series(
+            ((val_y_np - tgt_mean) / tgt_std).astype(np.float32),
+            index=val_y.index,
+        )
+
+        train_ds = _SequenceDataset(train_X_df, train_y_norm, cfg.seq_len)
+        val_ds = _SequenceDataset(val_X_df, val_y_norm, cfg.seq_len)
+
+        dl_generator = torch.Generator(device="cpu")
+        dl_generator.manual_seed(int(effective_seed))
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=0,
+            generator=dl_generator,
+            drop_last=False,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+        )
+
+        train_loader_dev = _DeviceDataLoader(train_loader, device)
+        val_loader_dev = _DeviceDataLoader(val_loader, device)
+
+        optimizer = optim.Adam(
+            module.parameters(),
+            lr=cfg.learning_rate,
+            weight_decay=cfg.weight_decay,
+        )
+        loss_fn = nn.MSELoss()
+
+        # Reset re-entrant state before appending per-epoch entries.
+        loss_history: list[dict[str, float]] = []
+
+        best_state_dict, best_epoch = run_training_loop(
+            module,
+            train_loader_dev,
+            val_loader_dev,
+            optimiser=optimizer,
+            criterion=loss_fn,
+            device=device,
+            max_epochs=cfg.max_epochs,
+            patience=cfg.patience,
+            loss_history=loss_history,
+            epoch_callback=epoch_callback,
+        )
+
+        # Restore best-epoch weights on the fit device so predict() stays
+        # on ``device``.  The shared helper returns CPU clones.
+        module.load_state_dict(
+            {k: v.to(device) for k, v in best_state_dict.items()},
+            strict=True,
+        )
+
+        # --- 8. Publish state -----------------------------------------
+        self._feature_columns = feature_cols
+        self._fit_utc = datetime.now(UTC)
+        self._device = device
+        self._device_resolved = str(device)
+        self._seed_used = int(effective_seed)
+        self._best_epoch = best_epoch
+        self._module = module
+        self.loss_history_ = loss_history
+        # Warmup prefix: last seq_len rows of the training feature frame
+        # so :meth:`predict` can prepend them and yield one prediction per
+        # input row (evaluation-layer length-match contract §5).
+        self._warmup_features = features[list(feature_cols)].tail(cfg.seq_len).copy()
 
     def predict(self, features: pd.DataFrame) -> pd.Series:
-        """Return predictions indexed to the valid-window timestamps.
+        """Return predictions indexed to ``features.index``.
 
-        T3 ships this as a :class:`NotImplementedError` stub; T4 fills the
-        body with a single-batch forward pass over a
-        :class:`_SequenceDataset` wrapping ``features``, yielding one
-        prediction per valid window (windows that have both their full
-        ``seq_len`` of history *and* an aligned target index).
+        The TCN's natural predict output length is
+        ``len(features) - seq_len`` (one prediction per full-history
+        window).  The Stage 6 evaluation harness, however, expects
+        ``len(y_pred) == len(y_test)`` so its ``metric(y_test, y_pred)``
+        call does not raise on a length mismatch.  The reconciliation:
+        :meth:`fit` stashed the last ``seq_len`` rows of the training
+        feature frame in ``self._warmup_features``; :meth:`predict`
+        prepends them, giving ``len(combined) = seq_len + len(features)``
+        and therefore ``len(predict) == len(features)`` — one prediction
+        per input row, with the first prediction using only warmup
+        history and each subsequent prediction consuming one more row of
+        ``features``.  The returned :class:`pandas.Series` carries
+        ``features.index`` so downstream ``.reindex`` / ``.align`` work
+        as expected.
+
+        ``features`` must carry every column the model was fit on; extra
+        columns are silently ignored (mirrors the Linear / SARIMAX /
+        MLP contract).  Predict-before-fit raises
+        :class:`RuntimeError` (Stage 4 protocol convention).
 
         Raises
         ------
         RuntimeError
-            (Once implemented) if :meth:`fit` has not been called.
+            If :meth:`fit` has not been called.
+        ValueError
+            If any of ``self._feature_columns`` is missing from
+            ``features``.
         """
-        raise NotImplementedError(
-            "NnTemporalModel.predict is not implemented yet; lands in plan T4."
+        import torch
+        from torch.utils.data import DataLoader
+
+        if self._module is None or self._device is None or self._warmup_features is None:
+            raise RuntimeError("NnTemporalModel must be fit() before predict().")
+
+        missing = [c for c in self._feature_columns if c not in features.columns]
+        if missing:
+            raise ValueError(
+                f"NnTemporalModel.predict: features frame is missing fitted columns {missing!r}. "
+                f"Available: {list(features.columns)!r}."
+            )
+
+        if len(features) == 0:
+            return pd.Series(
+                np.empty(0, dtype=np.float64),
+                index=features.index,
+                name=self._config.target_column,
+            )
+
+        X_df = features[list(self._feature_columns)]
+        # Prepend the warmup prefix so every row of ``features`` gets a
+        # prediction — one window per input row (evaluation-layer §5
+        # length-match contract).  ``pd.concat`` stacks rows in order;
+        # ``_SequenceDataset`` is position-based (``to_numpy()`` discards
+        # the index) so overlapping timestamps would not confuse it.
+        combined = pd.concat([self._warmup_features, X_df], axis=0)
+        # Dummy target — :class:`_SequenceDataset` requires one for its
+        # ``(window, target)`` contract, but predict consumes only the
+        # window; the target slot is ignored downstream.
+        dummy_target = pd.Series(
+            np.zeros(len(combined), dtype=np.float32),
+            index=combined.index,
+        )
+        seq_len = self._config.seq_len
+        dataset = _SequenceDataset(combined, dummy_target, seq_len)
+        loader = DataLoader(
+            dataset,
+            batch_size=self._config.batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+        )
+        loader_dev = _DeviceDataLoader(loader, self._device)
+
+        self._module.eval()
+        chunks: list[np.ndarray] = []
+        with torch.no_grad():
+            for x_batch, _ in loader_dev:
+                y_norm = self._module(x_batch)
+                # Inverse target normalisation; scalers live on the module.
+                y = (
+                    y_norm * self._module.target_std  # type: ignore[union-attr]
+                    + self._module.target_mean  # type: ignore[union-attr]
+                )
+                chunks.append(y.detach().cpu().numpy().astype(np.float64))
+        y_np = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float64)
+        return pd.Series(
+            y_np,
+            index=features.index,
+            name=self._config.target_column,
         )
 
     def save(self, path: Path) -> None:
