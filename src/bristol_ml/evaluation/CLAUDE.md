@@ -129,6 +129,14 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
   ax=None) -> Figure` — fixed-window bar chart for the NESO three-way
   benchmark comparison (Stage 6 D10 — wires up the
   `NesoBenchmarkConfig.holdout_start/_end` consumer added at Stage 4).
+- `bristol_ml.evaluation.plots.loss_curve(history, *, title=..., ax=None)
+  -> Figure` — Stage 10 D6 demo-moment helper: renders train + validation
+  loss vs epoch from the `NnMlpModel.loss_history_` shape (list of
+  `{"epoch", "train_loss", "val_loss"}` dicts).  Uses Okabe-Ito colours
+  (`OKABE_ITO[1]` orange for train, `OKABE_ITO[2]` sky-blue for
+  validation) so the NN-training plot matches the rest of the Stage 6
+  diagnostic surface.  Model-agnostic: accepts any sequence of dicts
+  that carry the three keys (no `NnMlpModel` import).
 - `bristol_ml.evaluation.plots.apply_plots_config(config: PlotsConfig)
   -> None` — re-apply the rcParams overlay with ``figure.figsize`` and
   ``figure.dpi`` sourced from a loaded ``PlotsConfig``. Call this from

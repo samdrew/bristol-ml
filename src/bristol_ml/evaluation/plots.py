@@ -8,7 +8,7 @@ Stage 16 weather-regime) drops its residuals into these helpers without
 needing to know the caller; the helpers are model-agnostic (AC-3) — they
 take ``pd.Series`` / ``pd.DataFrame`` inputs, never a ``Model`` object.
 
-The public surface is seven functions plus three palette constants:
+The public surface is eight functions plus three palette constants:
 
 - :func:`residuals_vs_time` — line plot of residuals over the test index.
 - :func:`predicted_vs_actual` — scatter with 45-degree reference line.
@@ -23,6 +23,9 @@ The public surface is seven functions plus three palette constants:
 - :func:`benchmark_holdout_bar` — fixed-window bar chart for the NESO
   three-way benchmark comparison (D10 — wires up the latent
   ``NesoBenchmarkConfig.holdout_start/_end`` consumer).
+- :func:`loss_curve` — Stage 10 D6 train + validation loss curves from a
+  neural-network ``loss_history_`` sequence; the demo-moment plot for
+  the simple NN notebook.
 
 Plus the palette constants (Stage 6 D2, pinned by Wong 2011 *Nature
 Methods* and cividis / RdBu_r matplotlib built-ins):
@@ -106,6 +109,7 @@ __all__ = [
     "error_heatmap_hour_weekday",
     "forecast_overlay",
     "forecast_overlay_with_band",
+    "loss_curve",
     "predicted_vs_actual",
     "residuals_vs_time",
 ]
@@ -933,6 +937,111 @@ def benchmark_holdout_bar(
 
 
 # ---------------------------------------------------------------------------
+# Stage 10 — loss_curve (train + validation loss vs epoch)
+# ---------------------------------------------------------------------------
+
+
+def loss_curve(
+    history: Sequence[Mapping[str, float]],
+    *,
+    title: str = "Training vs validation loss",
+    ax: matplotlib.axes.Axes | None = None,
+) -> matplotlib.figure.Figure:
+    """Render the train + validation loss curves from a neural-network history.
+
+    Stage 10 D6 — the demo-moment plot for the simple NN.  The plan's
+    AC-3 says the loss curve must be "available as a plot without
+    additional wiring"; this helper is the one-liner surface that
+    ``notebooks/10-simple-nn.ipynb`` and any future Stage 11 / Stage 17
+    NN notebook call into.
+
+    ``history`` is the shape :attr:`bristol_ml.models.nn.mlp.NnMlpModel.loss_history_`
+    exposes — a list of per-epoch dicts with keys ``{"epoch",
+    "train_loss", "val_loss"}``.  The helper is kept strictly
+    model-agnostic (AC-3 of Stage 6): no ``NnMlpModel`` import, no
+    ``isinstance(model, ...)`` branches.  Pass any sequence of dicts
+    that carry the three keys.
+
+    Axis convention:
+
+    - x-axis: epoch index (integer; starts at 1 by convention).
+    - y-axis: loss (units are the model's — MSE on normalised target
+      for the Stage 10 MLP, so "loss" is the generic label).
+    - Train in ``OKABE_ITO[1]`` (orange, the "prediction" colour across
+      the Stage 6 helpers so the NN-training palette matches).
+    - Validation in ``OKABE_ITO[2]`` (sky blue, the "actual" colour).
+    - Legend in upper-right (loss curves shrink toward zero; upper-right
+      is the quietest quadrant at the plateau the facilitator points
+      to).
+
+    Parameters
+    ----------
+    history:
+        Non-empty sequence of epoch dicts with numeric ``"epoch"``,
+        ``"train_loss"``, and ``"val_loss"`` entries.  Empty histories
+        are rejected — an unfitted model has no curve to plot.
+    title:
+        Figure title (British English).  Override for notebook context
+        ("Stage 10 NN training — Mean-squared error" etc.).
+    ax:
+        Optional existing axes to draw on.  When ``None`` a new figure
+        is created at the ``plt.rcParams["figure.figsize"]`` default
+        (Stage 6 D5).  Mirrors the D5 composability contract shared by
+        every other helper in this module.
+
+    Returns
+    -------
+    :class:`matplotlib.figure.Figure`
+        The matplotlib figure containing the loss-curve plot.
+
+    Raises
+    ------
+    ValueError
+        If ``history`` is empty, or if any dict is missing one of the
+        three required keys.  The failure is loud rather than silent —
+        a half-populated history typically points at a bug in the
+        training loop, not a legitimate plot request.
+
+    Examples
+    --------
+    >>> from bristol_ml.evaluation.plots import loss_curve
+    >>> history = [
+    ...     {"epoch": 1, "train_loss": 0.9, "val_loss": 1.0},
+    ...     {"epoch": 2, "train_loss": 0.6, "val_loss": 0.8},
+    ... ]
+    >>> fig = loss_curve(history)  # doctest: +SKIP
+    """
+    if len(history) == 0:
+        raise ValueError(
+            "loss_curve: 'history' is empty — no epochs to plot.  An unfitted "
+            "model or a model that stopped before completing a single epoch "
+            "carries an empty loss_history_; call fit() first."
+        )
+    required_keys = {"epoch", "train_loss", "val_loss"}
+    for i, entry in enumerate(history):
+        missing = required_keys - set(entry.keys())
+        if missing:
+            raise ValueError(
+                f"loss_curve: history[{i}] is missing required keys {sorted(missing)!r}; "
+                f"expected every epoch dict to carry {sorted(required_keys)!r}."
+            )
+
+    epochs = np.asarray([float(e["epoch"]) for e in history], dtype=np.float64)
+    train_loss = np.asarray([float(e["train_loss"]) for e in history], dtype=np.float64)
+    val_loss = np.asarray([float(e["val_loss"]) for e in history], dtype=np.float64)
+
+    fig, axes = _ensure_axes(ax)
+    axes.plot(epochs, train_loss, linewidth=1.6, color=OKABE_ITO[1], label="Train")
+    axes.plot(epochs, val_loss, linewidth=1.6, color=OKABE_ITO[2], label="Validation")
+    axes.set_xlabel("Epoch")
+    axes.set_ylabel("Loss")
+    axes.set_title(title)
+    axes.grid(True, alpha=0.3)
+    axes.legend(loc="upper right")
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # CLI — ``python -m bristol_ml.evaluation.plots``
 # ---------------------------------------------------------------------------
 
@@ -986,6 +1095,7 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
         "forecast_overlay",
         "forecast_overlay_with_band",
         "benchmark_holdout_bar",
+        "loss_curve",
         "apply_plots_config",
     ):
         print(f"  - {name}")

@@ -539,6 +539,111 @@ class SarimaxConfig(BaseModel):
     sarimax_kwargs: SarimaxKwargs = Field(default_factory=SarimaxKwargs)
 
 
+class NnMlpConfig(BaseModel):
+    """Configuration for the small-MLP neural network model (Stage 10).
+
+    Stage 10 ships a small multi-layer perceptron that conforms to the Stage 4
+    :class:`~bristol_ml.models.protocol.Model` protocol.  The architecture is
+    deliberately minimal — 1 hidden layer x 128 units with ReLU activation by
+    default (plan D3) — because the stage's load-bearing contribution is the
+    training-loop + reproducibility + registry-round-trip **scaffold** that
+    Stage 11's temporal architecture inherits, not the analytical value of the
+    MLP itself (intent §Purpose).
+
+    A brief tour of the knobs:
+
+    - ``hidden_sizes`` is an ordered list: ``[128]`` = one layer of width 128;
+      ``[128, 64]`` = two hidden layers.  The intent caps this at "moderate
+      width"; architectures above ~100k parameters are out of the Stage 10
+      budget (plan §2 Out of scope).
+    - ``dropout`` is applied after every hidden ReLU; ``0.0`` (default)
+      disables it.  The validator uses ``lt=1.0`` not ``le`` because
+      ``dropout=1.0`` would zero the entire hidden activation and crash the
+      loss.
+    - ``feature_columns=None`` means "use the harness-supplied feature set" —
+      same harness-fallback idiom as :class:`SarimaxConfig` and
+      :class:`LinearConfig`; the train-CLI promotes the resolved
+      feature-set tuple into a copy of the config so the stored metadata is
+      faithful (plan D2 + the SARIMAX / linear precedent).  Unlike
+      :class:`ScipyParametricConfig`, ``feature_columns`` here names *raw*
+      input columns from the feature table, not a subset of generated
+      Fourier columns.
+    - ``seed=None`` means "derive per-fold seed from ``config.project.seed +
+      fold_index``" (plan D8 cold-start per-fold determinism).  Passing an
+      explicit integer pins the seed and makes per-fold runs reproducible in
+      isolation.
+    - ``device`` selects CUDA / MPS / CPU at ``fit`` time via the
+      ``_select_device`` helper in ``mlp.py``; the resolution order when
+      ``"auto"`` is CUDA > MPS > CPU (plan D11 — re-opened at the 2026-04-24
+      Ctrl+G that added CUDA-aware install).  Pin to ``"cpu"`` in tests that
+      need bit-identical CPU reproducibility (NFR-1 CPU path); pin to ``"cuda"``
+      to force GPU use when both CUDA and MPS are present on the host.
+
+    Design decisions and their evidence:
+
+    - Default ``[128]`` + ReLU + Adam(1e-3) + max_epochs=100 + patience=10:
+      plan D3 (tabular-NN baselines; domain research §R6).
+    - ``weight_decay=0.0`` default: gradient regularisation knobs are
+      configurable for experiments but Stage 10 default ships off (scope diff
+      X6 cuts LR scheduling / gradient clipping; plan keeps `weight_decay`
+      available because it is a zero-extra-code field on ``torch.optim.Adam``).
+    - ``patience=10`` default: plan D9 (patience-based early stopping with
+      best-epoch restore; 10 epochs ≈ 10 % of the default 100-epoch budget).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union; literal
+    # value matches the Hydra group filename (``conf/model/nn_mlp.yaml``).
+    type: Literal["nn_mlp"] = "nn_mlp"
+    # Target column on the Stage 3 / Stage 5 feature table.
+    target_column: str = "nd_mw"
+    # ``None`` means "use the harness-supplied raw feature set" (same pattern
+    # as Linear / SARIMAX).  An explicit tuple narrows the regressor set for
+    # ablation experiments.
+    feature_columns: tuple[str, ...] | None = None
+
+    # --- Architecture (plan D3) ---------------------------------------------
+    # Ordered list of hidden-layer widths.  Default ``[128]`` = one hidden
+    # layer of width 128.  Length-2 lists like ``[128, 64]`` produce a
+    # two-hidden-layer MLP; intent §Points ("one or two hidden layers,
+    # moderate width") bounds the pedagogical envelope.
+    hidden_sizes: list[int] = Field(default_factory=lambda: [128])
+    # ReLU is the tabular-NN default.  ``tanh`` and ``gelu`` exposed for
+    # notebook experimentation without code changes.
+    activation: Literal["relu", "tanh", "gelu"] = "relu"
+    # Dropout probability applied after every hidden-layer activation.
+    # ``0.0`` disables dropout; ``lt=1.0`` avoids the degenerate "zero the
+    # entire layer" edge case that would crash the loss.
+    dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
+
+    # --- Optimisation (plan D3) ---------------------------------------------
+    # Adam learning rate; 1e-3 is the published default across tabular-NN
+    # baselines (domain research §R6).
+    learning_rate: float = Field(default=1e-3, gt=0)
+    # L2 regularisation strength on Adam.  Default off because Stage 10
+    # ships the simplest defensible MLP; override for experiments.
+    weight_decay: float = Field(default=0.0, ge=0)
+    batch_size: int = Field(default=32, ge=1)
+    max_epochs: int = Field(default=100, ge=1)
+    # Patience-based early stopping: halt when val loss has not improved for
+    # ``patience`` consecutive epochs and restore best-epoch weights (D9).
+    patience: int = Field(default=10, ge=1)
+
+    # --- Reproducibility (plan D7') ----------------------------------------
+    # ``None`` defers to ``config.project.seed + fold_index`` inside ``fit``
+    # (plan D8).  Pin an explicit integer to make per-fold runs independently
+    # reproducible (handy in notebook experimentation).
+    seed: int | None = None
+
+    # --- Device (plan D11, re-opened at 2026-04-24 Ctrl+G) ------------------
+    # Auto-select CUDA > MPS > CPU unless pinned.  The resolved device is
+    # logged at INFO inside ``fit`` and persisted in the sidecar (D5) as
+    # provenance.  Distributed / multi-GPU remain out of scope (intent §Out of
+    # scope).
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+
+
 class ScipyParametricConfig(BaseModel):
     """Configuration for the SciPy parametric load model (Stage 8).
 
@@ -609,7 +714,7 @@ class ScipyParametricConfig(BaseModel):
 # ``AppConfig.model`` is a Pydantic discriminated union: exactly one of the
 # model variants is active per run (matching Hydra group-override semantics).
 # The ``type`` discriminator is written into the YAML by each Hydra group file.
-ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig | ScipyParametricConfig
+ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig | ScipyParametricConfig | NnMlpConfig
 
 
 class ModelMetadata(BaseModel):
