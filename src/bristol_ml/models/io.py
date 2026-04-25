@@ -144,19 +144,24 @@ def load_skops(path: Path) -> Any:
     The load proceeds in three steps:
 
     1. :func:`skops.io.get_untrusted_types` is invoked on the artefact.
-       Skops's default trust-set covers the standard primitives
+       Skops's built-in trust-set covers the standard primitives
        (numpy, pandas, builtins, etc.); anything beyond that is
        reported here.
-    2. Any reported type *not* in the project trust-list (built up via
-       :func:`register_safe_types`) raises :class:`UntrustedTypeError`,
-       naming both the artefact path and the unexpected types so the
-       operator can decide whether to register the new type or refuse
-       the load entirely.
-    3. Otherwise, :func:`skops.io.load` is called with the project
-       trust-list passed as ``trusted=``.  This is the load-bearing
-       hop: skops will refuse to materialise an untrusted type even
-       after :func:`get_untrusted_types` reports it, unless the type
-       is explicitly listed in ``trusted=``.
+    2. **The project-level gate.**  Any reported type *not* in the
+       project trust-list (built up via :func:`register_safe_types`)
+       raises :class:`UntrustedTypeError`, naming both the artefact
+       path and the unexpected types so the operator can decide
+       whether to register the new type or refuse the load entirely.
+       This is the step where the load/no-load decision is made.
+    3. :func:`skops.io.load` is called with the project trust-list
+       passed as ``trusted=``.  Skops's ``trusted=`` argument
+       *augments* its built-in trust-set rather than replacing it —
+       so the union of the two sets is what skops will actually
+       materialise.  Step 2 has already excluded everything outside
+       that union; step 3 simply vouches for the project-registered
+       types so skops does not raise its own
+       :class:`~skops.io.UntrustedTypesFoundException` on a type the
+       project has already approved.
 
     Parameters
     ----------
