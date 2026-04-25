@@ -3,6 +3,7 @@
 - **Status:** Provisional — first realised by Stage 12 (FastAPI prediction endpoint + skops migration).
 - **Canonical overview:** [`DESIGN.md` §3.2](../../intent/DESIGN.md#32-layer-responsibilities) (serving paragraph); [`DESIGN.md` §8](../../intent/DESIGN.md#8-tooling-and-libraries) (FastAPI / uvicorn selection).
 - **Concrete instances:** [Stage 12 retro](../../lld/stages/12-serving.md) — app factory, skops migration, seven-field log contract.
+- **Key ADRs:** [`decisions/0005-skops-for-model-serialisation.md`](../decisions/0005-skops-for-model-serialisation.md) — joblib → skops migration (Stage 12 D10 Ctrl+G reversal); [`decisions/0006-serving-lazy-load-cache.md`](../decisions/0006-serving-lazy-load-cache.md) — lifespan loads only the default model, lazy-loads the rest (Stage 12 D7 — single highest-leverage cut).
 - **Related principles:** §2.1.1 (standalone module), §2.1.2 (typed narrow interfaces), §2.1.4 (config outside code), §2.1.7 (tests at boundaries).
 - **Upstream layer:** [Registry](registry.md) — `build_app(registry_dir)` consumes the four-verb registry surface; the serving layer has no other runtime upstream dependency.
 - **Downstream consumer:** Stage 18 (drift monitoring) consumes the Stage 12 seven-field structured prediction log.
@@ -273,4 +274,6 @@ uv run pytest tests/integration/serving/ -v
 - `src/bristol_ml/registry/CLAUDE.md` — skops migration outcome; joblib rejection error message.
 - `src/bristol_ml/models/io.py` — `load_skops`, `register_safe_types`, `UntrustedTypeError`; the trust-list contract every future model family must satisfy.
 - `docs/architecture/layers/models-nn.md` — Stage 11 warmup-envelope contract that makes `nn_temporal` servable without warmup semantics in the request body.
+- [`decisions/0005-skops-for-model-serialisation.md`](../decisions/0005-skops-for-model-serialisation.md) — Stage 12 D10 (joblib → skops); the security boundary above is the consumer side of this ADR.
+- [`decisions/0006-serving-lazy-load-cache.md`](../decisions/0006-serving-lazy-load-cache.md) — Stage 12 D7 (lazy-load cache); the consequences section names the trade-off between startup error surface and first-request latency.
 - Stage 12 plan — `docs/plans/completed/12-serving.md`.

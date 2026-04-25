@@ -313,8 +313,9 @@ Each row is swappable without touching downstream code. The four-verb API is wha
 
 ## Cross-references
 
-- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — ADR establishing joblib + sidecar as sufficient before a hosted registry; skops replaces joblib at Stage 12.
+- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — ADR establishing joblib + sidecar as sufficient before a hosted registry; superseded at the serialisation boundary by ADR 0005 (Stage 12 skops migration).
 - [`decisions/0003-protocol-for-model-interface.md`](../decisions/0003-protocol-for-model-interface.md) — the five-member `Model` protocol the registry consumes without modification (AC-2).
+- [`decisions/0005-skops-for-model-serialisation.md`](../decisions/0005-skops-for-model-serialisation.md) — Stage 12 joblib → skops migration; the registry layer is the consumer side of this ADR (`registry.load(run_id)` calls each family's `Model.load(path)`, which calls `bristol_ml.models.io.load_skops`).
 - [`layers/models.md`](models.md) — the `Model` protocol contract; `skops.io` migration rationale.
 - [`layers/serving.md`](serving.md) — the first non-author consumer of registry artefacts; security rationale for the skops migration; trust-list contract for future model families.
 - [`layers/evaluation.md`](evaluation.md) — harness return shape that `registry.save` consumes; `evaluate_and_keep_final_model` extension (plan D17).
