@@ -380,8 +380,8 @@ equivalent — Pattern A is strictly simpler (single-branch
 
 ### D. Save-envelope addition (plan D5 / R7)
 
-The Stage 10 single-joblib envelope is preserved verbatim plus *one
-new field*:
+The Stage 10 single-joblib envelope is preserved verbatim plus *two
+new fields*:
 
 ```python
 {
@@ -392,6 +392,9 @@ new field*:
                                      # config_dump["seq_len"], explicit
                                      # so the load path can sanity-check
                                      # before reconstructing the module
+    "warmup_features": pd.DataFrame, # NEW at Stage 11 — the last
+                                     # ``seq_len`` rows of the training
+                                     # feature frame (see below)
     "seed_used": int,
     "best_epoch": int,
     "loss_history": list[dict[str, float]],
@@ -405,6 +408,38 @@ Pydantic re-validation of `config_dump` lets a future migration tool
 inspect a stale artefact without round-tripping through a possibly
 breaking schema.  `test_nn_temporal_save_and_load_round_trips_seq_len_
 and_state_dict` is the regression guard.
+
+`warmup_features` carries the last `seq_len` rows of the training
+feature frame and is **load-bearing for the harness contract**.  A
+sliding-window TCN that consumes `seq_len` historical hours per
+prediction naturally outputs `len(features) - seq_len` predictions for
+a feature frame of length `len(features)`; the Stage 6 harness
+(`harness.evaluate(...)`) and the protocol shape `predict(features)
+-> pd.Series` indexed on `features.index` both expect
+`len(y_pred) == len(features)`.  `predict()` therefore concatenates
+`warmup_features` to the front of the caller's input frame, runs the
+windowed forward pass, and slices the prediction back to the caller's
+index.  Without `warmup_features` the load path could not reproduce
+the predict-time alignment the harness enforces, so every loaded
+`NnTemporalModel` would silently drop the first `seq_len` rows of any
+prediction request.
+
+This field is **the one Stage 11 contract addition not named in plan
+D5**.  The plan implicitly assumed alignment was handled inside
+`predict()` via re-indexing; the implementation chose the warmup
+prefix because (i) it preserves the protocol's
+`len(y_pred) == len(features)` invariant without truncating the
+caller's index, (ii) it makes the alignment honest about what the
+model actually conditions on (the warmup rows ride the
+`feature_mean` / `feature_std` scalers exactly as training data did),
+and (iii) it survives joblib round-trip without a custom serialiser.
+The cost is a small parquet-shaped tail in the artefact; on the
+Stage 11 production defaults at `seq_len=168` × ~50 columns ×
+`float64` this is ~70 kB, negligible against the `state_dict_bytes`
+payload.  Adversarial regression guards
+(`test_nn_temporal_load_rejects_envelope_with_mismatched_seq_len` and
+`test_nn_temporal_load_rejects_envelope_missing_warmup_features`)
+pin both load-time defences against silent corruption.
 
 ### E. Training-loop ownership has moved
 
@@ -516,6 +551,21 @@ Each of these is swappable without touching downstream code.
   call-site.  Shipping a `BaseTorchModel` abstraction now would bind
   Stage 11's design before Stage 11's requirements are understood
   (scope-diff X7 cut).
+- **`_select_device` duplicated in `mlp.py` and `temporal.py`.**  The
+  Stage 11 extraction at T1 lifted the training loop and
+  `_seed_four_streams` into `_training.py` but deliberately left
+  `_select_device` defined twice — once per family — so each module's
+  log message can name its own family verbatim ("`NnMlpModel resolving
+  device 'auto' to 'cuda'`" rather than a generic
+  "`bristol_ml.models.nn._training resolving device …`").  The two
+  copies are byte-identical at Stage 11; consolidation into
+  `_training.py` is the obvious next step at the third NN family.
+  The trade-off is one duplicated 30-line helper now versus a
+  wrapper-per-family at the consolidation point; the duplication keeps
+  the call-site honest about which family is asking, at the cost of a
+  search-and-replace when the helper next changes shape.  Tracked as
+  a follow-up housekeeping item (no separate hot-fix branch) for the
+  next NN-family stage.
 
 ## Open questions
 

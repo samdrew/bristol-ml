@@ -748,11 +748,16 @@ class NnTemporalConfig(BaseModel):
       intent's "same hour last week" pedagogical anchor with ample
       headroom.
     - ``weight_norm`` wraps every ``Conv1d`` via
-      :func:`torch.nn.utils.weight_norm` (retained in Stage 11 despite the
-      PyTorch 2.1+ deprecation in favour of the ``parametrizations.weight_norm``
-      API — the former keeps a clean ``state_dict`` key layout; Stage 11 retro
-      captures the migration path if a future hook fails on the deprecation
-      warning).
+      :func:`torch.nn.utils.parametrizations.weight_norm` — the modern
+      parametrizations API.  ``state_dict`` keys round-trip as
+      ``...parametrizations.weight.original0`` /
+      ``...parametrizations.weight.original1`` (not the legacy
+      ``weight_g`` / ``weight_v``); the load path uses
+      ``strict=True`` so a saved artefact and a freshly-built skeleton
+      either agree exactly or raise.  ``temporal.py`` keeps a one-shot
+      fallback to the legacy ``torch.nn.utils.weight_norm`` for
+      ``torch < 2.1`` but the project pin is ``torch>=2.7`` so the
+      parametrizations path is always taken in practice.
     - ``dropout`` is applied once per residual block after the second
       conv.  ``0.2`` is the capacity-regularisation trade at the defaults.
     - ``feature_columns=None`` means "use the harness-supplied raw feature
@@ -816,9 +821,11 @@ class NnTemporalConfig(BaseModel):
     # Dropout after the second conv in each residual block.  Clamped at
     # ``lt=1.0`` to avoid the degenerate "zero every activation" case.
     dropout: float = Field(default=0.2, ge=0.0, lt=1.0)
-    # Apply :func:`torch.nn.utils.weight_norm` to every Conv1d.  Stage 11
-    # R4 captures the PyTorch 2.1+ deprecation migration path to
-    # ``parametrizations.weight_norm``.
+    # Apply weight-norm reparametrisation to every Conv1d via
+    # :func:`torch.nn.utils.parametrizations.weight_norm` (modern API on
+    # the pinned ``torch>=2.7``; ``temporal.py`` keeps a fallback to the
+    # legacy ``torch.nn.utils.weight_norm`` for ``torch<2.1`` but it is
+    # never exercised under the project's pinned floor).
     weight_norm: bool = True
 
     # --- Optimisation (plan D1 — CUDA defaults) ----------------------------

@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -164,7 +164,7 @@ class _DeviceDataLoader:
         self._loader = loader
         self._device = device
 
-    def __iter__(self) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         for x_batch, y_batch in self._loader:
             yield x_batch.to(self._device), y_batch.to(self._device)
 

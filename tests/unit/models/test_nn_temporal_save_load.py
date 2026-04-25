@@ -379,3 +379,102 @@ def test_nn_temporal_module_impl_is_pickleable() -> None:
         f"_TemporalBlockImpl pickle round-trip must preserve state_dict keys; "
         f"original: {set(block_sd_orig)}, restored: {set(block_sd_rest)}."
     )
+
+
+# ===========================================================================
+# 5. test_nn_temporal_load_rejects_envelope_with_mismatched_seq_len  (Phase 3)
+# ===========================================================================
+
+
+def test_nn_temporal_load_rejects_envelope_with_mismatched_seq_len(
+    tmp_path: Path,
+) -> None:
+    """Adversarial guard for plan R7 — load must reject a tampered envelope.
+
+    The save envelope carries ``seq_len`` at the top level *and* inside
+    ``config_dump`` for the explicit round-trip guard documented in plan
+    R7.  ``load_state_dict(strict=True)`` does **not** catch a mismatch
+    between these two values because ``seq_len`` only affects windowing,
+    not Conv1d kernel shapes — so the R7 guard at
+    ``temporal.py::NnTemporalModel.load`` is the **only** defence
+    against an envelope whose top-level ``seq_len`` has been corrupted
+    relative to its ``config_dump["seq_len"]``.
+
+    A future refactor that accidentally drops the R7 guard would leave
+    every existing save/load test green; this adversarial test fails
+    loudly under that refactor.
+
+    The recipe: save a fitted model, mutate the envelope's top-level
+    ``seq_len`` field on disk via :func:`load_joblib` /
+    :func:`save_joblib`, then assert :meth:`NnTemporalModel.load` raises
+    :class:`ValueError` mentioning the mismatch.
+
+    Phase 3 review (code-reviewer R2): the R7 guard had no adversarial
+    coverage in the T5 happy-path tests.
+    """
+    from bristol_ml.models.io import load_joblib, save_joblib
+
+    features, target = _tiny_temporal_fixture()
+    model = NnTemporalModel(_cpu_temporal_config())
+    model.fit(features, target, seed=0)
+
+    artefact_path = tmp_path / "model.joblib"
+    model.save(artefact_path)
+
+    # Tamper with the on-disk envelope: bump the top-level ``seq_len``
+    # by one so it disagrees with ``config_dump["seq_len"]``.
+    envelope = load_joblib(artefact_path)
+    original_seq_len = int(envelope["seq_len"])
+    envelope["seq_len"] = original_seq_len + 1
+    save_joblib(envelope, artefact_path)
+
+    with pytest.raises(ValueError, match=r"seq_len.*disagrees|R7"):
+        NnTemporalModel.load(artefact_path)
+
+
+# ===========================================================================
+# 6. test_nn_temporal_load_rejects_envelope_missing_warmup_features  (Phase 3)
+# ===========================================================================
+
+
+def test_nn_temporal_load_rejects_envelope_missing_warmup_features(
+    tmp_path: Path,
+) -> None:
+    """Adversarial guard for the Stage 11 ``warmup_features`` envelope contract.
+
+    ``warmup_features`` is load-bearing for the harness alignment
+    contract (``len(predict) == len(features)`` — see layer doc §D and
+    ``NnTemporalModel.predict``).  A corrupted artefact missing this
+    field would silently produce a model whose ``predict`` returns a
+    series shorter than the caller's index by ``seq_len`` rows, breaking
+    every harness call site.  The :meth:`NnTemporalModel.load` guard at
+    ``temporal.py:1153-1158`` raises :class:`ValueError` to make the
+    corruption loud.
+
+    A future refactor that drops the missing-warmup guard would leave
+    every existing save/load test green; this adversarial test fails
+    loudly under that refactor.
+
+    Phase 3 review (code-reviewer R2): the missing-warmup guard had no
+    adversarial coverage in the T5 happy-path tests.
+    """
+    from bristol_ml.models.io import load_joblib, save_joblib
+
+    features, target = _tiny_temporal_fixture()
+    model = NnTemporalModel(_cpu_temporal_config())
+    model.fit(features, target, seed=0)
+
+    artefact_path = tmp_path / "model.joblib"
+    model.save(artefact_path)
+
+    # Tamper with the on-disk envelope: drop the ``warmup_features`` field.
+    envelope = load_joblib(artefact_path)
+    assert "warmup_features" in envelope, (
+        "Pre-condition: a freshly-saved envelope must contain warmup_features; "
+        "this test could only meaningfully tamper if the field is present."
+    )
+    del envelope["warmup_features"]
+    save_joblib(envelope, artefact_path)
+
+    with pytest.raises(ValueError, match=r"warmup_features"):
+        NnTemporalModel.load(artefact_path)

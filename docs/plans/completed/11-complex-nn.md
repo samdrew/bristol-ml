@@ -153,11 +153,11 @@ All five intent-ACs are copied verbatim from `docs/intent/11-complex-nn.md §Acc
 - **AC-2.** "Training uses the harness established in Stage 10."
   - Tests:
     - `test_nn_temporal_fit_uses_shared_training_loop` — structural check that `NnTemporalModel.fit` calls `bristol_ml.models.nn._training.run_training_loop` (via `mock.patch`), *not* a locally-defined loop.
-    - `test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction` — regression guard; `NnMlpModel.fit` calls the same helper (protects the D4 extraction from silent re-inlining).
+    - `test_nn_mlp_fit_calls_shared_run_training_loop` — regression guard; `NnMlpModel.fit` calls the shared `run_training_loop` helper (protects the D4 extraction from silent re-inlining). **Shipped under this name** at `tests/unit/models/test_nn_training_extraction.py`; the plan's draft name `test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction` was shortened in T1 with identical behavioural coverage.
     - `test_nn_temporal_fit_populates_loss_history_per_epoch` — `len(loss_history_) == epochs_run`; each entry has keys `{"epoch", "train_loss", "val_loss"}` with `int` epoch and `float` train/val — one assertion, preserves Stage 10 contract on the new class (Scope Diff `PLAN POLISH` kept at minimal cost).
 - **AC-3.** "The ablation table covers every model trained so far on the same splits."
   - Tests:
-    - `test_notebook_11_ablation_cell_covers_six_model_families` — notebook-execution smoke test asserts the rendered ablation dataframe has rows for `{"naive", "linear", "sarimax", "scipy_parametric", "nn_mlp", "nn_temporal"}` and columns `{"MAE", "MAPE", "RMSE", "WAPE", "MAE_ratio_vs_NESO", "training_time_s", "param_count"}`.
+    - `test_notebook_11_ablation_cell_covers_six_model_families` — notebook-execution smoke test asserts that the rendered notebook's closing-narrative markdown cell names every member of `{"naive", "linear", "sarimax", "scipy_parametric", "nn_mlp", "nn_temporal"}`. **Shipped (T7) — column-set assertion deferred:** plan-time column expectation was `{"MAE", "MAPE", "RMSE", "WAPE", "MAE_ratio_vs_NESO", "training_time_s", "param_count"}`; the shipped test checks the six-family row-set only and the column-set assertion is deferred alongside the three D10-deferred columns (`MAE_ratio_vs_NESO`, `training_time_s`, `param_count`). The notebook closing markdown surfaces the deferral; the column-set assertion can be re-added when the three deferred columns ship in a follow-on stage.
 - **AC-4.** "Save/load through the registry from Stage 9 preserves full weights and the sequence preprocessing state."
   - Tests:
     - `test_registry_save_nn_temporal_model_via_protocol` — instantiate via Hydra config, fit on a small fixture, call `registry.save(model, metrics_df, feature_set=..., target=...)`, round-trip via `registry.load(run_id)`, assert `torch.allclose(original.predict(X), loaded.predict(X), atol=1e-5)` (NFR-3 close-match bar).
@@ -449,7 +449,7 @@ The loops are structurally identical below the collate layer. The extraction is 
 - modified `src/bristol_ml/models/nn/CLAUDE.md` — Gotcha section updated: "As of Stage 11 the shared training loop lives in `_training.py`; both `NnMlpModel` and `NnTemporalModel` import from there."
 
 **Tests (T1):**
-- `test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction` — structural regression guard; `NnMlpModel.fit` invokes `bristol_ml.models.nn._training.run_training_loop` exactly once per call (via `mock.patch`).
+- `test_nn_mlp_fit_calls_shared_run_training_loop` (shipped name; plan-draft was `test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction`) — structural regression guard; `NnMlpModel.fit` invokes `bristol_ml.models.nn._training.run_training_loop` exactly once per call (via `mock.patch`).
 - **All existing Stage 10 tests must pass unchanged.** Any failure in `tests/unit/models/test_nn_mlp_*` is a refactor regression and halts the stage.
 
 **Commits as:** `Stage 11 T1: extract shared training loop to _training.py (Stage 10 D10 seam)`.

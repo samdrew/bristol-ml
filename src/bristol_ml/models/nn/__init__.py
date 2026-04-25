@@ -27,7 +27,7 @@ Cross-references:
   Stage 11 extends it with the TCN contract).
 - Module guide: ``src/bristol_ml/models/nn/CLAUDE.md`` (Stage 10 T6).
 - Plans: ``docs/plans/completed/10-simple-nn.md``,
-  ``docs/plans/active/11-complex-nn.md``.
+  ``docs/plans/completed/11-complex-nn.md``.
 """
 
 from __future__ import annotations
