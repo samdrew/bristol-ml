@@ -12,6 +12,24 @@
 **Audience:** plan author (lead) + Ctrl+G reviewer. Linked from
 `docs/plans/active/12-serving.md` preamble.
 
+**Post-Ctrl+G note (2026-04-25).** Two `RESTATES INTENT` rows below
+were reversed at human review and no longer reflect the shipped plan:
+
+- **D9** (Exclude `NnTemporalModel`; return HTTP 501) — **REVERSED.**
+  Human rationale: "Keeping code in the codebase that isn't supported
+  in the primary implementation is bad-practice." All six model
+  families are served. Stage 11 D5+ already saved `warmup_features`
+  inside the joblib envelope so single-row `predict` works through a
+  loaded model — the serving boundary inherits that contract for free.
+- **D10** (Defer `skops.io` adoption) — **REVERSED.** Human rationale:
+  "This includes a network facing interface so security should be
+  paramount, as I don't want an RCE exploit on my PC." Stage 12 adopts
+  `skops.io` as the canonical save/load primitive across all six
+  model families.
+
+This document is preserved as the historical critique snapshot; the
+shipped plan's resolution log records the divergence.
+
 ---
 
 ## 1. Scope Diff table
