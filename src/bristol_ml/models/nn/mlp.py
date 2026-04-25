@@ -7,21 +7,21 @@ PyTorch ``nn.Module``-backed small MLP.  Stage 10's pedagogical role
 is expected to be modest (intent §Purpose).  The load-bearing pieces
 for Stage 11 are:
 
-- the hand-rolled training loop (plan D10; extraction seam flagged for
-  Stage 11);
+- the shared hand-rolled training loop (plan D10 extraction seam —
+  **fired at Stage 11 T1**; body now lives in
+  :mod:`bristol_ml.models.nn._training` and is called from both
+  :class:`NnMlpModel` and :class:`NnTemporalModel`);
 - the four-stream reproducibility recipe (plan D7'; bit-identical on
-  CPU, close-match on CUDA / MPS);
+  CPU, close-match on CUDA / MPS — also relocated to ``_training.py``);
 - the cold-start-per-fold contract (plan D8);
 - the single-joblib artefact layout (plan D5 revised), which plugs into
   the Stage 9 registry's ``artefact/model.joblib`` file-path contract
   without any registry change.
 
-Task T1 scaffolded the class surface.  Task T2 filled ``fit`` /
-``predict`` with the hand-rolled training loop, the four-stream seed
-helper, the auto-device selector, and the ``_make_mlp`` module-level
-module factory.  Task T3 (this commit) fills ``save`` / ``load`` with
-the single-joblib-envelope layout (plan D5 revised) that plugs into
-the Stage 9 registry's ``artefact/model.joblib`` file-path contract.
+Stage 10 shipped T1-T3 (scaffold, fit/predict, save/load).  Stage 11
+T1 (this commit) extracted the training-loop body to
+``_training.run_training_loop`` so the Stage 11 ``NnTemporalModel``
+inherits the loop without a copy-paste.
 
 Running standalone::
 
@@ -33,7 +33,6 @@ Running standalone::
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -44,6 +43,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from bristol_ml.models.nn._training import _seed_four_streams, run_training_loop
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import NnMlpConfig
 
@@ -120,46 +120,6 @@ def _select_device(preference: str) -> torch.device:
 
     logger.info("NnMlpModel: device preference={!r} resolved to {!r}.", preference, str(resolved))
     return resolved
-
-
-def _seed_four_streams(seed: int, device: torch.device) -> None:
-    """Seed the four RNG streams that matter at fit time (plan D7').
-
-    Python's :mod:`random`, NumPy, and the two PyTorch streams
-    (``torch.manual_seed`` — covers CPU + default CUDA + MPS generators
-    — plus :func:`torch.cuda.manual_seed_all` as an explicit
-    multi-device hedge).  On CUDA additionally sets
-    ``torch.backends.cudnn.deterministic = True`` and
-    ``torch.backends.cudnn.benchmark = False`` — the idiomatic PyTorch
-    "as reproducible as it reasonably gets on CUDA" recipe (PyTorch
-    reproducibility docs).  Zero cost on CPU / MPS where the flags are
-    silently ignored, so setting them unconditionally is safe.
-
-    Intent AC-2 explicitly carves out "within the constraints of
-    non-deterministic GPU operations"; NFR-1 therefore guarantees
-    bit-identity on CPU only and numerical-closeness on CUDA / MPS.
-
-    Parameters
-    ----------
-    seed:
-        Integer seed.  The caller decides whether this is
-        ``config.seed`` (explicit) or
-        ``config.project.seed + fold_index`` (cold-start derivation per
-        plan D8).
-    device:
-        The :class:`torch.device` returned by :func:`_select_device`.
-        Used only to decide whether to apply the cuDNN flags; the
-        ``torch.cuda.manual_seed_all`` call is a no-op off-CUDA.
-    """
-    import torch
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    if device.type == "cuda":
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
 
 def _make_mlp(
@@ -525,7 +485,14 @@ class NnMlpModel:
             module.target_std.copy_(torch.tensor([tgt_std], dtype=torch.float32))  # type: ignore[union-attr]
         module = module.to(device)
 
-        # --- 7. Training loop (plan D10) -------------------------------
+        # --- 7. Training loop (plan D10; Stage 11 T1 extraction) -------
+        # The epoch loop / early-stop / best-val-restore body now lives
+        # in :func:`bristol_ml.models.nn._training.run_training_loop` so
+        # :class:`NnTemporalModel` (Stage 11) and :class:`NnMlpModel`
+        # share a single copy.  This function stays in charge of
+        # building the DataLoaders, constructing the optimiser /
+        # criterion, and restoring the best-epoch weights — the
+        # shared helper only owns the training loop.
         X_train_t = torch.from_numpy(X_train_np).to(device)
         y_train_t = torch.from_numpy(y_train_np).to(device)
         X_val_t = torch.from_numpy(X_val_np).to(device)
@@ -547,6 +514,20 @@ class NnMlpModel:
             generator=dl_generator,
             drop_last=False,
         )
+        # Single-batch val loader — the MLP's val slice is small enough
+        # to fit in one forward pass.  ``batch_size == len(val_dataset)``
+        # + ``shuffle=False`` preserves Stage 10's bit-for-bit
+        # single-forward-pass val semantics through the shared
+        # mean-over-batches helper (one batch ⇒ mean == the batch's
+        # loss, numerically identical).
+        val_dataset = TensorDataset(X_val_t, y_val_norm)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=max(1, len(val_dataset)),
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+        )
 
         optimizer = optim.Adam(
             module.parameters(),
@@ -555,67 +536,25 @@ class NnMlpModel:
         )
         loss_fn = nn.MSELoss()
 
-        # Best-epoch tracking (plan D9).
-        best_val_loss: float = float("inf")
-        best_state_dict: dict[str, torch.Tensor] = {
-            k: v.detach().clone().cpu() for k, v in module.state_dict().items()
-        }
-        best_epoch: int = 0
-        epochs_without_improvement: int = 0
-
         # Reset re-entrant state before appending per-epoch entries (D8).
         loss_history: list[dict[str, float]] = []
 
-        for epoch in range(1, cfg.max_epochs + 1):
-            module.train()
-            epoch_losses: list[float] = []
-            for x_batch, y_batch in train_loader:
-                optimizer.zero_grad()
-                y_hat = module(x_batch)
-                loss = loss_fn(y_hat, y_batch)
-                loss.backward()
-                optimizer.step()
-                epoch_losses.append(float(loss.detach().cpu().item()))
+        best_state_dict, best_epoch = run_training_loop(
+            module,
+            train_loader,
+            val_loader,
+            optimiser=optimizer,
+            criterion=loss_fn,
+            device=device,
+            max_epochs=cfg.max_epochs,
+            patience=cfg.patience,
+            loss_history=loss_history,
+            epoch_callback=epoch_callback,
+        )
 
-            train_loss = float(np.mean(epoch_losses)) if epoch_losses else float("nan")
-
-            module.eval()
-            with torch.no_grad():
-                y_val_hat = module(X_val_t)
-                val_loss = float(loss_fn(y_val_hat, y_val_norm).detach().cpu().item())
-
-            entry = {
-                "epoch": int(epoch),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-            }
-            loss_history.append(entry)
-            if epoch_callback is not None:
-                # Defensive copy — we do not trust an external callback
-                # not to mutate the dict, which would corrupt
-                # ``loss_history_`` and the live-curve payload.
-                epoch_callback(dict(entry))
-
-            if val_loss < best_val_loss - 1e-12:
-                best_val_loss = val_loss
-                best_state_dict = {
-                    k: v.detach().clone().cpu() for k, v in module.state_dict().items()
-                }
-                best_epoch = epoch
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if epochs_without_improvement >= cfg.patience:
-                    logger.info(
-                        "NnMlpModel.fit: early stopping at epoch {} "
-                        "(best_epoch={} best_val_loss={:.6g}).",
-                        epoch,
-                        best_epoch,
-                        best_val_loss,
-                    )
-                    break
-
-        # Restore best-epoch weights (plan D9).
+        # Restore best-epoch weights (plan D9).  The helper returns CPU
+        # tensors; move them back to the fit device before the strict
+        # load so the module stays on ``device`` for predict().
         module.load_state_dict({k: v.to(device) for k, v in best_state_dict.items()}, strict=True)
 
         # --- 8. Publish state -----------------------------------------

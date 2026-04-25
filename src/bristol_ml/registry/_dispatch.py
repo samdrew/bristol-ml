@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from bristol_ml.models.linear import LinearModel
 from bristol_ml.models.naive import NaiveModel
 from bristol_ml.models.nn.mlp import NnMlpModel
+from bristol_ml.models.nn.temporal import NnTemporalModel
 from bristol_ml.models.sarimax import SarimaxModel
 from bristol_ml.models.scipy_parametric import ScipyParametricModel
 
@@ -45,6 +46,7 @@ _TYPE_TO_CLASS: dict[str, type] = {
     "sarimax": SarimaxModel,
     "scipy_parametric": ScipyParametricModel,
     "nn_mlp": NnMlpModel,
+    "nn_temporal": NnTemporalModel,
 }
 
 #: Class name → sidecar ``type`` string.  Keyed on ``type(model).__name__``
@@ -60,6 +62,7 @@ _CLASS_NAME_TO_TYPE: dict[str, str] = {
     "SarimaxModel": "sarimax",
     "ScipyParametricModel": "scipy_parametric",
     "NnMlpModel": "nn_mlp",
+    "NnTemporalModel": "nn_temporal",
 }
 
 

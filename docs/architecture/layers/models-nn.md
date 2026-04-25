@@ -1,9 +1,14 @@
 # Models — neural-network sub-layer
 
-- **Status:** Provisional — first realised by Stage 10 (`NnMlpModel` — simple
-  feed-forward MLP; shipped). Revisit at Stage 11 (complex / temporal
-  neural network — inherits this sub-layer's training-loop conventions,
-  reproducibility recipe, and `state_dict`-inside-joblib artefact envelope).
+- **Status:** Stable for two families — first realised by Stage 10
+  (`NnMlpModel` — simple feed-forward MLP; shipped) and extended at
+  Stage 11 (`NnTemporalModel` — TCN; shipped).  The Stage 10 D10
+  extraction seam fired at Stage 11 T1, so the hand-rolled training
+  loop and four-stream seed recipe now live at
+  `bristol_ml.models.nn._training` and are shared by both classes.
+  Revisit when a third torch-backed family arrives (Stage 17 candidate
+  for a competitive-NN tuning surface, or earlier if a Transformer
+  variant graduates from the Stage 11 D1 deferral).
 - **Parent layer doc:** [`docs/architecture/layers/models.md`](models.md)
   (the `Model` protocol + `ModelMetadata` + joblib IO helpers that every
   family conforms to).
@@ -43,15 +48,17 @@ the protocol:
    envelope — that keeps the Stage 9 registry's single-file artefact
    contract (plan D5 revised / AC-4).
 
-Stage 11 (complex / temporal neural network) will add a second class
+Stage 11 has now added the second class — `NnTemporalModel` (TCN) —
 that shares exactly these two concerns.  Rather than rewrite the
-training-loop idiom in every subsequent NN stage, this sub-layer names
-the conventions once.  The `src/bristol_ml/models/nn/` package is the
-extraction destination flagged at plan D10 — when Stage 11's model
-arrives with a second hand-rolled loop, the training-loop body in
-`NnMlpModel._run_training_loop` moves to
-`src/bristol_ml/models/nn/_training.py` under a shared helper, and the
-two classes call into it.
+training-loop idiom in every subsequent NN stage, this sub-layer
+names the conventions once.  The Stage 10 D10 extraction seam fired
+at Stage 11 T1: the training-loop body and the four-stream seed
+recipe moved from `NnMlpModel._run_training_loop` to
+`src/bristol_ml/models/nn/_training.py::run_training_loop`, and both
+classes import and call it.  The seam continues to point forward —
+the next swap (gradient clipping, LR scheduling, mixed precision)
+extends `_training.py` rather than re-forking the loop into each
+family.
 
 ## What lives here, what does not
 
@@ -64,8 +71,10 @@ two classes call into it.
 | Z-score scaler buffers persisted in `state_dict` via `register_buffer` | ✓ | sklearn `StandardScaler` sibling file |
 | Single-joblib artefact envelope (`state_dict_bytes` + `config_dump` + scalars) | ✓ | two-file (`model.pt` + `hyperparameters.json`) layout |
 | Loss-history surfacing (`loss_history_: list[dict]` + `epoch_callback` seam) | ✓ | live-plot rendering (notebook owns that) |
-| Gradient clipping, LR scheduling as configurable knobs | — | Stage 11 owns these behind a shared `_training.py` helper |
-| `BaseTorchModel` abstract base class | — | Stage 11 extraction trigger; a premature ABC now would bind Stage 11's design before its requirements are known |
+| Gradient clipping, LR scheduling as configurable knobs | — | Stage 11 deferred to a future stage; `run_training_loop` does not currently expose these knobs (Stage 10 X6 stays cut) |
+| `BaseTorchModel` abstract base class | — | Stage 11 D4 extracted a *function*, not a class hierarchy — Stage 10 X7 cut re-affirmed at Stage 11 |
+| Sequence-data adapter (`_SequenceDataset` lazy windowing) | ✓ | inside `temporal.py` — private to the temporal model; Stage 10 has no use for it |
+| Causal-padding recipe (`F.pad(x, (left, 0))` + `Conv1d(padding=0)`) | ✓ | TCN-specific; documented in §"Stage 11 addition" below |
 | Hyperparameter search (random / Optuna / Ray Tune) | — | out of scope at Stage 10; undesigned |
 | Distributed / multi-GPU training (DDP / FSDP / model sharding) | — | explicitly out of scope per intent §Out of scope |
 | Automatic loss-curve PNG saved to the registry run dir | — | scope-diff cut (NFR-4): AC-3 is satisfied by `loss_history_` + `plots.loss_curve`, no registry coupling |
@@ -83,17 +92,18 @@ owns the primitive (Stage 12 for serving, Stage 18 for drift).
 
 ```
 src/bristol_ml/models/nn/
-├── __init__.py          # exports: NnMlpModel
+├── __init__.py          # exports: NnMlpModel, NnTemporalModel (lazy __getattr__)
 ├── __main__.py          # `python -m bristol_ml.models.nn` → delegates to mlp.py
 ├── mlp.py               # NnMlpModel + _NnMlpModule + module-level helpers
+├── temporal.py          # NnTemporalModel + _NnTemporalModuleImpl + _TemporalBlockImpl + _SequenceDataset
+├── _training.py         # run_training_loop + _seed_four_streams (shared by both families)
 └── CLAUDE.md            # module guide (this file's sibling)
 ```
 
-`_training.py` is **not** shipped at Stage 10.  It lands at Stage 11 as
-the extraction destination when the second torch-backed model arrives.
-Plan D10 names the refactor trigger explicitly: the extraction happens
-when Stage 11's training loop diverges from Stage 10's by more than
-"add one optimiser kwarg", not before.
+`_training.py` was the Stage 10 D10 extraction destination, fired at
+Stage 11 T1.  The next swap on the loop body (gradient clipping, LR
+scheduling, mixed precision) extends this module rather than
+re-forking the loop into each family.
 
 ### 2. Public interface
 
@@ -290,28 +300,229 @@ The resolved device is:
 `map_location="cpu"` so a CUDA-trained artefact loads cleanly on a
 CPU-only host (the common case for a Stage 12 serving stub).
 
+## Stage 11 addition — `NnTemporalModel` (TCN)
+
+Stage 11 lands the second torch-backed family in this sub-layer, a
+Temporal Convolutional Network conforming to the same
+`Model` protocol surface as `NnMlpModel`.  Every Stage-10 contract
+above (D5 envelope, D7' four-stream seed, D8 cold-start, D9 best-epoch
+restore, D11 device selection) is inherited unchanged; the additions
+below are temporal-specific.  Shipping a second concrete class is the
+event that **fires the Stage 10 D10 extraction seam** — see the
+`_training.py` row in the module inventory above.
+
+### A. Architecture (plan D1)
+
+`_NnTemporalModuleImpl` is a stack of `num_blocks` residual TCN blocks.
+Each block (`_TemporalBlockImpl`) holds two `Conv1d` layers with
+`kernel_size=k`, `padding=0`, `dilation=2**block_idx`, optionally
+wrapped in `torch.nn.utils.parametrizations.weight_norm`.  Causal
+padding is realised inside the block's `forward` via
+`F.pad(x, (left_pad, 0))` where `left_pad = (k - 1) * dilation` — the
+Bai et al. (2018) recipe.  Activations are ReLU; LayerNorm is applied
+over the channel dimension (transpose to `(B, L, C)` → `LayerNorm(C)`
+→ transpose back) — *not* over time, because BatchNorm-style
+running statistics across timesteps would silently couple the future
+into the present.  A 1×1 head (`Conv1d(channels, 1, kernel_size=1)`)
+maps the channel axis down to one scalar per timestep; the forward
+pass reads the *last* timestep only, producing one prediction per
+window.
+
+The four scaler buffers (`feature_mean`, `feature_std`, `target_mean`,
+`target_std`) ride inside `state_dict()` via `register_buffer` — same
+recipe as Stage 10, same regression guard
+(`load_state_dict(strict=True)` catches a missing buffer loudly).
+Features are normalised inside `forward()`; the target is normalised
+*before* the `_SequenceDataset` is constructed so the MSE loss in the
+shared training loop operates on the O(1) normalised scale.
+
+The CUDA defaults (8 blocks × 128 channels × kernel 3) yield a
+receptive field of `1 + 2·(k-1)·(2^num_blocks − 1) = 1021` timesteps —
+enough to cover the weekly cycle (168 h) with ~6× headroom.  A
+`@model_validator` on `NnTemporalConfig` rejects `seq_len <
+max(2·kernel_size, receptive_field // 8)` so a degenerate
+configuration (window smaller than a meaningful fraction of the
+receptive field) cannot ship silently.
+
+### B. `_SequenceDataset` (plan D7) — lazy windowing
+
+```python
+class _SequenceDataset(torch.utils.data.Dataset):
+    """Lazy sliding-window dataset for temporal training.
+
+    Stores two flat numpy arrays — features ``(N, n_features)`` and
+    target ``(N,)`` — and computes ``(features[i:i+seq_len],
+    target[i+seq_len])`` per ``__getitem__`` call.  ``__len__`` is
+    ``N - seq_len`` (number of valid windows).  Eager materialisation
+    of the full ``(N - seq_len, seq_len, n_features)`` tensor would
+    cost ~1.4 GB on the intent's default 44-calendar + ~6-weather
+    feature set; the lazy path is ~10 MB.
+    """
+```
+
+The class is private to `temporal.py` because no other Stage 11 surface
+needs it.  Lazy windowing is load-bearing for both the laptop-CPU
+override path and the meetup-demo memory budget; the eager pattern is
+guarded against by `test_sequence_dataset_does_not_eagerly_materialise_
+full_tensor`, which asserts `__init__` does not allocate a tensor
+larger than the input frame.
+
+### C. Pattern A exogenous handling (plan D3)
+
+The dataset yields windows of shape `(seq_len, n_features)` where
+`n_features` is the same column set the MLP uses (weather + calendar
+one-hots).  No separate "known-future" branch; no TFT-style side
+channel.  At day-ahead horizon the calendar / weather features are
+already aligned to the target index in the Stage 5 feature table, so
+Patterns A and B (in-sequence vs side-channel) are informationally
+equivalent — Pattern A is strictly simpler (single-branch
+`nn.Module`, no decoder, no special collation).
+
+### D. Save-envelope addition (plan D5 / R7)
+
+The Stage 10 single-joblib envelope is preserved verbatim plus *two
+new fields*:
+
+```python
+{
+    "state_dict_bytes": bytes,
+    "config_dump": dict[str, Any],
+    "feature_columns": tuple[str, ...],
+    "seq_len": int,                  # NEW at Stage 11 — redundant with
+                                     # config_dump["seq_len"], explicit
+                                     # so the load path can sanity-check
+                                     # before reconstructing the module
+    "warmup_features": pd.DataFrame, # NEW at Stage 11 — the last
+                                     # ``seq_len`` rows of the training
+                                     # feature frame (see below)
+    "seed_used": int,
+    "best_epoch": int,
+    "loss_history": list[dict[str, float]],
+    "fit_utc": str,
+    "device_resolved": str,
+}
+```
+
+The redundant `seq_len` field is intentional.  Reading it before the
+Pydantic re-validation of `config_dump` lets a future migration tool
+inspect a stale artefact without round-tripping through a possibly
+breaking schema.  `test_nn_temporal_save_and_load_round_trips_seq_len_
+and_state_dict` is the regression guard.
+
+`warmup_features` carries the last `seq_len` rows of the training
+feature frame and is **load-bearing for the harness contract**.  A
+sliding-window TCN that consumes `seq_len` historical hours per
+prediction naturally outputs `len(features) - seq_len` predictions for
+a feature frame of length `len(features)`; the Stage 6 harness
+(`harness.evaluate(...)`) and the protocol shape `predict(features)
+-> pd.Series` indexed on `features.index` both expect
+`len(y_pred) == len(features)`.  `predict()` therefore concatenates
+`warmup_features` to the front of the caller's input frame, runs the
+windowed forward pass, and slices the prediction back to the caller's
+index.  Without `warmup_features` the load path could not reproduce
+the predict-time alignment the harness enforces, so every loaded
+`NnTemporalModel` would silently drop the first `seq_len` rows of any
+prediction request.
+
+This field is **the one Stage 11 contract addition not named in plan
+D5**.  The plan implicitly assumed alignment was handled inside
+`predict()` via re-indexing; the implementation chose the warmup
+prefix because (i) it preserves the protocol's
+`len(y_pred) == len(features)` invariant without truncating the
+caller's index, (ii) it makes the alignment honest about what the
+model actually conditions on (the warmup rows ride the
+`feature_mean` / `feature_std` scalers exactly as training data did),
+and (iii) it survives joblib round-trip without a custom serialiser.
+The cost is a small parquet-shaped tail in the artefact; on the
+Stage 11 production defaults at `seq_len=168` × ~50 columns ×
+`float64` this is ~70 kB, negligible against the `state_dict_bytes`
+payload.  Adversarial regression guards
+(`test_nn_temporal_load_rejects_envelope_with_mismatched_seq_len` and
+`test_nn_temporal_load_rejects_envelope_missing_warmup_features`)
+pin both load-time defences against silent corruption.
+
+### E. Training-loop ownership has moved
+
+Both `NnMlpModel.fit` and `NnTemporalModel.fit` now build their own
+collaborators (module + dataloaders + optimiser + criterion) and call
+the shared `bristol_ml.models.nn._training.run_training_loop(module,
+train_loader, val_loader, *, optimiser, criterion, device, max_epochs,
+patience, loss_history, epoch_callback) -> tuple[best_state_dict,
+best_epoch]`.  The Stage 10 D7' seed recipe (`_seed_four_streams`)
+moved with the loop and is imported from `_training.py` by both
+families.  The protocol-level shape of `loss_history_` —
+`list[dict[str, float]]` with keys `{"epoch", "train_loss",
+"val_loss"}` — is preserved bit-for-bit; the live-loss-curve cell in
+both notebooks (`notebooks/10-simple-nn.ipynb`,
+`notebooks/11-complex-nn.ipynb`) consumes the same shape via the
+`epoch_callback` seam.  Two structural regression guards
+(`test_nn_mlp_fit_still_uses_shared_training_loop_after_extraction`
+and `test_nn_temporal_fit_uses_shared_training_loop`) pin both
+classes to the shared call-site so a future refactor cannot silently
+re-inline the loop body into either family.
+
+### F. Harness-factory catch-up (plan D14)
+
+Stage 10 added a `NnMlpConfig` branch to `train.py`'s inline dispatcher
+but did not add the matching branch to
+`evaluation.harness._build_model_from_config`.  The gap was latent
+(the train CLI was the only user of `NnMlpModel` until Stage 11); the
+codebase map flagged it as a one-line discrepancy.  Stage 11 T6 closes
+the gap *in the same commit* as the new `NnTemporalConfig` branch
+(D13 clause iii), so anyone driving `model=nn_mlp` through the harness
+CLI's internal factory now reaches the right family.  The regression
+guard is `test_harness_build_model_from_config_dispatches_nn_mlp_
+after_catch_up`; see the D14 note in `models/nn/CLAUDE.md` for the
+audit-trail framing.
+
+### G. Notebook surface — ablation table (plan D10 + AC-3 / AC-5)
+
+`notebooks/11-complex-nn.ipynb` ships the Stage 11 demo moment: a
+predict-only ablation table covering all six families (`naive`,
+`linear`, `sarimax`, `scipy_parametric`, `nn_mlp`, `nn_temporal`) on
+the same single-holdout slice (D12).  The cell loops over
+`registry.list_runs(...)` results, calls `registry.load(run_id)` then
+`model.predict(X_holdout)`, and composes metrics inline using the
+existing `bristol_ml.evaluation.metrics` functions.  No re-fitting of
+already-registered runs (AC-5 by construction); the cell is
+explicitly tested with a `fit`-is-`raise` monkeypatch
+(`test_notebook_11_ablation_cell_does_not_refit_registered_runs`).
+
+The shipped table renders four metric columns (`mae`, `mape`, `rmse`,
+`wape`) plus `model` and `run_id`.  Plan D10's seven-column spec also
+named `MAE_ratio_vs_NESO`, `training_time_s`, and `param_count`; those
+three are deferred and surfaced in the notebook's closing markdown
+cell.  The deferral is **not silently cut**: `MAE_ratio_vs_NESO`
+requires a warm NESO archive plus the Stage 4 half-hourly-to-hourly
+alignment helper, and `training_time_s` / `param_count` would require
+a `SidecarFields` extension.  Both are candidate items for a future
+housekeeping stage.
+
 ## Upgrade seams
 
 Each of these is swappable without touching downstream code.
 
 | Swappable | Load-bearing |
 |-----------|--------------|
-| Architecture (`hidden_sizes`, `activation`, `dropout`) | `NnMlpConfig.model_dump()` round-trips through `config_dump` |
-| Optimiser (Adam → AdamW → SGD) | The `_run_training_loop` private contract — per-epoch `train_loss` / `val_loss` floats |
+| Architecture (`hidden_sizes`, `activation`, `dropout` for MLP; `num_blocks`, `channels`, `kernel_size` for TCN) | `NnMlpConfig.model_dump()` / `NnTemporalConfig.model_dump()` round-trip through `config_dump` |
+| Optimiser (Adam → AdamW → SGD) | The `run_training_loop` shared contract in `_training.py` — per-epoch `train_loss` / `val_loss` floats; the optimiser is built by the calling family |
 | Early-stopping policy (patience → max-minus-N plateau) | The `loss_history_` shape: `list[dict]` with keys `{"epoch", "train_loss", "val_loss"}` |
 | Scaler family (z-score → min-max → robust) | `register_buffer` round-trip through `state_dict` |
-| Serialisation backend (joblib envelope → `skops.io` envelope at Stage 12) | `state_dict_bytes` + `config_dump` as the two reconstruction primitives |
+| Serialisation backend (joblib envelope → `skops.io` envelope at Stage 12) | `state_dict_bytes` + `config_dump` as the two reconstruction primitives (plus `seq_len` for `NnTemporalModel`) |
 | Device policy (CPU-only → auto → pinned) | `_select_device(preference)` returning `torch.device` |
-| Training-loop ownership (per-model → shared `_training.py`) | `_run_training_loop` signature — the Stage 11 extraction trigger |
+| Training-loop ownership (per-model → shared `_training.py`) | Fired at Stage 11; future swap is `_training.py` → `_training_v2.py` behind a feature flag |
+| Weight-norm API (legacy → parametrizations) | Already on the parametrizations API at Stage 11; legacy fallback retained for `torch < 2.1` |
+| Window-data adapter (Stage 11 `_SequenceDataset` lazy → an eager `torch.compile`-friendly variant) | The two-call surface: `__len__` returns `N - seq_len`; `__getitem__(i)` returns `(features[i:i+seq_len], target[i+seq_len])` as `float32` tensors |
 
 ## Module inventory
 
 | Module | Family | Stage | Status | Notes |
 |--------|--------|-------|--------|-------|
-| `models/nn/__init__.py` | — (re-exports) | 10 | Shipped | `from bristol_ml.models.nn.mlp import NnMlpModel`; no heavy imports at package load. |
+| `models/nn/__init__.py` | — (re-exports) | 10 | Shipped | Lazy `__getattr__` re-exports `NnMlpModel` (Stage 10) and `NnTemporalModel` (Stage 11); no heavy imports at package load. |
 | `models/nn/__main__.py` | — (CLI entry) | 10 | Shipped | `python -m bristol_ml.models.nn` delegates to `mlp.py --help`, printing the resolved `NnMlpConfig` schema + help text. |
-| `models/nn/mlp.py` | Simple MLP | 10 | Shipped | `NnMlpModel` + `_NnMlpModule` + `_select_device`, `_seed_four_streams`, `_make_mlp`. 1 hidden layer × 128 units default; ~40 k parameters. Handles CPU / CUDA / MPS via `_select_device`. State-dict-inside-joblib artefact envelope per plan D5 revised. |
-| `models/nn/_training.py` (planned) | — (shared training loop) | 11 | Planning | Extraction destination when Stage 11's second torch-backed model arrives. Named at plan D10; not shipped at Stage 10. |
+| `models/nn/mlp.py` | Simple MLP | 10 | Shipped | `NnMlpModel` + `_NnMlpModule` + `_select_device`, `_make_mlp`. 1 hidden layer × 128 units default; ~40 k parameters. Handles CPU / CUDA / MPS via `_select_device`. State-dict-inside-joblib artefact envelope per plan D5 revised. As of Stage 11 calls `_training.run_training_loop` rather than a local loop. |
+| `models/nn/_training.py` | — (shared training loop) | 11 | Shipped | `run_training_loop(...)` + `_seed_four_streams`. Extracted from `mlp.py` at Stage 11 T1 firing the Stage 10 D10 seam. Both `NnMlpModel.fit` and `NnTemporalModel.fit` import and call it; the shared body owns the per-epoch accounting, val-loss tracking, patience-based early stopping, best-epoch weight restore, and `loss_history` population. |
+| `models/nn/temporal.py` | TCN (temporal) | 11 | Shipped | `NnTemporalModel` + `_NnTemporalModuleImpl` + `_TemporalBlockImpl` + `_SequenceDataset` + `_select_device`. 8 dilated residual blocks × kernel 3 × 128 channels at the CUDA defaults; ~1 M parameters; receptive field 1021 steps. Single-joblib envelope inherits Stage 10 D5 plus a redundant `seq_len` field for explicit round-trip auditing. |
 
 ## Known trade-offs
 
@@ -340,6 +551,21 @@ Each of these is swappable without touching downstream code.
   call-site.  Shipping a `BaseTorchModel` abstraction now would bind
   Stage 11's design before Stage 11's requirements are understood
   (scope-diff X7 cut).
+- **`_select_device` duplicated in `mlp.py` and `temporal.py`.**  The
+  Stage 11 extraction at T1 lifted the training loop and
+  `_seed_four_streams` into `_training.py` but deliberately left
+  `_select_device` defined twice — once per family — so each module's
+  log message can name its own family verbatim ("`NnMlpModel resolving
+  device 'auto' to 'cuda'`" rather than a generic
+  "`bristol_ml.models.nn._training resolving device …`").  The two
+  copies are byte-identical at Stage 11; consolidation into
+  `_training.py` is the obvious next step at the third NN family.
+  The trade-off is one duplicated 30-line helper now versus a
+  wrapper-per-family at the consolidation point; the duplication keeps
+  the call-site honest about which family is asking, at the cost of a
+  search-and-replace when the helper next changes shape.  Tracked as
+  a follow-up housekeeping item (no separate hot-fix branch) for the
+  next NN-family stage.
 
 ## Open questions
 
@@ -373,19 +599,34 @@ Each of these is swappable without touching downstream code.
 
 - [`docs/intent/10-simple-nn.md`](../../intent/10-simple-nn.md) — the
   five ACs + "Points for consideration".
+- [`docs/intent/11-complex-nn.md`](../../intent/11-complex-nn.md) —
+  Stage 11 ACs + the ablation-table demo moment.
 - [`docs/plans/completed/10-simple-nn.md`](../../plans/completed/10-simple-nn.md)
   — twelve decisions, five NFRs, scope diff.
+- [`docs/plans/completed/11-complex-nn.md`](../../plans/completed/11-complex-nn.md)
+  — fourteen kept decisions (two cut), seven NFRs, scope diff;
+  Stage 10 D10 extraction seam fired here.
 - [`docs/lld/stages/10-simple-nn.md`](../../lld/stages/10-simple-nn.md)
   — Stage 10 retrospective.
+- [`docs/lld/stages/11-complex-nn.md`](../../lld/stages/11-complex-nn.md)
+  — Stage 11 retrospective; observed wall-clocks, ablation results,
+  AC-5 reconciliation.
 - [`docs/lld/research/10-simple-nn-requirements.md`](../../lld/research/10-simple-nn-requirements.md),
   [`codebase.md`](../../lld/research/10-simple-nn-codebase.md),
   [`domain.md`](../../lld/research/10-simple-nn-domain.md),
   [`scope-diff.md`](../../lld/research/10-simple-nn-scope-diff.md) —
-  Phase 1 discovery artefacts.
+  Stage 10 Phase 1 discovery artefacts.
+- [`docs/lld/research/11-complex-nn-requirements.md`](../../lld/research/11-complex-nn-requirements.md),
+  [`codebase.md`](../../lld/research/11-complex-nn-codebase.md),
+  [`domain.md`](../../lld/research/11-complex-nn-domain.md),
+  [`scope-diff.md`](../../lld/research/11-complex-nn-scope-diff.md) —
+  Stage 11 Phase 1 discovery artefacts.
 - [`src/bristol_ml/models/nn/CLAUDE.md`](../../../src/bristol_ml/models/nn/CLAUDE.md)
   — module-local concrete surface guide.
-- [`src/bristol_ml/models/nn/mlp.py`](../../../src/bristol_ml/models/nn/mlp.py)
-  — implementation.
+- [`src/bristol_ml/models/nn/mlp.py`](../../../src/bristol_ml/models/nn/mlp.py),
+  [`temporal.py`](../../../src/bristol_ml/models/nn/temporal.py),
+  [`_training.py`](../../../src/bristol_ml/models/nn/_training.py)
+  — implementations.
 - [`docs/architecture/layers/models.md`](models.md) — parent layer doc
   (the `Model` protocol + `ModelMetadata` + joblib IO that this
   sub-layer conforms to).
@@ -393,6 +634,9 @@ Each of these is swappable without touching downstream code.
   file-path contract that drove the plan D5 revision.
 - Ash, J., & Adams, R. P. (2020). *On warm-starting neural network
   training*. NeurIPS. (Plan D8 cold-start justification.)
+- Bai, S., Kolter, J. Z., & Koltun, V. (2018). *An empirical
+  evaluation of generic convolutional and recurrent networks for
+  sequence modeling*. arXiv 1803.01271. (Plan D1 TCN recipe.)
 - Wong, B. (2011). *Points of view: Color blindness*. Nature Methods
   8:441. (Stage 6 D2 — the Okabe-Ito palette used by `plots.loss_curve`
   at plan D6.)

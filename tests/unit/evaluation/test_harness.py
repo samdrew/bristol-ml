@@ -895,3 +895,89 @@ def test_harness_cli_runs_with_model_scipy_parametric(
         f"harness _cli_main must exit 0 with model=scipy_parametric on a warm feature cache; "
         f"got exit_code={exit_code} (Stage 8 T6 AC-7)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 11 T6 — nn dispatcher wiring (D13 iii + D14 catch-up)
+# Plan: docs/plans/active/11-complex-nn.md §6 Task T6
+# ---------------------------------------------------------------------------
+
+
+def test_harness_build_model_from_config_dispatches_nn_temporal() -> None:
+    """Stage 11 T6 (D13 clause iii): dispatcher returns an ``NnTemporalModel``.
+
+    Directly instantiates a default ``NnTemporalConfig`` and passes it to
+    the module-private dispatcher.  Asserts the returned object is an
+    instance of ``NnTemporalModel`` — not merely truthy — so that a
+    wrong-type return (e.g. ``NnMlpModel`` or ``None``) will fail.
+
+    Plan clause: docs/plans/active/11-complex-nn.md §6 Task T6 —
+    ``test_harness_build_model_from_config_dispatches_nn_temporal`` (D13
+    clause iii).
+    """
+    from bristol_ml.models.nn.temporal import NnTemporalModel
+    from conf._schemas import NnTemporalConfig
+
+    cfg = NnTemporalConfig(
+        seq_len=32,
+        num_blocks=2,
+        channels=8,
+        kernel_size=3,
+        weight_norm=False,
+        dropout=0.0,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        batch_size=64,
+        max_epochs=3,
+        patience=10,
+        seed=None,
+        device="cpu",
+        target_column="nd_mw",
+        feature_columns=None,
+    )
+    result = _build_model_from_config(cfg)
+
+    assert isinstance(result, NnTemporalModel), (
+        f"_build_model_from_config(NnTemporalConfig(...)) must return an NnTemporalModel; "
+        f"got {type(result)!r} (Stage 11 T6 D13 clause iii)."
+    )
+
+
+def test_harness_build_model_from_config_dispatches_nn_mlp_after_catch_up() -> None:
+    """Stage 11 T6 (D14 catch-up): dispatcher returns an ``NnMlpModel``.
+
+    Stage 10 shipped the ``NnMlpConfig`` isinstance branch in ``train.py``
+    but the harness ``_build_model_from_config`` factory was missing the
+    same branch (plan D14 — Stage 10 gap surfaced at Stage 11 T6).  This
+    test is the regression guard for the catch-up commit: after D14 lands,
+    ``_build_model_from_config(NnMlpConfig(...))`` must return a proper
+    ``NnMlpModel`` instead of ``None``.
+
+    Plan clause: docs/plans/active/11-complex-nn.md §6 Task T6 —
+    ``test_harness_build_model_from_config_dispatches_nn_mlp_after_catch_up``
+    (D14 — regression against the Stage 10 gap).
+    """
+    from bristol_ml.models.nn.mlp import NnMlpModel
+    from conf._schemas import NnMlpConfig
+
+    cfg = NnMlpConfig(
+        hidden_sizes=[8],
+        activation="relu",
+        dropout=0.0,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        batch_size=16,
+        max_epochs=3,
+        patience=10,
+        seed=None,
+        device="cpu",
+        target_column="nd_mw",
+        feature_columns=None,
+    )
+    result = _build_model_from_config(cfg)
+
+    assert isinstance(result, NnMlpModel), (
+        f"_build_model_from_config(NnMlpConfig(...)) must return an NnMlpModel after the "
+        f"Stage 11 D14 catch-up; got {type(result)!r}. "
+        f"The Stage 10 harness-factory gap was not closed."
+    )

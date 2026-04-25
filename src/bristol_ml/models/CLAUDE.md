@@ -172,15 +172,21 @@ before you touch `scipy_parametric.py`.
   consolidation of the guard is a separate refactor
   (owner: models-layer housekeeping stage, not Stage 8).
 
-## Neural-network sub-layer (Stage 10+)
+## Neural-network sub-layer (Stages 10–11)
 
 The `models/nn/` package is the **neural-network sub-layer** introduced at
-Stage 10 (`NnMlpModel` — simple MLP, first PyTorch family).  It follows the
-same `Model` protocol as every other family; the sub-layer exists to name
-the PyTorch-specific conventions (training loop, four-stream seed recipe,
-`state_dict`-inside-joblib artefact envelope) that Stage 11's temporal
-architecture will inherit.
+Stage 10 (`NnMlpModel` — simple MLP) and extended at Stage 11
+(`NnTemporalModel` — dilated causal TCN, Bai et al. 2018).  Both families
+follow the same `Model` protocol; the sub-layer names the PyTorch-specific
+conventions (shared training loop in `_training.py`, four-stream seed recipe,
+`state_dict`-inside-joblib artefact envelope) that every subsequent
+NN-family class inherits.
 
+- `bristol_ml.models.nn.NnMlpModel` — feed-forward MLP (Stage 10).
+- `bristol_ml.models.nn.NnTemporalModel` — dilated causal TCN (Stage 11).
+  Introduces `_SequenceDataset` (lazy windowing) and the `seq_len: int`
+  envelope field; shares the training loop with `NnMlpModel` via
+  `bristol_ml.models.nn._training.run_training_loop`.
 - Sub-layer contract — `docs/architecture/layers/models-nn.md`.
 - Module guide — `src/bristol_ml/models/nn/CLAUDE.md`.
 
@@ -192,6 +198,7 @@ architecture will inherit.
     python -m bristol_ml.models.scipy_parametric --help
     python -m bristol_ml.models.nn              --help
     python -m bristol_ml.models.nn.mlp          --help
+    python -m bristol_ml.models.nn.temporal     --help
 
 The `io.py` and `protocol.py` submodules are not standalone — they are
 consumed by the concrete models. This is intentional: the layer's public
@@ -214,6 +221,8 @@ CLIs are the models, not the plumbing.
   + notebook); retro at `docs/lld/stages/08-scipy-parametric.md`.
 - Stage 10 plan — `docs/plans/completed/10-simple-nn.md`; retro at
   `docs/lld/stages/10-simple-nn.md`.
+- Stage 11 plan — `docs/plans/completed/11-complex-nn.md`; retro at
+  `docs/lld/stages/11-complex-nn.md`.
 - Protocol rationale — `docs/architecture/decisions/0003-protocol-for-model-interface.md`
   (ADR filed in Task T10).
 - Intent — `docs/intent/04-linear-baseline.md` AC-2 (interface must be

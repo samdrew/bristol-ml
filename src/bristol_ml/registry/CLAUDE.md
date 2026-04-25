@@ -107,6 +107,7 @@ contract.
 
     python -m bristol_ml.registry list
     python -m bristol_ml.registry list --target nd_mw --model-type nn_mlp
+    python -m bristol_ml.registry list --target nd_mw --model-type nn_temporal
     python -m bristol_ml.registry describe <run_id>
 
 The `--help` output documents the `--registry-dir` override.

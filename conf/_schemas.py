@@ -711,10 +711,177 @@ class ScipyParametricConfig(BaseModel):
     p0: tuple[float, ...] | None = None
 
 
+class NnTemporalConfig(BaseModel):
+    """Configuration for the temporal convolutional network model (Stage 11).
+
+    Stage 11 ships a Bai-et-al.-2018-style Temporal Convolutional Network
+    (TCN) — dilated causal 1D convolutions stacked into residual blocks —
+    conforming to the Stage 4 :class:`~bristol_ml.models.protocol.Model`
+    protocol.  The family is the second torch-backed model after Stage 10's
+    MLP; together they fire the D10 extraction seam flagged in Stage 10
+    (the shared training loop now lives in
+    :mod:`bristol_ml.models.nn._training`).
+
+    Defaults target the Blackwell dev host (CUDA 12.8 / cu128 wheels, per
+    Stage 10 D1) — materially larger than the MLP so the neural family
+    gets a fair shot at beating the classical / parametric baselines on
+    the ablation table.  Every architecture and training knob is exposed
+    at the YAML / Hydra layer so a CPU-only facilitator can tract the
+    demo via CLI overrides; the recommended CPU recipe rides in the
+    ``conf/model/nn_temporal.yaml`` header comment.
+
+    A brief tour of the knobs:
+
+    - ``seq_len`` is the number of historical hours the model sees for
+      each prediction.  ``168`` is the weekly cycle anchor (plan D2;
+      UniLF 2025 on hourly STLF).  A Pydantic ``@model_validator`` rejects
+      configurations where ``seq_len`` is small relative to the
+      architecture's receptive field — the heuristic is loose
+      (``seq_len >= max(2*kernel_size, receptive_field // 8)``) but catches
+      the common footgun of keeping the 8-block CUDA defaults while
+      dialling ``seq_len`` down to 24.
+    - ``num_blocks`` x ``channels`` x ``kernel_size`` shape the TCN body.
+      Dilations double per block (``[1, 2, 4, ..., 2**(num_blocks-1)]``) so
+      the receptive field grows exponentially with ``num_blocks``
+      (closed-form: ``1 + 2*(kernel_size-1)*(2**num_blocks - 1)``).  At
+      defaults this is 1021 steps — ~6x the weekly cycle, covering the
+      intent's "same hour last week" pedagogical anchor with ample
+      headroom.
+    - ``weight_norm`` wraps every ``Conv1d`` via
+      :func:`torch.nn.utils.parametrizations.weight_norm` — the modern
+      parametrizations API.  ``state_dict`` keys round-trip as
+      ``...parametrizations.weight.original0`` /
+      ``...parametrizations.weight.original1`` (not the legacy
+      ``weight_g`` / ``weight_v``); the load path uses
+      ``strict=True`` so a saved artefact and a freshly-built skeleton
+      either agree exactly or raise.  ``temporal.py`` keeps a one-shot
+      fallback to the legacy ``torch.nn.utils.weight_norm`` for
+      ``torch < 2.1`` but the project pin is ``torch>=2.7`` so the
+      parametrizations path is always taken in practice.
+    - ``dropout`` is applied once per residual block after the second
+      conv.  ``0.2`` is the capacity-regularisation trade at the defaults.
+    - ``feature_columns=None`` means "use the harness-supplied raw feature
+      set" — same idiom as :class:`NnMlpConfig`, :class:`LinearConfig`,
+      :class:`SarimaxConfig`.  Pattern A exogenous handling (plan D3): the
+      dataset yields sequences of shape ``(seq_len, n_features)`` where
+      ``n_features`` is the full column count; there is no separate
+      known-future side branch.
+    - ``seed=None`` means "derive per-fold seed from
+      ``config.project.seed + fold_index``" — inherited from Stage 10 D8
+      cold-start-per-fold determinism.
+    - ``device=auto`` resolves CUDA > MPS > CPU at fit time through the
+      same ``_select_device`` helper ``NnMlpModel`` uses.  Pin to
+      ``"cpu"`` in tests that need bit-identical reproducibility
+      (NFR-1 CPU path) or for the documented CPU-recipe demo override.
+
+    Design decisions and their evidence:
+
+    - Default ``num_blocks=8``, ``channels=128``, ``kernel_size=3``,
+      ``dropout=0.2``: plan D1 (CUDA-targeted; domain research §1-3 TCN
+      family table and receptive-field mathematics).
+    - Default ``batch_size=256``, ``max_epochs=100``, ``patience=10``,
+      ``learning_rate=1e-3``: plan D1 (CUDA-sized training budget) +
+      Stage 10 D3 / D9 precedent.
+    - ``seq_len=168``: plan D2 (UniLF 2025 on hourly STLF; weekly cycle
+      anchor).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator tag for the ``AppConfig.model`` tagged union; literal
+    # value matches the Hydra group filename (``conf/model/nn_temporal.yaml``).
+    type: Literal["nn_temporal"] = "nn_temporal"
+    # Target column on the Stage 3 / Stage 5 feature table.
+    target_column: str = "nd_mw"
+    # ``None`` means "use the harness-supplied raw feature set"; same
+    # pattern as Linear / SARIMAX / NnMlp.  Pattern A exogenous handling
+    # (plan D3) — all listed columns ride inside the sequence window.
+    feature_columns: tuple[str, ...] | None = None
+
+    # --- Architecture (plan D1 — CUDA defaults) -----------------------------
+    # Historical context window length in hours.  ``168`` anchors the
+    # weekly cycle (plan D2).  ``ge=2`` because a 1-step window degenerates
+    # to the flat feature-row baseline and there is a separate model
+    # family for that.
+    seq_len: int = Field(default=168, ge=2)
+    # Number of residual TCN blocks.  Dilations double per block;
+    # receptive field grows as ``1 + 2*(kernel_size-1)*(2**num_blocks - 1)``.
+    # ``le=12`` because beyond that the receptive field exceeds every
+    # reasonable ``seq_len`` and the model is wasting capacity on
+    # unreachable history.
+    num_blocks: int = Field(default=8, ge=1, le=12)
+    # Channel width of every Conv1d layer.  ``le=512`` is the pragmatic
+    # upper bound for a single-GPU run at ``batch_size=256`` on a 24 GB
+    # card; ``ge=8`` is the practical lower bound for the pedagogical
+    # CPU recipe.
+    channels: int = Field(default=128, ge=8, le=512)
+    # Convolution kernel size.  ``3`` is the Bai-et-al.-2018 default and
+    # balances receptive-field growth against parameter count.
+    kernel_size: int = Field(default=3, ge=2, le=7)
+    # Dropout after the second conv in each residual block.  Clamped at
+    # ``lt=1.0`` to avoid the degenerate "zero every activation" case.
+    dropout: float = Field(default=0.2, ge=0.0, lt=1.0)
+    # Apply weight-norm reparametrisation to every Conv1d via
+    # :func:`torch.nn.utils.parametrizations.weight_norm` (modern API on
+    # the pinned ``torch>=2.7``; ``temporal.py`` keeps a fallback to the
+    # legacy ``torch.nn.utils.weight_norm`` for ``torch<2.1`` but it is
+    # never exercised under the project's pinned floor).
+    weight_norm: bool = True
+
+    # --- Optimisation (plan D1 — CUDA defaults) ----------------------------
+    learning_rate: float = Field(default=1e-3, gt=0)
+    weight_decay: float = Field(default=0.0, ge=0)
+    batch_size: int = Field(default=256, ge=1)
+    max_epochs: int = Field(default=100, ge=1)
+    patience: int = Field(default=10, ge=1)
+
+    # --- Reproducibility (plan D6 — inherits Stage 10 D7') -----------------
+    # ``None`` defers to ``config.project.seed + fold_index`` inside
+    # ``fit`` (Stage 10 D8 cold-start).  Pin an explicit integer to make
+    # per-fold runs independently reproducible.
+    seed: int | None = None
+
+    # --- Device (plan D6 — inherits Stage 10 D11) --------------------------
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+
+    @model_validator(mode="after")
+    def _seq_len_covers_receptive_field(self) -> NnTemporalConfig:
+        """Reject configurations whose ``seq_len`` is too small for the architecture.
+
+        The receptive-field heuristic is intentionally loose: the rule is
+        ``seq_len >= max(2 * kernel_size, receptive_field // 8)``.  A
+        facilitator who wants ``seq_len=24`` can simultaneously drop
+        ``num_blocks`` to 3 (receptive field collapses accordingly); both
+        knobs are exposed.  The validator exists to prevent the silent
+        footgun of keeping 8-block CUDA defaults while dialling only
+        ``seq_len`` down — the model would be architecturally able to see
+        1021 steps of history but receive a 24-step window, wasting its
+        capacity on padding.  Plan D2 + R6.
+        """
+        receptive = 1 + 2 * (self.kernel_size - 1) * (2**self.num_blocks - 1)
+        minimum = max(2 * self.kernel_size, receptive // 8)
+        if self.seq_len < minimum:
+            raise ValueError(
+                f"NnTemporalConfig.seq_len={self.seq_len} is too small for the "
+                f"requested architecture (num_blocks={self.num_blocks}, "
+                f"kernel_size={self.kernel_size} → receptive field ~{receptive}); "
+                f"require seq_len >= {minimum}.  Either raise seq_len or reduce "
+                f"num_blocks / kernel_size."
+            )
+        return self
+
+
 # ``AppConfig.model`` is a Pydantic discriminated union: exactly one of the
 # model variants is active per run (matching Hydra group-override semantics).
 # The ``type`` discriminator is written into the YAML by each Hydra group file.
-ModelConfig = NaiveConfig | LinearConfig | SarimaxConfig | ScipyParametricConfig | NnMlpConfig
+ModelConfig = (
+    NaiveConfig
+    | LinearConfig
+    | SarimaxConfig
+    | ScipyParametricConfig
+    | NnMlpConfig
+    | NnTemporalConfig
+)
 
 
 class ModelMetadata(BaseModel):

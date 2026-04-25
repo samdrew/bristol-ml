@@ -534,8 +534,23 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
 
 def _build_model_from_config(model_cfg: object) -> Model | None:
-    """Instantiate the concrete model class named by the discriminated union."""
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
+    """Instantiate the concrete model class named by the discriminated union.
+
+    Stage 11 D13 clause iii adds the :class:`NnTemporalConfig` branch;
+    Stage 11 D14 (housekeeping catch-up) adds the missing
+    :class:`NnMlpConfig` branch Stage 10 shipped without.  Both land in
+    the same commit as T6 — a one-line ``isinstance`` gap is not worth a
+    separate Stage-10-hotfix PR, and a named ``Stage 10 catch-up``
+    commit trailer keeps the audit trail honest.
+    """
+    from conf._schemas import (
+        LinearConfig,
+        NaiveConfig,
+        NnMlpConfig,
+        NnTemporalConfig,
+        SarimaxConfig,
+        ScipyParametricConfig,
+    )
 
     if isinstance(model_cfg, NaiveConfig):
         from bristol_ml.models.naive import NaiveModel
@@ -553,14 +568,43 @@ def _build_model_from_config(model_cfg: object) -> Model | None:
         from bristol_ml.models.scipy_parametric import ScipyParametricModel
 
         return ScipyParametricModel(model_cfg)
+    if isinstance(model_cfg, NnMlpConfig):
+        # Stage 11 D14 — Stage 10 catch-up.  The train CLI already
+        # wires NnMlpConfig; the harness factory did not, a latent gap
+        # codebase-map §1.4 surfaced.  Fixed in-commit with T6.
+        from bristol_ml.models.nn.mlp import NnMlpModel
+
+        return NnMlpModel(model_cfg)
+    if isinstance(model_cfg, NnTemporalConfig):
+        # Stage 11 D13 clause iii.
+        from bristol_ml.models.nn.temporal import NnTemporalModel
+
+        return NnTemporalModel(model_cfg)
     return None
 
 
 def _target_column(model_cfg: object) -> str:
     """Return the target column name declared by the resolved model config."""
-    from conf._schemas import LinearConfig, NaiveConfig, SarimaxConfig, ScipyParametricConfig
+    from conf._schemas import (
+        LinearConfig,
+        NaiveConfig,
+        NnMlpConfig,
+        NnTemporalConfig,
+        SarimaxConfig,
+        ScipyParametricConfig,
+    )
 
-    if isinstance(model_cfg, (NaiveConfig, LinearConfig, SarimaxConfig, ScipyParametricConfig)):
+    if isinstance(
+        model_cfg,
+        (
+            NaiveConfig,
+            LinearConfig,
+            SarimaxConfig,
+            ScipyParametricConfig,
+            NnMlpConfig,
+            NnTemporalConfig,
+        ),
+    ):
         return model_cfg.target_column
     return "nd_mw"
 
