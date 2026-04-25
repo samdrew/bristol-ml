@@ -27,7 +27,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
-    from bristol_ml.models.io import load_joblib, save_joblib
+    from bristol_ml.models.io import (
+        UntrustedTypeError,
+        load_joblib,
+        load_skops,
+        register_safe_types,
+        save_joblib,
+        save_skops,
+    )
     from bristol_ml.models.linear import LinearModel
     from bristol_ml.models.naive import NaiveModel
     from bristol_ml.models.nn.mlp import NnMlpModel
@@ -55,8 +62,12 @@ __all__ = [
     "SarimaxModel",
     "ScipyParametricConfig",
     "ScipyParametricModel",
+    "UntrustedTypeError",
     "load_joblib",
+    "load_skops",
+    "register_safe_types",
     "save_joblib",
+    "save_skops",
 ]
 
 
@@ -71,7 +82,14 @@ def __getattr__(name: str) -> object:
         from bristol_ml.models import protocol as _protocol
 
         return getattr(_protocol, name)
-    if name in {"load_joblib", "save_joblib"}:
+    if name in {
+        "UntrustedTypeError",
+        "load_joblib",
+        "load_skops",
+        "register_safe_types",
+        "save_joblib",
+        "save_skops",
+    }:
         from bristol_ml.models import io as _io
 
         return getattr(_io, name)
