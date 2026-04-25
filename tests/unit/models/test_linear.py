@@ -36,7 +36,7 @@ import pandas as pd
 import pytest
 
 from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
-from bristol_ml.models.io import save_joblib
+from bristol_ml.models.io import save_skops
 from bristol_ml.models.linear import LinearModel
 from bristol_ml.models.protocol import Model
 from conf._schemas import LinearConfig
@@ -177,13 +177,15 @@ def test_linear_predict_shape() -> None:
 
 
 def test_linear_save_load_identical_predictions(tmp_path: Path) -> None:
-    """Guards T4 (plan §6 named test) and AC-3: joblib round-trip is bit-identical.
+    """Guards T4 (plan §6 named test) and AC-3: skops round-trip is bit-identical.
 
-    Fit, save to ``tmp_path / "linear.joblib"``, load, predict on same test
+    Fit, save to ``tmp_path / "linear.skops"``, load, predict on same test
     frame; assert predictions are ``np.allclose`` with ``atol=0, rtol=0``
-    (exact equality — joblib round-trip must be bit-identical).
+    (exact equality — the inner statsmodels-bytes blob is pickled
+    losslessly inside the skops envelope so the round-trip stays
+    bit-identical).
 
-    Plan clause: T4 plan §6 named test / AC-3 / F-10.
+    Plan clause: T4 plan §6 named test / AC-3 / F-10 / Stage 12 D10.
     """
     np.random.seed(0)
     n = 500
@@ -192,7 +194,7 @@ def test_linear_save_load_identical_predictions(tmp_path: Path) -> None:
     features, target = _make_xy(n, seed=0)
     model.fit(features, target)
 
-    path = tmp_path / "linear.joblib"
+    path = tmp_path / "linear.skops"
     model.save(path)
     assert path.exists(), f"save() must create the artefact at {path} (AC-3)."
 
@@ -206,7 +208,7 @@ def test_linear_save_load_identical_predictions(tmp_path: Path) -> None:
     loaded_preds = loaded.predict(test_features)
 
     assert np.allclose(original_preds.values, loaded_preds.values, atol=0, rtol=0), (
-        "Predictions after joblib round-trip must be bit-identical (T4 plan §6 / AC-3 / F-10).\n"
+        "Predictions after skops round-trip must be bit-identical (T4 plan §6 / AC-3 / F-10).\n"
         f"Max abs diff: {np.abs(original_preds.values - loaded_preds.values).max()}"
     )
 
@@ -565,7 +567,7 @@ def test_linear_save_before_fit_raises_runtime_error(tmp_path: Path) -> None:
     model = LinearModel(cfg)
 
     with pytest.raises(RuntimeError):
-        model.save(tmp_path / "x.joblib")
+        model.save(tmp_path / "x.skops")
 
 
 # ---------------------------------------------------------------------------
@@ -576,14 +578,20 @@ def test_linear_save_before_fit_raises_runtime_error(tmp_path: Path) -> None:
 def test_linear_load_rejects_wrong_artefact_type(tmp_path: Path) -> None:
     """Guards linear.py ``load()`` contract: wrong artefact type raises ``TypeError``.
 
-    A plain dict written via ``save_joblib`` is not a ``LinearModel``.
-    ``LinearModel.load(path)`` must raise ``TypeError`` rather than silently
-    returning the wrong class.
+    A foreign envelope (e.g. an unrelated naive-state-v1 dict) written
+    via :func:`save_skops` is not a LinearModel artefact.
+    ``LinearModel.load(path)`` must raise ``TypeError`` rather than
+    silently returning the wrong class.
 
-    Plan clause: T4 / linear.py ``load()`` ``TypeError`` docstring.
+    Stage 12 D10: the format-tag discriminator inside the envelope is
+    the new failure point (was a simple ``isinstance(obj, cls)`` check
+    under the joblib pattern).
+
+    Plan clause: T4 / linear.py ``load()`` ``TypeError`` docstring /
+    Stage 12 D10.
     """
-    path = tmp_path / "wrong.joblib"
-    save_joblib({"not": "a model"}, path)
+    path = tmp_path / "wrong.skops"
+    save_skops({"not": "a model"}, path)
 
     with pytest.raises(TypeError):
         LinearModel.load(path)
@@ -790,4 +798,154 @@ def test_linear_fit_ignores_extra_feature_columns() -> None:
         f"metadata.feature_columns must equal ('x1', 'x2') when config names only those "
         f"two columns; extra 'noise' column must be ignored. "
         f"Got {model.metadata.feature_columns!r} (T4 / linear.py fit() docstring)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. test_linear_save_load_skops_roundtrip  (Stage 12 T4 — skops migration)
+# ---------------------------------------------------------------------------
+
+
+def test_linear_save_load_skops_roundtrip(tmp_path: Path) -> None:
+    """Stage 12 T4 named test (D10) — LinearModel skops envelope-of-bytes guard.
+
+    The Stage 12 D10 Ctrl+G reversal moved every model family off
+    :mod:`joblib` and onto :mod:`skops.io` for security: the serving
+    layer is a network-facing deserialiser and ``joblib.load`` on an
+    attacker-controlled artefact is RCE.  ``LinearModel`` adopts the
+    *envelope-of-bytes* pattern (statsmodels ``RegressionResults`` is
+    serialised to a ``bytes`` blob via :meth:`Results.save` and the blob
+    rides inside a skops-safe dict envelope tagged
+    ``format="statsmodels-bytes-v1"`` / ``kind="OLS"``).
+
+    This test asserts the four-part contract the migration must
+    preserve:
+
+    (a) ``save()`` writes a single ``.skops`` file at the given path —
+        no ``.tmp`` sibling left behind, no joblib artefact, no extra
+        sidecars (the atomic-write contract from Stage 4 carries over
+        unchanged across the serialiser flip).
+    (b) ``load()`` reconstructs an instance that conforms to the
+        Stage 4 :class:`Model` protocol (``runtime_checkable``).
+    (c) ``load()`` rejects an artefact whose top-level ``format`` tag
+        is *foreign* (e.g. an NN-temporal envelope) with
+        :class:`TypeError`, naming the unexpected tag.  This is the
+        cross-family discriminator that prevents an envelope from
+        another family being silently loaded as if it were a
+        ``LinearModel``.
+    (d) ``predict(features)`` after ``load()`` matches the pre-save
+        ``predict(features)`` exactly under ``rtol=0, atol=0`` — the
+        inner statsmodels blob is pickled losslessly inside the skops
+        envelope.
+
+    Plan clauses: Stage 12 plan §Task T4 ("test_linear_save_load_skops_
+    roundtrip") + D10 (skops migration) + Stage 4 Model protocol.
+    """
+    np.random.seed(0)
+    n_train = 500
+    n_test = 24
+    cfg = _linear_cfg()
+    model_before = LinearModel(cfg)
+    features, target = _make_xy(n_train, seed=0)
+    model_before.fit(features, target)
+
+    test_features, _ = _make_xy(n_test, start="2024-01-22 00:00", seed=2)
+    pred_before = model_before.predict(test_features)
+
+    artefact_dir = tmp_path / "artefact"
+    artefact_path = artefact_dir / "model.skops"
+    model_before.save(artefact_path)
+
+    # (a) Atomic-write contract: exactly one file at ``path`` and no
+    # stray ``.tmp`` sibling or pre-Stage-12 joblib artefact.
+    siblings = sorted(p.name for p in artefact_dir.iterdir())
+    assert siblings == ["model.skops"], (
+        "skops migration must preserve the atomic single-file save "
+        f"contract; got siblings {siblings!r} (Stage 12 T4 / D10)."
+    )
+
+    model_after = LinearModel.load(artefact_path)
+
+    # (b) Protocol conformance — runtime_checkable.
+    assert isinstance(model_after, Model), (
+        "Loaded LinearModel must satisfy the Stage 4 Model protocol "
+        "(runtime_checkable isinstance) (Stage 12 T4 / D10)."
+    )
+
+    # (c) Foreign-format rejection: write a foreign envelope (an
+    # NN-temporal-shaped tag) and assert ``LinearModel.load`` raises
+    # TypeError.  The cross-family discriminator must hold even when
+    # the envelope is otherwise a well-formed dict.
+    foreign_path = tmp_path / "foreign.skops"
+    save_skops({"format": "nn-temporal-state-v1", "config_dump": {}}, foreign_path)
+    with pytest.raises(TypeError, match=r"format tag|statsmodels-bytes"):
+        LinearModel.load(foreign_path)
+
+    # (d) Bit-identical predict round-trip.
+    pred_after = model_after.predict(test_features)
+    assert np.allclose(pred_before.to_numpy(), pred_after.to_numpy(), rtol=0, atol=0), (
+        "skops migration: predict() after load() must equal predict() "
+        "pre-save bit-exactly under rtol=0, atol=0 (inner statsmodels "
+        "bytes blob round-trips losslessly).  Max abs diff: "
+        f"{np.abs(pred_before.to_numpy() - pred_after.to_numpy()).max()} "
+        "(Stage 12 T4 / D10)."
+    )
+    assert pred_after.index.equals(pred_before.index)
+    assert pred_after.name == pred_before.name
+
+
+# ---------------------------------------------------------------------------
+# 23. test_linear_envelope_format_field_validates  (Stage 12 T4 — discriminator)
+# ---------------------------------------------------------------------------
+
+
+def test_linear_envelope_format_field_validates(tmp_path: Path) -> None:
+    """Stage 12 T4 named test (D10) — hand-built bad envelope is rejected with a clear error.
+
+    Hand-build a dict envelope whose top-level ``format`` tag is wrong
+    (``"bogus-format-v9"`` rather than the canonical
+    ``"statsmodels-bytes-v1"``) but whose other fields look superficially
+    plausible.  Persist it via :func:`save_skops` (so the artefact is
+    well-formed at the skops layer) and assert that
+    :meth:`LinearModel.load` raises :class:`TypeError` whose message
+    *names the format-tag mismatch* — both the expected and the actual
+    tag must appear so an operator triaging the error can see the
+    discriminator at a glance.
+
+    This is the load-bearing post-conditions test for the format-tag
+    discriminator: the message body, not just the exception type, is
+    part of the contract — a silent rejection is a debugging
+    foot-gun for downstream consumers (Stage 12 plan §Task T4 acceptance
+    criterion: "load raises a clear error naming the format mismatch").
+
+    Plan clauses: Stage 12 plan §Task T4 ("test_linear_envelope_
+    format_field_validates") + D10 (skops migration) + linear.py
+    ``load()`` ``TypeError`` docstring.
+    """
+    bad_envelope: dict[str, object] = {
+        "format": "bogus-format-v9",
+        "kind": "OLS",
+        "blob": b"",
+        "config_dump": {},
+        "feature_columns": [],
+        "fit_utc_isoformat": None,
+    }
+    bad_path = tmp_path / "bad_format.skops"
+    save_skops(bad_envelope, bad_path)
+
+    with pytest.raises(TypeError) as exc_info:
+        LinearModel.load(bad_path)
+
+    msg = str(exc_info.value)
+    # The error message must name *both* the expected and actual tags
+    # so the operator can see the discriminator at a glance.
+    assert "statsmodels-bytes-v1" in msg, (
+        f"TypeError message must name the expected format tag "
+        f"'statsmodels-bytes-v1'; got {msg!r} (Stage 12 T4 acceptance: "
+        "'clear error naming the format mismatch')."
+    )
+    assert "bogus-format-v9" in msg, (
+        f"TypeError message must name the actual (rejected) format tag "
+        f"'bogus-format-v9'; got {msg!r} (Stage 12 T4 acceptance: "
+        "'clear error naming the format mismatch')."
     )
