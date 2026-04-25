@@ -7,7 +7,7 @@ before the demo curl.  Per-request seven-field structured logging
 (plan D11) lands at T8 alongside the standalone CLI in
 ``bristol_ml.serving.__main__``.
 
-Public surface — see ``docs/plans/active/12-serving.md`` §5:
+Public surface — see ``docs/plans/completed/12-serving.md`` §5:
 
 - :func:`build_app` — construct a :class:`fastapi.FastAPI` instance
   bound to a registry directory.  The lifespan resolves the lowest-MAE

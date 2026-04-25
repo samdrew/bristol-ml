@@ -273,4 +273,4 @@ uv run pytest tests/integration/serving/ -v
 - `src/bristol_ml/registry/CLAUDE.md` — skops migration outcome; joblib rejection error message.
 - `src/bristol_ml/models/io.py` — `load_skops`, `register_safe_types`, `UntrustedTypeError`; the trust-list contract every future model family must satisfy.
 - `docs/architecture/layers/models-nn.md` — Stage 11 warmup-envelope contract that makes `nn_temporal` servable without warmup semantics in the request body.
-- Stage 12 plan — `docs/plans/active/12-serving.md` (active during Phase 2; moves to `completed/` at T10).
+- Stage 12 plan — `docs/plans/completed/12-serving.md`.

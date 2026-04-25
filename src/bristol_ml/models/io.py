@@ -69,6 +69,26 @@ class UntrustedTypeError(RuntimeError):
 # of primitive types out of the box (numpy, pandas, builtins,
 # statsmodels' standard lib usage); the trust-list below only needs to
 # cover the project's *custom* classes.
+#
+# **Why this set is empty today (Stage 12 design note).**
+# All six current model families (``naive``, ``linear``, ``sarimax``,
+# ``scipy_parametric``, ``nn_mlp``, ``nn_temporal``) save state as an
+# *envelope of skops-safe primitives*: bytes, str, int, float, list,
+# dict, numpy arrays — never a custom class instance.  ``linear`` and
+# ``sarimax`` use the envelope-of-bytes pattern (``statsmodels
+# results.save(BytesIO)`` wrapped in a skops-safe dict); the NN families
+# carry a ``state_dict_bytes: bytes`` blob produced by
+# ``torch.save(state_dict, BytesIO)``.  So
+# :func:`skops.io.get_untrusted_types` returns ``[]`` for every artefact
+# the project produces today, and the gate at :func:`load_skops` passes
+# trivially.  The trust-list mechanism is in place — but it does not
+# *fire* until a future model family deviates from the envelope-of-
+# primitives pattern.  When that happens, the new family must call
+# :func:`register_safe_types` at import time for every custom class
+# whose ``__module__.__qualname__`` would appear in
+# :func:`skops.io.get_untrusted_types`; otherwise :func:`load_skops`
+# rejects the artefact at load time with :class:`UntrustedTypeError`,
+# which is the correct fail-safe outcome.
 _PROJECT_SAFE_TYPES: set[str] = set()
 
 

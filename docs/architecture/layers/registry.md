@@ -77,7 +77,7 @@ Example: `linear-ols-weather-only_20260423T1430`.
 
 ### Atomic save
 
-Every `save()` writes into `registry_dir/.tmp_{uuid4.hex}/` and renames the completed staging directory to `registry_dir/{run_id}/` via `os.replace`. Mirrors the two existing atomic-write sites in the codebase (`ingestion/_common.py::_atomic_write` and `models/io.py::save_joblib`). A crash mid-write leaves no partial run — the previous run (if any) is intact, or the registry directory shows the run as absent.
+Every `save()` writes into `registry_dir/.tmp_{uuid4.hex}/` and renames the completed staging directory to `registry_dir/{run_id}/` via `os.replace`. Mirrors the two existing atomic-write sites in the codebase (`ingestion/_common.py::_atomic_write` and `models/io.py::save_skops`). A crash mid-write leaves no partial run — the previous run (if any) is intact, or the registry directory shows the run as absent.
 
 ## Sidecar JSON schema
 
@@ -110,7 +110,7 @@ One `run.json` per run, UTF-8, `json.dumps(..., indent=2, allow_nan=True, ensure
 |-------|--------|------|-------|
 | `run_id` | Computed | `str` | `{metadata.name}_{YYYYMMDDTHHMM}`. Same value as the parent directory name. |
 | `name` | `model.metadata.name` | `str` | Includes the `_NamedLinearModel` dynamic name (e.g. `linear-ols-weather-only`) verbatim. Sidecar is the source of truth for human-readable names; `load()` does **not** re-apply a dynamic wrapper. |
-| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`, `"nn_mlp"`. Read at `load()` to pick the correct concrete class. |
+| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`, `"nn_mlp"`, `"nn_temporal"`. Read at `load()` to pick the correct concrete class. |
 | `feature_set` | Caller kwarg | `str` | AC-3 explicit: the registry cannot infer which of the Stage 5 feature sets was in play. |
 | `target` | Caller kwarg | `str` | AC-3 explicit: same rationale. Enables D7 filtering. |
 | `feature_columns` | `model.metadata.feature_columns` | `list[str]` | Ordered list of training-column names. |
@@ -210,7 +210,7 @@ The registered artefact is the model as-fit on the final fold of the rolling-ori
 - Re-fitting adds a second training pass per CLI invocation for no named requirement.
 - The final-fold model is an honest representative of the measurement.
 
-Facilitators interpreting the leaderboard should read `metrics.<metric>.mean` as the rolling-origin cross-fold aggregate (D15) and understand the `artefact/model.joblib` as the final-fold representative. The `save()` docstring and the Stage 9 retro both make this trade-off explicit (plan R2).
+Facilitators interpreting the leaderboard should read `metrics.<metric>.mean` as the rolling-origin cross-fold aggregate (D15) and understand the `artefact/model.skops` as the final-fold representative. The `save()` docstring and the Stage 9 retro both make this trade-off explicit (plan R2).
 
 ## Graduation to MLflow
 
@@ -233,7 +233,7 @@ When a future stage promotes MLflow to a runtime dependency, this subsection is 
 
 Artefacts are written through each model's `Model.save` protocol method. The registry does not duplicate serialisation logic (plan D9). `bristol_ml.models.io.save_skops` and `load_skops` are the canonical helpers from Stage 12 onwards; atomic writes and parent-directory creation are handled there.
 
-**Stage 12 D10 — skops adopted (Ctrl+G reversal).** The Stage 9 plan's "Stage 12 inflection point" for `skops.io` adoption has landed. At Stage 12 Ctrl+G the human directed: *"Include skops. This includes a network facing interface so security should be paramount, as I don't want an RCE exploit on my PC."* All six model families' `save` / `load` paths were migrated from `joblib` to `skops.io` as part of Stage 12 (T2–T5). The registry boundary (`registry._io`) now writes `model.skops` and rejects any run directory carrying a `model.joblib` artefact with a clear `RuntimeError`.
+**Stage 12 D10 — skops adopted (Ctrl+G reversal).** The Stage 9 plan's "Stage 12 inflection point" for `skops.io` adoption has landed. At Stage 12 Ctrl+G the human directed: *"Include skops. This includes a network facing interface so security should be paramount, as I don't want an RCE exploit on my PC."* All six model families' `save` / `load` paths were migrated from `joblib` to `skops.io` as part of Stage 12 (T2–T5). The registry boundary (`registry.__init__.load` via `registry._fs._atomic_write_run`) now writes `model.skops` and rejects any run directory carrying a `model.joblib` artefact with a clear `RuntimeError`.
 
 **Breaking change for existing users.** Any `data/registry/*.joblib` artefact written before Stage 12 is invalidated; `registry.load` rejects it with a migration message. The operator must retrain. This is deliberate — backward compatibility was explicitly sacrificed in favour of security at the Ctrl+G review.
 

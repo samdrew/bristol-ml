@@ -22,7 +22,7 @@ Cross-references:
 - Layer doc — ``docs/architecture/layers/serving.md`` (lands at
   Stage 12 T9).
 - Module guide — ``src/bristol_ml/serving/CLAUDE.md`` (Stage 12 T9).
-- Plan — ``docs/plans/active/12-serving.md`` (active during Phase 2).
+- Plan — ``docs/plans/completed/12-serving.md``.
 """
 
 from __future__ import annotations

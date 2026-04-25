@@ -611,6 +611,43 @@ def test_request_log_record_carries_seven_fields(
     int(extra["feature_hash"], 16)
 
 
+def test_request_id_is_unique_per_request(
+    tmp_path: Path,
+    captured_log_records: list[dict[str, Any]],
+) -> None:
+    """Stage 12 D11 / Phase 3 review R-3: ``request_id`` differs across requests.
+
+    The seven-field log only carries Stage 18 drift-monitoring weight if
+    ``request_id`` is genuinely unique per request.  A regression that
+    hard-codes a constant UUID or reuses one across requests passes the
+    field-shape test (`test_request_log_record_carries_seven_fields`) but
+    silently breaks the downstream consumer.  This test makes the
+    uniqueness contract explicit.
+    """
+    model, predict_features = fit_linear()
+    register_run(model, registry_dir=tmp_path)
+    payload = {
+        "target_dt": predict_features.index[-1].isoformat(),
+        "features": _features_payload(model, predict_features),
+    }
+    app = build_app(tmp_path)
+    with TestClient(app) as client:
+        response_a = _post_predict(client, payload)
+        response_b = _post_predict(client, payload)
+    assert response_a.status_code == 200, response_a.text
+    assert response_b.status_code == 200, response_b.text
+
+    served = [r for r in captured_log_records if r.get("message") == "served prediction"]
+    assert len(served) == 2, (
+        f"D11: two requests must produce two log lines; got {len(served)} "
+        f"({[r.get('message') for r in captured_log_records]!r})."
+    )
+    request_ids = {r["extra"]["request_id"] for r in served}
+    assert len(request_ids) == 2, (
+        f"D11 / R-3: two requests must produce two distinct request_id values; got {request_ids!r}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # T8 / AC-4 — OpenAPI schema discoverability
 # ---------------------------------------------------------------------------

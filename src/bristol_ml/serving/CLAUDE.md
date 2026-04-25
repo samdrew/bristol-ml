@@ -190,8 +190,7 @@ uv run pytest tests/unit/serving/ -v
 ## Cross-references
 
 - Layer contract — `docs/architecture/layers/serving.md`.
-- Stage 12 plan — `docs/plans/active/12-serving.md` (moves to
-  `completed/` at T10).
+- Stage 12 plan — `docs/plans/completed/12-serving.md`.
 - Stage 12 retro — `docs/lld/stages/12-serving.md`.
 - Registry layer — `docs/architecture/layers/registry.md` and
   `src/bristol_ml/registry/CLAUDE.md`.

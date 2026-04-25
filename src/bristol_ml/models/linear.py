@@ -182,7 +182,7 @@ class LinearModel:
                 "format": "statsmodels-bytes-v1",
                 "kind": "OLS",
                 "blob": <bytes>,
-                "config_dump": <dict>,           # NnTemporalConfig.model_dump()
+                "config_dump": <dict>,           # LinearConfig.model_dump()
                 "feature_columns": [str, ...],
                 "fit_utc_isoformat": <str | None>,
             }

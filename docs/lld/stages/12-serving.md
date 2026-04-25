@@ -56,8 +56,7 @@ otherwise expose.
   directly.  Load reverses the envelope.  T4 tests confirm round-trip
   predict equality and envelope-format validation.
 
-- **T5 — Registry filesystem layout migration.**  `registry._io` flips
-  the canonical artefact filename from `model.joblib` to `model.skops`.
+- **T5 — Registry filesystem layout migration.**  `registry._fs._atomic_write_run` writes `model.skops`; `registry.__init__.load` rejects legacy `model.joblib` artefacts. The canonical artefact filename flipped from `model.joblib` to `model.skops`.
   `registry.load` rejects any run directory still carrying
   `model.joblib` with a `RuntimeError` whose message names the path,
   references both formats, and points the operator at the retraining
@@ -253,8 +252,7 @@ Carry-forwards from Stage 12:
 
 ## Cross-references
 
-- Plan: `docs/plans/active/12-serving.md` (moves to `completed/` at
-  T10).
+- Plan: `docs/plans/completed/12-serving.md`.
 - Layer doc: `docs/architecture/layers/serving.md`.
 - Module guide: `src/bristol_ml/serving/CLAUDE.md`.
 - Registry layer: `docs/architecture/layers/registry.md` — skops
