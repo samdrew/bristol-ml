@@ -13,8 +13,9 @@ families.
 The module re-exports :func:`build_app` lazily — importing
 ``bristol_ml.serving`` does **not** pull :mod:`fastapi` or
 :mod:`uvicorn` into the import graph until the app factory is
-actually called, so ``python -m bristol_ml --help`` (scaffold
-invocation) stays cheap.
+actually called, so the import-graph guard
+(``test_serving_module_imports_without_torch``) and the lightweight
+``python -m bristol_ml --help`` invocation stay cheap.
 
 Cross-references:
 
@@ -29,18 +30,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only re-exports
+    from pathlib import Path
+
     from fastapi import FastAPI
 
 __all__ = ["build_app"]
 
 
-def build_app(*args: object, **kwargs: object) -> FastAPI:
-    """Construct the FastAPI serving application (placeholder until T7).
+def build_app(registry_dir: Path) -> FastAPI:
+    """Construct the FastAPI serving application (lazy import).
 
-    The real implementation lands at Stage 12 T7.  Calling this stub
-    raises :class:`NotImplementedError` so any caller that reaches it
-    before T7 sees a clear error rather than a silent partial app.
+    The actual implementation lives in :mod:`bristol_ml.serving.app`;
+    this trampoline keeps ``import bristol_ml.serving`` cheap so the
+    import-graph guard (``test_serving_module_imports_without_torch``)
+    can assert the module does not pull torch into ``sys.modules`` at
+    import time — torch only loads when an NN-family run is resolved
+    through the registry, never at scaffold-import time.
     """
-    from bristol_ml.serving import app as _app
+    from bristol_ml.serving.app import build_app as _build_app
 
-    return _app.build_app(*args, **kwargs)
+    return _build_app(registry_dir)
