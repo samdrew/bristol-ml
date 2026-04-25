@@ -44,6 +44,7 @@ from conf._schemas import (
     SarimaxConfig,
     SarimaxKwargs,
     ScipyParametricConfig,
+    ServingConfig,
     SplitterConfig,
 )
 
@@ -1527,3 +1528,87 @@ def test_config_loads_model_scipy_parametric_via_hydra() -> None:
     assert cfg.model.t_heat_celsius == 15.5
     assert cfg.model.t_cool_celsius == 22.0
     assert cfg.model.loss == "linear"
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 T6 — ServingConfig + AppConfig.serving optionality
+# ---------------------------------------------------------------------------
+
+
+def test_serving_config_round_trips_through_hydra() -> None:
+    """Guards Stage 12 T6: ``conf/serving.yaml`` defaults match ``ServingConfig(...)``.
+
+    The plan §5 sketch sets the three ServingConfig defaults:
+    ``registry_dir=Path("data/registry")``, ``host="127.0.0.1"``,
+    ``port=8000``.  ``conf/serving.yaml`` mirrors them verbatim;
+    composing the group via Hydra and validating into ``AppConfig``
+    must produce an instance equal to a directly-constructed
+    ``ServingConfig()``.
+
+    The override list ``+serving=default`` adds the ``serving`` group
+    file to the composition (the ``+`` prefix is required because the
+    train pipeline's ``conf/config.yaml`` does *not* list ``serving``
+    in its defaults — Stage 12 D2/D13 keeps the train surface unchanged).
+    Cited criterion: plan §6 T6 named test
+    ``test_serving_config_round_trips_through_hydra``.
+    """
+    cfg = load_config(overrides=["+serving=default"])
+
+    assert cfg.serving is not None, (
+        "cfg.serving must be populated when ``+serving=serving`` is in the override list."
+    )
+    assert isinstance(cfg.serving, ServingConfig), (
+        f"expected ServingConfig; got {type(cfg.serving).__name__!r}."
+    )
+    expected = ServingConfig()
+    assert cfg.serving == expected, (
+        f"conf/serving.yaml defaults must match ServingConfig() defaults exactly; "
+        f"got {cfg.serving!r}, expected {expected!r}."
+    )
+    # Spot-check each individual default explicitly so the failure mode
+    # at first regression names the offending field rather than just
+    # printing two repr-blobs.
+    assert cfg.serving.registry_dir == Path("data/registry"), (
+        f"D13: registry_dir default must be Path('data/registry'); "
+        f"got {cfg.serving.registry_dir!r}."
+    )
+    assert cfg.serving.host == "127.0.0.1", (
+        f"D13: host default must be '127.0.0.1' (localhost); got {cfg.serving.host!r}."
+    )
+    assert cfg.serving.port == 8000, f"D13: port default must be 8000; got {cfg.serving.port!r}."
+
+
+def test_app_config_serving_default_is_none_so_train_cli_unaffected() -> None:
+    """Guards Stage 12 T6: ``AppConfig.serving`` defaults to ``None``.
+
+    The plan §5 contract: ``AppConfig.serving: ServingConfig | None = None``
+    keeps the train CLI / Stage-0 config-smoke surface unchanged — the
+    train pipeline's ``conf/config.yaml`` does *not* include ``serving``
+    in its defaults list, so loading the project's default config must
+    still produce ``cfg.serving is None``.
+
+    This is the load-bearing test that the new top-level field does
+    not become a soft requirement on every config consumer in the
+    project.  If a future stage adds ``serving`` to the default
+    composition, this test must be flipped deliberately rather than
+    quietly broken.
+
+    Cited criterion: plan §6 T6 named test
+    ``test_app_config_serving_default_is_none_so_train_cli_unaffected``.
+    """
+    cfg = load_config()
+
+    assert cfg.serving is None, (
+        "Stage 12 T6 contract: cfg.serving must default to None for the "
+        "train CLI / config-smoke surface so train-time callers do not "
+        f"need to know about the serving layer; got {cfg.serving!r}."
+    )
+
+    # Also verify the direct-construction path: an AppConfig built from
+    # the minimum required fields (project) must accept the missing
+    # ``serving`` field and produce ``None`` — not a ValidationError.
+    app = AppConfig(project=ProjectConfig(name="bristol_ml", seed=0))
+    assert app.serving is None, (
+        f"AppConfig(project=...) without a ``serving`` kwarg must default "
+        f"serving to None; got {app.serving!r}."
+    )

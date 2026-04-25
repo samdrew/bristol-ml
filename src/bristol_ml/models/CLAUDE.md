@@ -1,11 +1,12 @@
 # `bristol_ml.models` — module guide
 
 This module is the **models layer**: the `Model` protocol that every
-estimator implements, the `ModelMetadata` provenance record, joblib-backed
-IO helpers, and the concrete model classes (`NaiveModel`, `LinearModel`,
-`SarimaxModel`, `ScipyParametricModel`).  Stage 4 introduces the layer;
-every subsequent modelling stage (5, 7, 8, 10, 11) adds further model
-classes that conform to the same protocol.
+estimator implements, the `ModelMetadata` provenance record, skops-backed
+IO helpers (Stage 12 D10 — `save_skops` / `load_skops`), and the concrete
+model classes (`NaiveModel`, `LinearModel`, `SarimaxModel`,
+`ScipyParametricModel`).  Stage 4 introduces the layer; every subsequent
+modelling stage (5, 7, 8, 10, 11, 12) adds further model classes or IO
+changes that conform to the same protocol.
 
 Read the layer contract in
 [`docs/architecture/layers/models.md`](../../../docs/architecture/layers/models.md)
@@ -22,9 +23,19 @@ concrete Stage 4 surface.
   name, `feature_columns`, `fit_utc`, `git_sha`, and a free-form
   `hyperparameters` bag. Defined in `conf/_schemas.py`; re-exported from
   `protocol.py` for ergonomic notebook use.
-- `bristol_ml.models.save_joblib(obj, path)` — atomic joblib write (tmp +
-  `os.replace`). Creates the parent directory if missing.
-- `bristol_ml.models.load_joblib(path)` — joblib deserialiser.
+- `bristol_ml.models.io.save_skops(obj, path)` — atomic skops write (tmp +
+  `os.replace`). Creates the parent directory if missing. Canonical from
+  Stage 12 D10 onwards.
+- `bristol_ml.models.io.load_skops(path)` — skops deserialiser that enforces
+  the project trust-list (`_PROJECT_SAFE_TYPES`); raises `UntrustedTypeError`
+  for any artefact containing an unregistered type.
+- `bristol_ml.models.io.register_safe_types(*qualified_names)` — adds
+  fully-qualified class names to the project trust-list.  Every model family
+  calls this at import time for each custom class its artefact contains.
+- `bristol_ml.models.io.save_joblib(obj, path)` — **deprecated** (Stage 12
+  D10); raises `DeprecationWarning`; will be removed at Stage 13.
+- `bristol_ml.models.io.load_joblib(path)` — **deprecated** (Stage 12 D10);
+  raises `DeprecationWarning`; will be removed at Stage 13.
 - `bristol_ml.models.naive.NaiveModel` — seasonal-naive baseline.
 - `bristol_ml.models.linear.LinearModel` — statsmodels OLS.
 - `bristol_ml.models.sarimax.SarimaxModel` — statsmodels SARIMAX with
@@ -56,19 +67,23 @@ concrete Stage 4 surface.
 
 ## Serialisation
 
-joblib is the Stage 4 default (plan D6). The sklearn-ecosystem choice;
-handles numpy/pandas-heavy objects efficiently; round-trips statsmodels
-`RegressionResultsWrapper` without extra work. Writes are atomic — tmp
-file + `os.replace` — mirroring the ingestion layer's
-`_atomic_write` idiom.
+`skops.io` is the canonical serialiser from Stage 12 D10 onwards (Ctrl+G
+reversal — the serving layer is a network-facing deserialiser; `joblib.load`
+on an attacker-controlled artefact is RCE).  `save_skops` / `load_skops` in
+`io.py` are the two primitives every model family uses. Writes are atomic —
+tmp file + `os.replace` — mirroring the ingestion layer's `_atomic_write`
+idiom.  The joblib helpers remain in `io.py` for one stage (Stage 12 →
+Stage 13) with a `DeprecationWarning` to give external scripts time to
+migrate; they will be removed at Stage 13.
 
-**Security note.** joblib (like `pickle`) is not a safe deserialiser for
-untrusted inputs. Stages 4–9 only load artefacts we wrote ourselves — the
-Stage 9 registry explicitly documents this in its layer doc — so the audit
-burden of `skops.io` is disproportionate to those stages' demo focus. The
-Stage 12 **serving** layer is the inflection point for `skops.io` adoption
-(Stage 9 plan D14); `io.py` carries a docstring note pointing the upgrade
-path there.
+**Trust-list contract for future model families.** `load_skops` enforces a
+project trust-list (`_PROJECT_SAFE_TYPES`).  Any new model class added after
+Stage 12 must call `register_safe_types("module.path.ClassName")` at import
+time for every custom class whose `__module__.__qualname__` appears in its
+saved artefact.  Failing to do so causes `load_skops` to raise
+`UntrustedTypeError` when the serving layer or the registry tries to load
+the run.  See also `docs/architecture/layers/registry.md` (trust-list
+section) and `docs/architecture/layers/serving.md` (security boundary).
 
 ## SARIMAX specifics (Stage 7)
 

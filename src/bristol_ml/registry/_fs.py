@@ -11,7 +11,9 @@ Three private building blocks:
   :func:`os.replace` to rename atomically (plan D5).  Mirrors the
   ingestion-layer idiom at
   ``src/bristol_ml/ingestion/_common.py::_atomic_write`` and the
-  joblib variant at ``src/bristol_ml/models/io.py::save_joblib``.
+  skops variant at ``src/bristol_ml/models/io.py::save_skops`` (Stage 12
+  D10 migrated the registry off joblib for security; the canonical
+  artefact filename is now ``model.skops``).
 
 The same-minute collision path (D2 last-write-wins) first removes the
 existing run directory before the rename; this is a deliberate, documented
@@ -102,7 +104,7 @@ def _atomic_write_run(
     try:
         artefact_dir = staging / "artefact"
         artefact_dir.mkdir()
-        artefact_writer(artefact_dir / "model.joblib")
+        artefact_writer(artefact_dir / "model.skops")
         sidecar_path = staging / "run.json"
         sidecar_path.write_text(
             json.dumps(sidecar, indent=2, allow_nan=True, ensure_ascii=False),

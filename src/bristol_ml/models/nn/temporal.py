@@ -84,6 +84,17 @@ __all__ = ["NnTemporalModel"]
 
 
 # ---------------------------------------------------------------------------
+# Format tag for the dict-envelope-of-primitives written by
+# :meth:`NnTemporalModel.save`.  Bumped if the envelope schema changes;
+# load rejects any tag it does not recognise so a future schema migration
+# is never silent.  Stage 12 T3 introduced the tag at the same time as
+# the joblib → skops migration (D10 Ctrl+G reversal).
+# ---------------------------------------------------------------------------
+
+_NN_TEMPORAL_ENVELOPE_FORMAT = "nn-temporal-state-v1"
+
+
+# ---------------------------------------------------------------------------
 # Valid device strings (plan D6 / Stage 10 D11 inheritance).  Duplicated
 # from ``mlp.py`` rather than imported so a future ``_select_device``
 # consolidation into ``_training.py`` is a mechanical search-and-replace
@@ -1001,26 +1012,40 @@ class NnTemporalModel:
     def save(self, path: Path) -> None:
         """Serialise the fitted model to the registry-supplied file path.
 
-        Plan D5: ``path`` is the single joblib-artefact file path (the
-        Stage 9 registry hard-codes ``artefact/model.joblib`` — see
-        ``src/bristol_ml/registry/_fs.py::_atomic_write_run``).  The
-        envelope written carries the ``state_dict`` bytes (via
-        ``torch.save`` to a ``BytesIO`` — scaler buffers ride inside),
-        the ``NnTemporalConfig.model_dump()``, the resolved feature
-        column tuple, the ``seq_len`` (redundant with ``config_dump`` but
-        rides alongside for the explicit round-trip guard — plan R7),
-        the warmup-prefix DataFrame (so :meth:`predict` can produce one
+        Stage 12 D10 (Ctrl+G reversal): the project moved off ``joblib``
+        and onto :mod:`skops.io` for security — the serving layer is a
+        network-facing deserialiser and ``joblib.load`` on an
+        attacker-controlled artefact is RCE.  Plan D5's single-envelope
+        layout is preserved; the fields that did **not** round-trip
+        natively through skops's restricted unpickler
+        (:class:`pandas.DataFrame` for ``warmup_features``, ``datetime``
+        for ``fit_utc``, ``tuple`` for ``feature_columns``) are
+        flattened to skops-safe primitives — the warmup DataFrame
+        becomes an ``(n_warmup, n_features)`` numpy array plus its
+        ``int64`` nanos-since-epoch index plus a tz string, ``fit_utc``
+        becomes an ISO-8601 string, ``feature_columns`` becomes a list —
+        so no project trust-list registration is needed.
+
+        Plan D5: ``path`` is the single artefact file path (the Stage 9
+        registry hard-codes ``artefact/model.<ext>``).  The envelope
+        written carries the ``state_dict`` bytes (via ``torch.save`` to
+        a ``BytesIO`` — scaler buffers ride inside), the
+        ``NnTemporalConfig.model_dump()``, the resolved feature column
+        list, the ``seq_len`` (redundant with ``config_dump`` but rides
+        alongside for the explicit round-trip guard — plan R7), the
+        warmup-prefix arrays (so :meth:`predict` can produce one
         prediction per input row after a load — evaluation-layer §5
         length-match contract), and the provenance scalars
-        (``seed_used``, ``best_epoch``, ``loss_history``, ``fit_utc``,
-        ``device_resolved``).
+        (``seed_used``, ``best_epoch``, ``loss_history``,
+        ``fit_utc_isoformat``, ``device_resolved``).
 
-        The write is atomic — :func:`bristol_ml.models.io.save_joblib`
+        The write is atomic — :func:`bristol_ml.models.io.save_skops`
         stages to a sibling ``.tmp`` and renames via :func:`os.replace`,
         matching the Stage 4 contract.  No sibling ``model.pt`` or
         ``hyperparameters.json`` file is created — the D5 single-envelope
         disposition is structurally enforced by
-        ``test_nn_temporal_save_writes_single_joblib_file_at_given_path``.
+        ``test_nn_temporal_save_writes_single_joblib_file_at_given_path``
+        (renamed in spirit at T3; the test still pins single-file).
 
         Raises
         ------
@@ -1032,7 +1057,7 @@ class NnTemporalModel:
 
         import torch
 
-        from bristol_ml.models.io import save_joblib
+        from bristol_ml.models.io import save_skops
 
         if self._module is None or self._warmup_features is None:
             raise RuntimeError(
@@ -1048,40 +1073,84 @@ class NnTemporalModel:
         torch.save(cpu_state_dict, buf)
         state_dict_bytes: bytes = buf.getvalue()
 
+        # Break the warmup DataFrame down to skops-safe primitives.
+        # ``DatetimeIndex.asi8`` is the canonical int64 nanos-since-epoch
+        # vector; the tz and freq are captured as portable strings so
+        # tzinfo subclasses and ``pd.tseries.offsets.BaseOffset`` (each a
+        # custom type under skops) stay out of the artefact entirely.
+        # The freq string is load-bearing for the warmup-DataFrame
+        # round-trip equality check (``pd.testing.assert_frame_equal``
+        # is strict on index ``freq``); without it a freshly-fitted
+        # hourly-index frame round-trips to a ``freq=None`` index and
+        # the AC-4 round-trip test fails loudly.
+        warmup_df = self._warmup_features
+        warmup_index = warmup_df.index
+        warmup_index_tz: str | None = str(warmup_index.tz) if warmup_index.tz is not None else None
+        warmup_index_freq: str | None = (
+            warmup_index.freqstr if warmup_index.freq is not None else None
+        )
+
         envelope: dict[str, Any] = {
+            "format": _NN_TEMPORAL_ENVELOPE_FORMAT,
             "state_dict_bytes": state_dict_bytes,
             "config_dump": self._config.model_dump(),
-            "feature_columns": tuple(self._feature_columns),
+            # List rather than tuple — both are skops-safe but the list
+            # keeps the envelope a pure JSON-shape primitive bag.  Load
+            # re-tuples on the way out to preserve the immutability
+            # downstream code relies on.
+            "feature_columns": list(self._feature_columns),
             # ``seq_len`` is redundant with ``config_dump["seq_len"]`` but
             # rides alongside for the explicit round-trip guard (plan R7
             # / test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict).
             "seq_len": int(self._config.seq_len),
-            # Warmup prefix — ``predict`` prepends this to the input
-            # features so a loaded model still yields
-            # ``len(predict) == len(features)`` (evaluation-layer §5).
-            "warmup_features": self._warmup_features.copy(),
+            # Warmup prefix — broken down to numpy values + int64 nanos +
+            # tz string + column list so skops's restricted unpickler
+            # accepts the load without trust-list registration.  ``predict``
+            # reconstructs the DataFrame on the way out so the contract
+            # ``len(predict) == len(features)`` (evaluation-layer §5) is
+            # preserved end-to-end.
+            "warmup_values": np.ascontiguousarray(warmup_df.to_numpy(dtype=np.float64)),
+            "warmup_index_nanos": np.asarray(warmup_index.asi8, dtype=np.int64),
+            "warmup_index_tz": warmup_index_tz,
+            "warmup_index_freq": warmup_index_freq,
+            "warmup_columns": list(warmup_df.columns),
             "seed_used": self._seed_used,
             "best_epoch": self._best_epoch,
-            "loss_history": list(self.loss_history_),
-            "fit_utc": self._fit_utc,
+            "loss_history": [dict(entry) for entry in self.loss_history_],
+            # ISO-8601 string keeps ``datetime`` / ``tzinfo`` out of the
+            # artefact (each is a custom type under skops and would each
+            # need a trust-list entry).
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
             "device_resolved": self._device_resolved,
         }
-        save_joblib(envelope, path)
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> NnTemporalModel:
         """Load a previously-saved :class:`NnTemporalModel` from ``path``.
 
-        Plan D5: reads the joblib envelope, reconstructs
-        :class:`NnTemporalConfig` from ``config_dump`` (Pydantic
-        re-validation catches schema drift — plan R2), instantiates an
-        ``NnTemporalModel``, materialises the ``state_dict`` via
-        ``torch.load(BytesIO(state_dict_bytes), weights_only=True,
-        map_location="cpu")``, and calls ``load_state_dict(strict=True)``.
-        ``weights_only=True`` keeps PyTorch 2.6+'s safety rail active on
-        the inner bytes payload; ``strict=True`` is load-bearing for
-        plan R3 (a dropped scaler buffer would silently break
-        inverse-normalisation at :meth:`predict` otherwise).
+        Stage 12 D10 (Ctrl+G reversal): reads via :mod:`skops.io`'s
+        restricted unpickler.  The envelope schema is the
+        :data:`_NN_TEMPORAL_ENVELOPE_FORMAT`-tagged dict-of-primitives
+        written by :meth:`save`; the warmup ``pd.DataFrame`` is
+        reconstructed from the ``warmup_values`` numpy array + the
+        ``warmup_index_nanos`` int64 vector + the ``warmup_index_tz``
+        string + the ``warmup_columns`` list, and the ``fit_utc``
+        ``datetime`` is reconstructed from the ``fit_utc_isoformat``
+        ISO-8601 string — both reconstructions stay on the
+        skops-default-trusted primitives so no project trust-list entry
+        is needed.
+
+        Plan D5: reconstructs :class:`NnTemporalConfig` from
+        ``config_dump`` (Pydantic re-validation catches schema drift —
+        plan R2), instantiates an ``NnTemporalModel``, materialises the
+        ``state_dict`` via ``torch.load(BytesIO(state_dict_bytes),
+        weights_only=True, map_location="cpu")``, and calls
+        ``load_state_dict(strict=True)``.  ``weights_only=True`` keeps
+        PyTorch 2.6+'s safety rail active on the inner bytes payload;
+        ``strict=True`` is load-bearing for plan R3 (a dropped scaler
+        buffer would silently break inverse-normalisation at
+        :meth:`predict` otherwise).
 
         The loaded model lives on CPU regardless of the device it was
         fitted on — :meth:`predict` moves tensors to ``self._device`` at
@@ -1092,20 +1161,37 @@ class NnTemporalModel:
         Raises
         ------
         FileNotFoundError
-            If ``path`` does not exist (propagated from :mod:`joblib`).
+            If ``path`` does not exist (propagated from :mod:`skops.io`).
+        TypeError
+            If the loaded envelope's ``format`` tag does not match
+            :data:`_NN_TEMPORAL_ENVELOPE_FORMAT` (a structural signal it
+            was not produced by a fitted ``NnTemporalModel``).
         ValueError
-            If the envelope is missing ``feature_columns`` (a structural
-            signal it was not produced by a fitted ``NnTemporalModel``)
-            or if the envelope's ``seq_len`` disagrees with the one in
-            ``config_dump`` (plan R7 explicit round-trip guard).
+            If the envelope is missing ``feature_columns`` or the
+            warmup-prefix fields, or if the envelope's ``seq_len``
+            disagrees with the one in ``config_dump`` (plan R7 explicit
+            round-trip guard).
         """
         import io as _io
 
         import torch
 
-        from bristol_ml.models.io import load_joblib
+        from bristol_ml.models.io import load_skops
 
-        envelope = load_joblib(path)
+        envelope = load_skops(path)
+
+        # Format-tag discriminator — TypeError on mismatch so a
+        # non-NnTemporalModel artefact (e.g. a NaiveModel envelope or a
+        # raw dict) cannot be silently loaded as if it were one.
+        if not isinstance(envelope, dict) or envelope.get("format") != _NN_TEMPORAL_ENVELOPE_FORMAT:
+            actual_tag: object = (
+                envelope.get("format") if isinstance(envelope, dict) else type(envelope).__name__
+            )
+            raise TypeError(
+                "NnTemporalModel.load: artefact at "
+                f"{path!s} does not carry the expected format tag "
+                f"{_NN_TEMPORAL_ENVELOPE_FORMAT!r}; got {actual_tag!r}."
+            )
 
         # Pydantic re-validation — schema-drift guard (plan R2).
         config = NnTemporalConfig.model_validate(envelope["config_dump"])
@@ -1138,25 +1224,47 @@ class NnTemporalModel:
         state_dict = torch.load(buf, weights_only=True, map_location="cpu")
         module.load_state_dict(state_dict, strict=True)
 
+        # Reconstruct the warmup DataFrame from skops-safe primitives.
+        # ``warmup_values`` carries the raw float64 values; the index is
+        # restored from int64 nanos-since-epoch + the captured tz string.
+        warmup_values = envelope.get("warmup_values")
+        warmup_index_nanos = envelope.get("warmup_index_nanos")
+        warmup_columns = envelope.get("warmup_columns")
+        if warmup_values is None or warmup_index_nanos is None or warmup_columns is None:
+            raise ValueError(
+                "NnTemporalModel.load: envelope is missing one of the "
+                "warmup_values / warmup_index_nanos / warmup_columns "
+                "fields; this artefact predates the Stage 12 D10 envelope "
+                "schema or was produced by code that violated the save "
+                "contract."
+            )
+        warmup_index = pd.DatetimeIndex(
+            np.asarray(warmup_index_nanos, dtype="datetime64[ns]"),
+            tz=envelope.get("warmup_index_tz"),
+            freq=envelope.get("warmup_index_freq"),
+        )
+        warmup_df = pd.DataFrame(
+            np.asarray(warmup_values, dtype=np.float64),
+            index=warmup_index,
+            columns=list(warmup_columns),
+        )
+
+        # Reconstruct ``fit_utc`` from the ISO-8601 string (skops-safe;
+        # avoids storing ``datetime`` / ``tzinfo`` directly).
+        fit_utc_iso = envelope.get("fit_utc_isoformat")
+        fit_utc = datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
+
         # Restore fit-state attributes.  ``loss_history_`` is rebuilt as
         # a fresh list so mutations via the returned instance do not
-        # alias back into the envelope dict.  The warmup-prefix
-        # DataFrame is defensively copied for the same reason.
+        # alias back into the envelope dict.
         model._feature_columns = feature_cols
-        model._fit_utc = envelope.get("fit_utc")
+        model._fit_utc = fit_utc
         model._device = torch.device("cpu")
         model._device_resolved = envelope.get("device_resolved")
         model._seed_used = envelope.get("seed_used")
         model._best_epoch = envelope.get("best_epoch")
         model._module = module
-        warmup = envelope.get("warmup_features")
-        if warmup is None:
-            raise ValueError(
-                "NnTemporalModel.load: envelope is missing the warmup_features "
-                "field; this artefact predates the Stage 11 T5 envelope schema "
-                "or was produced by code that violated the save contract."
-            )
-        model._warmup_features = warmup.copy()
+        model._warmup_features = warmup_df
         model.loss_history_ = [dict(e) for e in envelope.get("loss_history", [])]
 
         return model

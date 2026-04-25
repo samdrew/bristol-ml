@@ -38,7 +38,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX as _StatsmodelsSARIMAX
 from statsmodels.tsa.statespace.sarimax import SARIMAXResultsWrapper
 
 from bristol_ml.models import Model, SarimaxModel
-from bristol_ml.models.io import save_joblib
+from bristol_ml.models.io import save_skops
 from bristol_ml.models.sarimax import _cli_main
 from conf._schemas import SarimaxConfig
 
@@ -687,16 +687,18 @@ def test_sarimax_save_load_round_trip_with_exog(tmp_path: Path) -> None:
 
     Fits on a 500-row synthetic series (trimmed from the spec's 2000 rows for
     speed — the regression guard is behavioural, not scale-dependent).
-    Saves to ``tmp_path / "model.joblib"``, reloads via ``SarimaxModel.load``,
+    Saves to ``tmp_path / "model.skops"``, reloads via ``SarimaxModel.load``,
     predicts on the same 24-row slice, and asserts bit-for-bit equivalence
     with ``np.testing.assert_allclose(rtol=1e-10)``.
 
     This is the AC-2 test and the statsmodels issue #6542 regression guard:
-    the four exog column names must survive the joblib round-trip so that the
-    internal ``SARIMAXResultsWrapper`` can still map regressors correctly on
-    ``get_forecast``.
+    the four exog column names must survive the skops envelope-of-bytes
+    round-trip (Stage 12 D10) so that the internal
+    ``SARIMAXResultsWrapper`` can still map regressors correctly on
+    ``get_forecast`` — the exog mapping rides inside the inner blob.
 
-    Plan clause: T5 plan §Task T5 named test / AC-2 / issue #6542 regression guard.
+    Plan clause: T5 plan §Task T5 named test / AC-2 / issue #6542 regression
+    guard / Stage 12 D10.
     """
     features, target = _synthetic_utc_frame_4col(500)
 
@@ -711,7 +713,7 @@ def test_sarimax_save_load_round_trip_with_exog(tmp_path: Path) -> None:
     test_window = features.iloc[-24:]
     original_pred = model.predict(test_window)
 
-    save_path = tmp_path / "model.joblib"
+    save_path = tmp_path / "model.skops"
     model.save(save_path)
 
     reloaded = SarimaxModel.load(save_path)
@@ -724,7 +726,7 @@ def test_sarimax_save_load_round_trip_with_exog(tmp_path: Path) -> None:
         err_msg=(
             "Reloaded model predictions must match the original predictions "
             "exactly (rtol=1e-10); statsmodels issue #6542 regression guard "
-            "— exog columns must survive the joblib round-trip."
+            "— exog columns must survive the skops envelope-of-bytes round-trip."
         ),
     )
 
@@ -745,7 +747,7 @@ def test_sarimax_save_unfitted_raises_runtime_error(tmp_path: Path) -> None:
     """
     model = SarimaxModel(SarimaxConfig())
     with pytest.raises(RuntimeError) as exc_info:
-        model.save(tmp_path / "x.joblib")
+        model.save(tmp_path / "x.skops")
     msg = str(exc_info.value).lower()
     assert "unfitted" in msg or "fit" in msg, (
         f"RuntimeError message must mention 'unfitted' or 'fit'; "
@@ -761,15 +763,17 @@ def test_sarimax_save_unfitted_raises_runtime_error(tmp_path: Path) -> None:
 def test_sarimax_load_rejects_wrong_type(tmp_path: Path) -> None:
     """``SarimaxModel.load`` raises ``TypeError`` when the artefact is not a ``SarimaxModel``.
 
-    Uses ``save_joblib`` directly to write a plain ``dict`` (the simplest
+    Uses ``save_skops`` directly to write a plain ``dict`` (the simplest
     non-SarimaxModel object) to a path, then asserts that
-    ``SarimaxModel.load(path)`` raises ``TypeError``.
+    ``SarimaxModel.load(path)`` raises ``TypeError``.  Stage 12 D10: the
+    failure point is the format-tag discriminator inside the envelope
+    rather than an outer ``isinstance(obj, cls)`` check.
 
-    Plan clause: T5 plan §Task T5 named test — loading wrong type raises ``TypeError``.
+    Plan clause: T5 plan §Task T5 named test / Stage 12 D10.
     """
     wrong_artefact: dict = {"not": "a model"}
-    bad_path = tmp_path / "wrong.joblib"
-    save_joblib(wrong_artefact, bad_path)
+    bad_path = tmp_path / "wrong.skops"
+    save_skops(wrong_artefact, bad_path)
 
     with pytest.raises(TypeError):
         SarimaxModel.load(bad_path)
@@ -807,7 +811,7 @@ def test_sarimax_load_preserves_metadata(tmp_path: Path) -> None:
 
     original_metadata = model.metadata
 
-    save_path = tmp_path / "meta_model.joblib"
+    save_path = tmp_path / "meta_model.skops"
     model.save(save_path)
     reloaded = SarimaxModel.load(save_path)
     reloaded_metadata = reloaded.metadata
@@ -870,7 +874,7 @@ def test_sarimax_reentrant_fit_after_load(tmp_path: Path) -> None:
     model_a.fit(features_a, target_a)
     loaded_feature_columns = model_a.metadata.feature_columns  # ("temp_c", "cloud_cover")
 
-    save_path = tmp_path / "model_a.joblib"
+    save_path = tmp_path / "model_a.skops"
     model_a.save(save_path)
     model_b = SarimaxModel.load(save_path)
 
@@ -963,7 +967,7 @@ def test_sarimax_protocol_conformance_all_five_members(tmp_path: Path) -> None:
     )
 
     # --- save writes a file ---
-    save_path = tmp_path / "conformance_model.joblib"
+    save_path = tmp_path / "conformance_model.skops"
     model.save(save_path)
     assert save_path.exists(), (
         f"save(path) must write a file at {save_path}; file not found (T7 / AC-1)."
@@ -1265,3 +1269,105 @@ def test_sarimax_fit_single_fold_completes_under_60_seconds() -> None:
     )
     # Sanity: the fit actually produced a results wrapper.
     assert model.results is not None
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 T4 named test — SarimaxModel skops envelope-of-bytes roundtrip
+# ---------------------------------------------------------------------------
+
+
+def test_sarimax_save_load_skops_roundtrip(tmp_path: Path) -> None:
+    """Stage 12 T4 named test (D10) — SarimaxModel skops envelope-of-bytes guard.
+
+    Companion to ``test_linear_save_load_skops_roundtrip``: same four-part
+    contract (atomic single-file save, protocol conformance, foreign-tag
+    rejection, bit-exact predict round-trip) but with the
+    ``kind="SARIMAX"`` discriminator and the additional
+    ``endog_name`` envelope field.
+
+    Statsmodels issue #6542 narrative: the four exog column-name strings
+    ride *inside* the inner ``SARIMAXResults.save(BytesIO())`` blob, not
+    in the outer dict.  The skops envelope only protects the envelope
+    boundary; the registry write contract trusts the inner blob bytes.
+    The Stage 7 narrative continues to hold under the Stage 12 D10
+    migration — exog mapping is preserved for ``get_forecast`` after
+    reload — and this test is the regression guard for that property
+    under the new serialiser.
+
+    Plan clauses: Stage 12 plan §Task T4 ("test_sarimax_save_load_skops_
+    roundtrip") + D10 (skops migration) + Stage 7 issue #6542 narrative
+    + Stage 4 Model protocol.
+    """
+    from bristol_ml.models.io import save_skops
+    from bristol_ml.models.protocol import Model
+
+    features, target = _synthetic_utc_frame_4col(500)
+    config = SarimaxConfig(
+        order=(1, 0, 0),
+        seasonal_order=(0, 0, 0, 24),
+        weekly_fourier_harmonics=2,
+    )
+    model_before = SarimaxModel(config)
+    model_before.fit(features, target)
+
+    test_window = features.iloc[-24:]
+    pred_before = model_before.predict(test_window)
+
+    artefact_dir = tmp_path / "artefact"
+    artefact_path = artefact_dir / "model.skops"
+    model_before.save(artefact_path)
+
+    # (a) Atomic-write contract: exactly one ``.skops`` file at ``path``.
+    siblings = sorted(p.name for p in artefact_dir.iterdir())
+    assert siblings == ["model.skops"], (
+        "skops migration must preserve the atomic single-file save "
+        f"contract; got siblings {siblings!r} (Stage 12 T4 / D10)."
+    )
+
+    model_after = SarimaxModel.load(artefact_path)
+
+    # (b) Protocol conformance.
+    assert isinstance(model_after, Model), (
+        "Loaded SarimaxModel must satisfy the Stage 4 Model protocol "
+        "(runtime_checkable isinstance) (Stage 12 T4 / D10)."
+    )
+
+    # (c) Cross-family discriminator: a foreign envelope (NN-temporal-
+    # shaped tag) must be rejected with TypeError.
+    foreign_path = tmp_path / "foreign.skops"
+    save_skops({"format": "nn-temporal-state-v1", "config_dump": {}}, foreign_path)
+    with pytest.raises(TypeError, match=r"format tag|statsmodels-bytes"):
+        SarimaxModel.load(foreign_path)
+
+    # An OLS-kind envelope (correct format, wrong kind) must also be
+    # rejected — the kind tag is the within-format discriminator.
+    ols_kind_path = tmp_path / "ols_kind.skops"
+    save_skops(
+        {
+            "format": "statsmodels-bytes-v1",
+            "kind": "OLS",
+            "blob": b"",
+            "config_dump": {},
+            "feature_columns": [],
+            "endog_name": "",
+            "fit_utc_isoformat": None,
+        },
+        ols_kind_path,
+    )
+    with pytest.raises(TypeError, match=r"kind|SARIMAX"):
+        SarimaxModel.load(ols_kind_path)
+
+    # (d) Bit-identical predict round-trip on the reloaded model.
+    pred_after = model_after.predict(test_window)
+    np.testing.assert_allclose(
+        pred_before.to_numpy(),
+        pred_after.to_numpy(),
+        rtol=1e-10,
+        err_msg=(
+            "skops migration: predict() after load() must match the "
+            "original under rtol=1e-10 (statsmodels issue #6542 "
+            "regression guard — exog columns must survive the skops "
+            "envelope-of-bytes round-trip).  Stage 12 T4 / D10."
+        ),
+    )
+    assert pred_after.index.equals(pred_before.index)

@@ -64,11 +64,37 @@ The registry is filesystem-backed (`data/registry/`, gitignored); run IDs are hu
 
 ## Worked example: simple neural network (Stage 10)
 
-`notebooks/10-simple-nn.ipynb` fits a small PyTorch MLP (`NnMlpModel` — 1 hidden layer × 128 units, ReLU, Adam) behind the Stage 4 `Model` protocol. The notebook's demo moments are: a live loss-curve cell that redraws per epoch as `fit()` runs (using the `epoch_callback` seam and `IPython.display`); a static `plots.loss_curve(model.loss_history_)` render after training completes; and a three-way `harness.evaluate` comparison (naive + linear + nn_mlp) on a narrow rolling-origin window so the NN can be placed on the leaderboard from the first session. Training is reproducible on CPU (`seed=0` gives bit-identical `state_dict` tensors across runs). The artefact is saved as a single joblib file containing the `state_dict` bytes alongside the config and scaler buffers — compatible with the Stage 9 registry unchanged (no registry changes required). Entry points: `python -m bristol_ml.models.nn --help`, `python -m bristol_ml.models.nn.mlp --help`, and `uv run python -m bristol_ml.train model=nn_mlp`. See [`src/bristol_ml/models/nn/CLAUDE.md`](src/bristol_ml/models/nn/CLAUDE.md), [`docs/architecture/layers/models-nn.md`](docs/architecture/layers/models-nn.md), and the [Stage 10 retrospective](docs/lld/stages/10-simple-nn.md).
+`notebooks/10-simple-nn.ipynb` fits a small PyTorch MLP (`NnMlpModel` — 1 hidden layer × 128 units, ReLU, Adam) behind the Stage 4 `Model` protocol. The notebook's demo moments are: a live loss-curve cell that redraws per epoch as `fit()` runs (using the `epoch_callback` seam and `IPython.display`); a static `plots.loss_curve(model.loss_history_)` render after training completes; and a three-way `harness.evaluate` comparison (naive + linear + nn_mlp) on a narrow rolling-origin window so the NN can be placed on the leaderboard from the first session. Training is reproducible on CPU (`seed=0` gives bit-identical `state_dict` tensors across runs). The artefact is saved as a skops file (Stage 12 D10 migrated all families from joblib to `skops.io`) containing the `state_dict` bytes alongside the config and scaler buffers, registered through the Stage 9 registry. Entry points: `python -m bristol_ml.models.nn --help`, `python -m bristol_ml.models.nn.mlp --help`, and `uv run python -m bristol_ml.train model=nn_mlp`. See [`src/bristol_ml/models/nn/CLAUDE.md`](src/bristol_ml/models/nn/CLAUDE.md), [`docs/architecture/layers/models-nn.md`](docs/architecture/layers/models-nn.md), and the [Stage 10 retrospective](docs/lld/stages/10-simple-nn.md).
 
 ## Worked example: complex neural network — TCN (Stage 11)
 
 `notebooks/11-complex-nn.ipynb` fits a Bai-et-al.-2018 Temporal Convolutional Network (`NnTemporalModel` — dilated causal 1D convolutions, residual blocks, weight-norm, `seq_len=168` weekly anchor) behind the Stage 4 `Model` protocol and registers it through the Stage 9 registry. The demo moment is a **six-row ablation table** (Cell 6) placing every shipped model family — naive, linear, SARIMAX, scipy parametric, MLP, TCN — head-to-head on the same single-holdout slice, all loaded predict-only via `registry.load`. Training uses the shared `_training.run_training_loop` extracted from Stage 10; the live loss-curve callback is the same Stage 10 `epoch_callback` seam. Entry points: `python -m bristol_ml.models.nn.temporal --help` (prints `NnTemporalConfig` schema), `python -m bristol_ml.models.nn --help`, and `uv run python -m bristol_ml.train model=nn_temporal`. See [`src/bristol_ml/models/nn/CLAUDE.md`](src/bristol_ml/models/nn/CLAUDE.md), [`docs/architecture/layers/models-nn.md`](docs/architecture/layers/models-nn.md), and the [Stage 11 retrospective](docs/lld/stages/11-complex-nn.md).
+
+## Worked example: serving (Stage 12)
+
+`python -m bristol_ml.serving` is the Stage 12 demo moment: a single command starts a FastAPI prediction service that loads the lowest-MAE registered model and answers forecast requests over HTTP.
+
+```bash
+# Start the service (requires at least one trained model in data/registry/)
+uv run python -m bristol_ml.serving --registry-dir data/registry
+
+# Check which model is being served
+curl http://localhost:8000/
+
+# Issue a prediction (replace the feature values with the keys in GET / feature_columns)
+curl -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"target_dt": "2025-06-15T13:00:00Z", "features": {"temp_c": 12.5, "cloud_cover": 0.4}}'
+
+# Inspect the auto-generated OpenAPI schema
+curl http://localhost:8000/openapi.json
+```
+
+All six model families (`naive`, `linear`, `sarimax`, `scipy_parametric`, `nn_mlp`, `nn_temporal`) are served through the same endpoint — no model-family special-casing. The default model is the lowest-MAE registered run across all families. Non-default runs are named via the optional `run_id` field in the request body and lazy-loaded on first use.
+
+**Breaking change — skops migration.** Stage 12 migrated all six model families' save / load paths from `joblib` to `skops.io` for security (the serving layer is a network-facing deserialiser; `joblib.load` on an attacker-controlled artefact is RCE). **Any existing `data/registry/` directory containing `model.joblib` artefacts must be rebuilt by retraining.** `registry.load` rejects pre-Stage-12 artefacts with a clear error naming the path and the required migration action.
+
+See [`src/bristol_ml/serving/CLAUDE.md`](src/bristol_ml/serving/CLAUDE.md), [`docs/architecture/layers/serving.md`](docs/architecture/layers/serving.md), and the [Stage 12 retrospective](docs/lld/stages/12-serving.md).
 
 ## Worked example: calendar features (Stage 5)
 

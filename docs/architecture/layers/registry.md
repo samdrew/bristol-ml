@@ -1,6 +1,6 @@
 # Registry — layer architecture
 
-- **Status:** Provisional — first realised by Stage 9 (filesystem-backed registry with a four-verb public surface, shipped). Revisit at Stage 12 (serving — first non-author consumer of artefacts; may force `skops.io` adoption per models-layer H-3) and Stage 17 (price-target models — first cross-target promotion use-case that may require feature-table content hashing per plan D6).
+- **Status:** Provisional — first realised by Stage 9 (filesystem-backed registry with a four-verb public surface). Stage 12 inflection point landed: `skops.io` adopted as canonical serialiser (D10 Ctrl+G reversal; `model.joblib` → `model.skops`); `nn_temporal` added to the dispatcher (Stage 11). Revisit at Stage 17 (price-target models — first cross-target promotion use-case that may require feature-table content hashing per plan D6).
 - **Canonical overview:** [`DESIGN.md` §3.2](../../intent/DESIGN.md#32-layer-responsibilities) (registry paragraph); [`DESIGN.md` §10](../../intent/DESIGN.md#10-deferred-concerns) (deferred hosted-registry adoption).
 - **Concrete instances:** [Stage 9 retro](../../lld/stages/09-model-registry.md) (filesystem layout, four-verb surface, MLflow PyFunc adapter test).
 - **Related principles:** §2.1.1 (standalone module), §2.1.2 (typed narrow interfaces), §2.1.4 (config outside code), §2.1.5 (idempotent writes), §2.1.6 (provenance), §2.1.7 (tests at boundaries).
@@ -48,15 +48,15 @@ data/registry/                                              # DEFAULT_REGISTRY_D
 ├── .tmp_{short_uuid}/                                      # staging dir during save (removed on success)
 ├── linear-ols-weather-only_20260423T1430/
 │   ├── artefact/
-│   │   └── model.joblib
+│   │   └── model.skops                                     # Stage 12 D10: was model.joblib
 │   └── run.json
 ├── sarimax-d1-d1-s168_20260423T1431/
 │   ├── artefact/
-│   │   └── model.joblib
+│   │   └── model.skops
 │   └── run.json
 └── naive-same-hour-last-week_20260423T1432/
     ├── artefact/
-    │   └── model.joblib
+    │   └── model.skops
     └── run.json
 ```
 
@@ -77,7 +77,7 @@ Example: `linear-ols-weather-only_20260423T1430`.
 
 ### Atomic save
 
-Every `save()` writes into `registry_dir/.tmp_{uuid4.hex}/` and renames the completed staging directory to `registry_dir/{run_id}/` via `os.replace`. Mirrors the two existing atomic-write sites in the codebase (`ingestion/_common.py::_atomic_write` and `models/io.py::save_joblib`). A crash mid-write leaves no partial run — the previous run (if any) is intact, or the registry directory shows the run as absent.
+Every `save()` writes into `registry_dir/.tmp_{uuid4.hex}/` and renames the completed staging directory to `registry_dir/{run_id}/` via `os.replace`. Mirrors the two existing atomic-write sites in the codebase (`ingestion/_common.py::_atomic_write` and `models/io.py::save_skops`). A crash mid-write leaves no partial run — the previous run (if any) is intact, or the registry directory shows the run as absent.
 
 ## Sidecar JSON schema
 
@@ -110,7 +110,7 @@ One `run.json` per run, UTF-8, `json.dumps(..., indent=2, allow_nan=True, ensure
 |-------|--------|------|-------|
 | `run_id` | Computed | `str` | `{metadata.name}_{YYYYMMDDTHHMM}`. Same value as the parent directory name. |
 | `name` | `model.metadata.name` | `str` | Includes the `_NamedLinearModel` dynamic name (e.g. `linear-ols-weather-only`) verbatim. Sidecar is the source of truth for human-readable names; `load()` does **not** re-apply a dynamic wrapper. |
-| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`, `"nn_mlp"`. Read at `load()` to pick the correct concrete class. |
+| `type` | `_dispatch.model_type(model)` | `str` | One of `"naive"`, `"linear"`, `"sarimax"`, `"scipy_parametric"`, `"nn_mlp"`, `"nn_temporal"`. Read at `load()` to pick the correct concrete class. |
 | `feature_set` | Caller kwarg | `str` | AC-3 explicit: the registry cannot infer which of the Stage 5 feature sets was in play. |
 | `target` | Caller kwarg | `str` | AC-3 explicit: same rationale. Enables D7 filtering. |
 | `feature_columns` | `model.metadata.feature_columns` | `list[str]` | Ordered list of training-column names. |
@@ -181,6 +181,7 @@ Python's `list` builtin would be shadowed inside the module if the exported symb
 | `"sarimax"` | `bristol_ml.models.sarimax.SarimaxModel` |
 | `"scipy_parametric"` | `bristol_ml.models.scipy_parametric.ScipyParametricModel` |
 | `"nn_mlp"` | `bristol_ml.models.nn.mlp.NnMlpModel` |
+| `"nn_temporal"` | `bristol_ml.models.nn.temporal.NnTemporalModel` (Stage 11) |
 
 The `_NamedLinearModel` wrapper that `train.py` uses for named linear variants dispatches to `"linear"` (via `_CLASS_NAME_TO_TYPE`); `load()` returns a base `LinearModel`, not a re-wrapped `_NamedLinearModel`. The sidecar's `name` field preserves the dynamic name for readers — sidecar-name lookup is the source of truth for the human-readable identifier, not the loaded instance's type.
 
@@ -209,7 +210,7 @@ The registered artefact is the model as-fit on the final fold of the rolling-ori
 - Re-fitting adds a second training pass per CLI invocation for no named requirement.
 - The final-fold model is an honest representative of the measurement.
 
-Facilitators interpreting the leaderboard should read `metrics.<metric>.mean` as the rolling-origin cross-fold aggregate (D15) and understand the `artefact/model.joblib` as the final-fold representative. The `save()` docstring and the Stage 9 retro both make this trade-off explicit (plan R2).
+Facilitators interpreting the leaderboard should read `metrics.<metric>.mean` as the rolling-origin cross-fold aggregate (D15) and understand the `artefact/model.skops` as the final-fold representative. The `save()` docstring and the Stage 9 retro both make this trade-off explicit (plan R2).
 
 ## Graduation to MLflow
 
@@ -228,11 +229,19 @@ The four-verb interface is the **contract**. Migration to a hosted MLflow regist
 
 When a future stage promotes MLflow to a runtime dependency, this subsection is the contract to port — rewrite the adapter against the hosted MLflow API, move it to `src/bristol_ml/registry/mlflow.py`, add a fifth verb only if the four-verb API genuinely cannot express the new use-case.
 
-## Serialisation — joblib, `skops.io` deferred to Stage 12
+## Serialisation — skops.io (Stage 12 inflection point — adopted)
 
-Artefacts are written through each model's existing `Model.save` protocol method — joblib under the hood. The registry does not duplicate serialisation logic (plan D9). `bristol_ml.models.io.save_joblib` and `.load_joblib` are the shared helpers; atomic writes and parent-directory creation are handled there.
+Artefacts are written through each model's `Model.save` protocol method. The registry does not duplicate serialisation logic (plan D9). `bristol_ml.models.io.save_skops` and `load_skops` are the canonical helpers from Stage 12 onwards; atomic writes and parent-directory creation are handled there.
 
-**Security note.** joblib (like `pickle`) is not a safe deserialiser for untrusted inputs. The Stage 9 registry only ever loads artefacts the training author wrote themselves; the untrusted-input path begins at Stage 12 (serving), which is the correct inflection point for `skops.io` adoption (plan D14). `models/io.py` carries a one-line docstring edit naming Stage 12 as the trigger (H-3).
+**Stage 12 D10 — skops adopted (Ctrl+G reversal).** The Stage 9 plan's "Stage 12 inflection point" for `skops.io` adoption has landed. At Stage 12 Ctrl+G the human directed: *"Include skops. This includes a network facing interface so security should be paramount, as I don't want an RCE exploit on my PC."* All six model families' `save` / `load` paths were migrated from `joblib` to `skops.io` as part of Stage 12 (T2–T5). The registry boundary (`registry.__init__.load` via `registry._fs._atomic_write_run`) now writes `model.skops` and rejects any run directory carrying a `model.joblib` artefact with a clear `RuntimeError`.
+
+**Breaking change for existing users.** Any `data/registry/*.joblib` artefact written before Stage 12 is invalidated; `registry.load` rejects it with a migration message. The operator must retrain. This is deliberate — backward compatibility was explicitly sacrificed in favour of security at the Ctrl+G review.
+
+**Trust-list contract for future stages.** `bristol_ml.models.io.load_skops` enforces a project trust-list (`_PROJECT_SAFE_TYPES`). Any new model family added after Stage 12 must call `register_safe_types("module.path.ClassName")` at import time for every custom class that appears in its saved artefact. See `src/bristol_ml/models/io.py` and the serving layer doc at [`layers/serving.md`](serving.md).
+
+**Envelope-of-bytes for statsmodels families.** `LinearModel` and `SarimaxModel` use the envelope-of-bytes pattern: `results.save(BytesIO())` → raw bytes wrapped in a `{"format": "statsmodels-bytes-v1", "kind": ..., "blob": bytes, ...}` dict → `skops.io.dump(envelope)`. The envelope contains only skops-safe primitive types; the statsmodels objects never go through skops directly.
+
+The `save_joblib` / `load_joblib` helpers in `bristol_ml.models.io` are retained for one stage (Stage 12 → Stage 13) with a `DeprecationWarning` to give any external scripts time to migrate. They will be removed at Stage 13 — no exceptions; joblib at the registry boundary is a security regression.
 
 ## Module structure
 
@@ -304,8 +313,11 @@ Each row is swappable without touching downstream code. The four-verb API is wha
 
 ## Cross-references
 
-- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — ADR establishing joblib + sidecar as sufficient before a hosted registry.
+- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — ADR establishing joblib + sidecar as sufficient before a hosted registry; superseded at the serialisation boundary by ADR 0005 (Stage 12 skops migration).
 - [`decisions/0003-protocol-for-model-interface.md`](../decisions/0003-protocol-for-model-interface.md) — the five-member `Model` protocol the registry consumes without modification (AC-2).
-- [`layers/models.md`](models.md) — the serialisation upgrade path (joblib → `skops.io` at Stage 12) and the `Model` protocol contract the registry leans on.
+- [`decisions/0005-skops-for-model-serialisation.md`](../decisions/0005-skops-for-model-serialisation.md) — Stage 12 joblib → skops migration; the registry layer is the consumer side of this ADR (`registry.load(run_id)` calls each family's `Model.load(path)`, which calls `bristol_ml.models.io.load_skops`).
+- [`layers/models.md`](models.md) — the `Model` protocol contract; `skops.io` migration rationale.
+- [`layers/serving.md`](serving.md) — the first non-author consumer of registry artefacts; security rationale for the skops migration; trust-list contract for future model families.
 - [`layers/evaluation.md`](evaluation.md) — harness return shape that `registry.save` consumes; `evaluate_and_keep_final_model` extension (plan D17).
 - [Stage 9 retro](../../lld/stages/09-model-registry.md) — implementation notes, NFR measurements, AC mapping.
+- [Stage 12 retro](../../lld/stages/12-serving.md) — skops migration outcome; D9 + D10 Ctrl+G reversal log.

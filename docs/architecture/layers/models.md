@@ -23,7 +23,8 @@ Two concrete model classes land at Stage 4: `NaiveModel` (seasonal lookup; no tr
 | The `Model` protocol + `ModelMetadata` provenance | ✓ | — |
 | Seasonal-naive and OLS baseline implementations | ✓ | — |
 | SARIMAX, SciPy parametric, NN (Stages 7–11) | ✓ | — |
-| Joblib-backed `save_joblib` / `load_joblib` helpers | ✓ | — |
+| `save_skops` / `load_skops` / `register_safe_types` IO helpers (Stage 12 D10) | ✓ | — |
+| Deprecated `save_joblib` / `load_joblib` (removed at Stage 13) | ✓ | — |
 | Fold-level evaluation loop | — | evaluation layer (`harness.evaluate`) |
 | Splitter / metric definitions | — | evaluation layer |
 | Persistence to a named registry slot | — | registry layer (Stage 9) |
@@ -41,7 +42,7 @@ Every model module follows the same four-part shape. `NaiveModel` is the minimal
 
 - `src/bristol_ml/models/<family>.py` — one module per model family (e.g. `naive.py`, `linear.py`, `sarimax.py`). Each module exports one `class <Family>Model`.
 - `src/bristol_ml/models/protocol.py` — the `Model` protocol + `ModelMetadata` re-export. Shared by every family; never family-specific.
-- `src/bristol_ml/models/io.py` — joblib-backed save/load helpers. Reused by every family's `save`/`load` methods.
+- `src/bristol_ml/models/io.py` — `save_skops` / `load_skops` / `register_safe_types` (Stage 12 D10 canonical helpers); deprecated `save_joblib` / `load_joblib` retained until Stage 13. Reused by every family's `save`/`load` methods.
 - `conf/model/<family>.yaml` — Hydra group file with `# @package model.<family>` header, carrying the `type` discriminator tag plus family-specific knobs (naive `strategy`, linear `fit_intercept`, …). The `conf/config.yaml` `defaults:` list selects one variant; `model=<family>` at the CLI swaps.
 - **No dispatcher.** Hydra's `_target_` pattern is the only factory; `train.py` discriminates via `isinstance(model_cfg, <Family>Config)` on the resolved `AppConfig.model`.
 
@@ -79,25 +80,28 @@ Every fitted model carries a frozen `ModelMetadata` record with five fields:
 
 `ModelMetadata` is **not** a Hydra config group. It lives in `conf/_schemas.py` because it is a Pydantic model with `frozen=True` / `extra="forbid"`, but it is consumed via `from bristol_ml.models import ModelMetadata` (the `protocol.py` re-export) rather than the config loader. Stage 9 (registry) will likely read these records verbatim as sidecar JSON.
 
-### 4. Serialisation — joblib (with a Stage 12 upgrade path)
+### 4. Serialisation — skops.io (Stage 12 D10)
 
-Every model's `save`/`load` goes through `bristol_ml.models.save_joblib` / `load_joblib`:
+Every model's `save`/`load` goes through `bristol_ml.models.io.save_skops` / `load_skops` from Stage 12 onwards (D10 Ctrl+G reversal — the serving layer is a network-facing deserialiser; `joblib.load` on an attacker-controlled artefact is RCE):
 
 - **Atomic writes.** Tmp file + `os.replace`, mirroring `ingestion._common._atomic_write`. A partial write leaves the previous artefact intact.
 - **Creates the parent directory.** Call sites do not need to `mkdir` first.
-- **Handles statsmodels `RegressionResultsWrapper` natively.** The joblib pickle protocol is sufficient; no special-casing in `LinearModel.save`.
+- **Trust-list enforcement.** `load_skops` calls `skops.io.get_untrusted_types` first; any type not registered via `register_safe_types` raises `UntrustedTypeError` naming the artefact path and the unexpected types.
+- **Envelope-of-bytes for statsmodels families.** `LinearModel` and `SarimaxModel` serialise the `RegressionResultsWrapper` as raw bytes inside a skops-safe dict envelope; the statsmodels objects never go through skops directly.
 
-joblib (like `pickle`) is not a safe deserialiser for untrusted input. Per Stage 9 plan D14, the Stage 12 **serving** layer is the inflection point for `skops.io` adoption — the first stage that loads artefacts from a path not controlled by the training author. Stage 9 (the registry) explicitly documents that it only ever loads artefacts the training author wrote themselves, so Stages 4–11 do not shoulder the `skops.io` audit burden; `models/io.py` carries a one-line docstring note pointing at Stage 12.
+**Trust-list contract.** Any new model class added after Stage 12 must call `register_safe_types("module.path.ClassName")` at import time for every custom class its artefact contains. See `src/bristol_ml/models/io.py`.
+
+The deprecated `save_joblib` / `load_joblib` helpers remain for one stage (Stage 12 → Stage 13) with a `DeprecationWarning`; they will be removed at Stage 13 — no exceptions.
 
 ## Upgrade seams
 
-Each of these is swappable without touching downstream code. The `Model` protocol + `ModelMetadata` + joblib IO interface is what is load-bearing.
+Each of these is swappable without touching downstream code. The `Model` protocol + `ModelMetadata` + skops IO interface is what is load-bearing.
 
 | Swappable | Load-bearing |
 |-----------|--------------|
 | Concrete model family (OLS → SARIMAX → NN) | The five-member `Model` protocol |
 | Hyperparameter shape per family | `ModelMetadata.hyperparameters: dict[str, Any]` |
-| Serialisation backend (joblib → `skops.io` at Stage 12 per Stage 9 plan D14) | `save(path)` / `load(path)` return `Path` / an instance |
+| Serialisation backend (joblib → `skops.io` migrated at Stage 12 D10) | `save(path)` / `load(path)` return `Path` / an instance |
 | Model-selection mechanism (Hydra `_target_` → Stage 9 registry name dispatch — shipped) | `python -m bristol_ml.train model=<family>` CLI surface; `python -m bristol_ml.registry {list,describe}` name-indexed retrieval |
 | Feature-column resolution (explicit tuple → assembler-schema default) | `feature_columns: tuple[str, ...] \| None = None` contract |
 
@@ -106,14 +110,14 @@ Each of these is swappable without touching downstream code. The `Model` protoco
 | Module | Family | Stage | Status | Notes |
 |--------|--------|-------|--------|-------|
 | `models/protocol.py` | — (layer contract) | 4 | Shipped | `Model` + `ModelMetadata` re-export. |
-| `models/io.py` | — (shared helpers) | 4 | Shipped | `save_joblib` / `load_joblib`. |
+| `models/io.py` | — (shared helpers) | 4 | Shipped (updated Stage 12) | `save_skops`, `load_skops`, `register_safe_types`, `UntrustedTypeError` (Stage 12 D10). Deprecated `save_joblib` / `load_joblib` retained until Stage 13. |
 | `models/naive.py` | Seasonal-naive baseline | 4 | Shipped | Three strategies; `same_hour_last_week` default (D1). Proves AC-2 in ~80 statement-lines. |
 | `models/linear.py` | statsmodels OLS | 4 | Shipped | `fit_intercept=True` adds `sm.add_constant` (D2); `results.summary()` is the notebook demo payoff. |
-| `models/sarimax.py` | Seasonal ARIMA-X | 7 | Shipped | Dual-seasonality via Dynamic Harmonic Regression (plan D1): `seasonal_order=(1,1,1,24)` inside SARIMAX + three Fourier pairs at period 168 h for the weekly cycle. Re-fit per fold in the rolling-origin harness (plan D5). joblib sufficient for the `SARIMAXResultsWrapper` round-trip (plan D12). |
-| `models/scipy_parametric.py` | SciPy `curve_fit` parametric load | 8 | Shipped | Hand-specified `α + β_heat · HDD + β_cool · CDD + diurnal + weekly Fourier` form with Elexon-convention fixed hinges (plan D1: `T_heat = 15.5 °C`, `T_cool = 22.0 °C`); 13 parameters default (plan D2: `diurnal_harmonics=3` + `weekly_harmonics=2`). Default `loss="linear"` + `method="lm"` so `pcov`-derived 95 % CIs stay Gaussian (plan D3/D6). `p0` derived deterministically from training data inside `fit()` (plan D4). Covariance matrix round-trips via `ModelMetadata.hyperparameters["covariance_matrix"]` as `list[list[float]]` (plan D7). `_parametric_fn`, `_derive_p0`, `_build_param_names` are module-level pure functions — required for joblib pickle round-trip (plan S2). `ScipyParametricConfig.feature_columns` constrains *Fourier* columns, not raw inputs (plan D2 clarification). NFR-4 `pcov`-inf WARNING path stores `float('inf')` rather than silent vacuous CIs. |
+| `models/sarimax.py` | Seasonal ARIMA-X | 7 | Shipped | Dual-seasonality via Dynamic Harmonic Regression (plan D1): `seasonal_order=(1,1,1,24)` inside SARIMAX + three Fourier pairs at period 168 h for the weekly cycle. Re-fit per fold in the rolling-origin harness (plan D5). Serialised via envelope-of-bytes pattern: `results.save(BytesIO())` wrapped in a skops-safe dict (Stage 12 D10 T4). |
+| `models/scipy_parametric.py` | SciPy `curve_fit` parametric load | 8 | Shipped | Hand-specified `α + β_heat · HDD + β_cool · CDD + diurnal + weekly Fourier` form with Elexon-convention fixed hinges (plan D1: `T_heat = 15.5 °C`, `T_cool = 22.0 °C`); 13 parameters default (plan D2: `diurnal_harmonics=3` + `weekly_harmonics=2`). Default `loss="linear"` + `method="lm"` so `pcov`-derived 95 % CIs stay Gaussian (plan D3/D6). `p0` derived deterministically from training data inside `fit()` (plan D4). Covariance matrix round-trips via `ModelMetadata.hyperparameters["covariance_matrix"]` as `list[list[float]]` (plan D7). `_parametric_fn`, `_derive_p0`, `_build_param_names` are module-level pure functions (plan S2). `ScipyParametricConfig.feature_columns` constrains *Fourier* columns, not raw inputs (plan D2 clarification). NFR-4 `pcov`-inf WARNING path stores `float('inf')` rather than silent vacuous CIs. Serialised via `save_skops` (Stage 12 D10 T2). |
 | `models/nn/mlp.py` | Simple MLP (first NN family) | 10 | Shipped | `NnMlpModel` — PyTorch MLP behind the `Model` protocol. Full sub-layer contract at [`docs/architecture/layers/models-nn.md`](models-nn.md). |
-| `models/nn/_training.py` (planned) | Shared NN training-loop helper | 11 | Planning | Extraction destination when Stage 11's second torch-backed model arrives (plan D10). |
-| `models/complex_nn.py` (planned) | Complex / temporal NN | 11 | Planning | Will inherit the Stage 10 sub-layer conventions. |
+| `models/nn/_training.py` | Shared NN training-loop helper | 11 | Shipped | Extracted from Stage 10; shared by `NnMlpModel` and `NnTemporalModel` via `run_training_loop`. |
+| `models/nn/temporal.py` | Temporal Convolutional Network | 11 | Shipped | `NnTemporalModel` — dilated causal TCN (Bai et al. 2018). Inherits Stage 10 sub-layer conventions; warmup-envelope baked into the artefact (Stage 11 D5+). |
 
 ## Open questions
 
@@ -121,13 +125,14 @@ Each of these is swappable without touching downstream code. The `Model` protoco
 - **Cross-version load compatibility.** A model saved with version *X* is only guaranteed to load with version *X* today. Stage 9's registry captures the `git_sha` at save time (plan D13) so a future reader can know which source tree the artefact was fitted against, but the registry explicitly does *not* attempt cross-version loads. Whether to pin a semantic package version in `ModelMetadata.hyperparameters` or to require a content hash is undecided — revisit when the first `sklearn` / `statsmodels` major-version bump breaks an existing registered run.
 - **`ModelMetadata.hyperparameters` shape discipline.** The bag is deliberately free-form, which makes registry leaderboards hard to filter without convention. A light "top-level keys match the Pydantic `<Family>Config` field names" convention is emerging from Stage 4 (`NaiveModel.metadata.hyperparameters == {"strategy": ..., "target_column": ...}`), but it is not enforced. Stage 9's leaderboard stores the bag verbatim in `run.json`; filtering beyond `target` / `model_type` / `feature_set` is out-of-scope per plan D7 and would benefit from a convention the layer does not yet enforce. Revisit when a downstream stage surfaces a concrete "sort leaderboard by hyperparameter" ask.
 - **Per-model CLI parity.** `python -m bristol_ml.models.linear` prints `results.summary()`; `python -m bristol_ml.models.naive` prints help + strategy description; `python -m bristol_ml.models.sarimax` prints the `SarimaxConfig` defaults, the `SARIMAX` constructor docstring link, and a Stage 6 palette notice; `python -m bristol_ml.models.scipy_parametric` prints the `ScipyParametricConfig` defaults, the `curve_fit` docstring pointer, and a Stage 6 palette notice. Whether every family's CLI should converge on a common shape (e.g. "fit on the default feature cache, save to `/tmp`, print metadata") or stay family-specific was *re-deferred at Stage 7* (plan H-3) and *re-deferred again at Stage 8* (plan H-3) — four model families still do not motivate a harmonisation pass ahead of the NN families at Stages 10–11. Revisit at Stage 11+ when >4 model families co-exist, or open a dedicated housekeeping stage.
-- **Dispatcher duplication.** Both `_build_model_from_config` in `evaluation/harness.py:475` and the inline `isinstance` ladder in `train.py:_cli_main` have now gained four matching `isinstance` branches across Stages 4 / 7 / 8. Every new model family requires two edits in two files; missing either is a silent exit-code-3 bug (Stage 7 surprise 3). The Stage 7 Phase 3 review filed this as candidate ADR B1; Stage 8 re-deferred the refactor (plan D11 / H-4) rather than expand its scope. ADR filename earmarked: `docs/architecture/decisions/0004-model-dispatcher-consolidation.md`. Revisit when the fifth model family arrives (Stage 11) or open a dedicated housekeeping stage.
+- **Dispatcher duplication.** Both `_build_model_from_config` in `evaluation/harness.py:475` and the inline `isinstance` ladder in `train.py:_cli_main` have now gained four matching `isinstance` branches across Stages 4 / 7 / 8. Every new model family requires two edits in two files; missing either is a silent exit-code-3 bug (Stage 7 surprise 3). The Stage 7 Phase 3 review filed this as candidate ADR B1; Stage 8 re-deferred the refactor (plan D11 / H-4) rather than expand its scope. ADR filename earmarked: `docs/architecture/decisions/0004-model-dispatcher-consolidation.md` (number reserved through Stage 12; ADRs 0005 / 0006 took the next free numbers). The fifth and sixth families (`nn_mlp`, `nn_temporal`) landed at Stages 10–11 without consolidating; revisit at the next housekeeping stage or before adding a seventh family.
 
 ## References
 
 - [`DESIGN.md` §2.1](../../intent/DESIGN.md#21-architectural) (principles), [§3.2](../../intent/DESIGN.md#32-layer-responsibilities) (models paragraph), [§7.3](../../intent/DESIGN.md#73-the-model-protocol) (the `Model` sketch), [§8](../../intent/DESIGN.md#8-technology-choices) (statsmodels + joblib).
 - [`decisions/0003-protocol-for-model-interface.md`](../decisions/0003-protocol-for-model-interface.md) — Protocol vs ABC.
-- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — why joblib + sidecar is enough until Stage 9.
+- [`decisions/0002-filesystem-registry-first.md`](../decisions/0002-filesystem-registry-first.md) — joblib + sidecar registry surface (superseded at the serialisation boundary by ADR 0005).
+- [`decisions/0005-skops-for-model-serialisation.md`](../decisions/0005-skops-for-model-serialisation.md) — Stage 12 joblib → skops migration; envelope-of-primitives pattern; trust-list contract for future model families.
 - [`docs/intent/04-linear-baseline.md`](../../intent/04-linear-baseline.md) — the Stage 4 intent.
 - [`docs/lld/stages/04-linear-baseline.md`](../../lld/stages/04-linear-baseline.md) — retrospective applying this architecture.
 - [`src/bristol_ml/models/CLAUDE.md`](../../../src/bristol_ml/models/CLAUDE.md) — module-local guide, protocol semantics, serialisation notes.

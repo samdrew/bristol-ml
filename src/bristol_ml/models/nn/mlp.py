@@ -63,6 +63,17 @@ _ALLOWED_DEVICES: tuple[str, ...] = ("auto", "cpu", "cuda", "mps")
 
 
 # ---------------------------------------------------------------------------
+# Format tag for the dict-envelope-of-primitives written by
+# :meth:`NnMlpModel.save`.  Bumped if the envelope schema changes; load
+# rejects any tag it does not recognise so a future schema migration is
+# never silent.  Stage 12 T3 introduced the tag at the same time as the
+# joblib → skops migration (D10 Ctrl+G reversal).
+# ---------------------------------------------------------------------------
+
+_NN_MLP_ENVELOPE_FORMAT = "nn-mlp-state-v1"
+
+
+# ---------------------------------------------------------------------------
 # Module-level helpers (public-ish within the module; private via leading
 # underscore per convention).  Module-level so they are pickleable for a
 # future refactor and trivially unit-testable.
@@ -615,16 +626,27 @@ class NnMlpModel:
     def save(self, path: Path) -> None:
         """Serialise the fitted model to the registry-supplied file path.
 
-        Plan D5 (revised): ``path`` is the single joblib-artefact file
-        path (the Stage 9 registry hard-codes ``artefact/model.joblib``
-        — see ``src/bristol_ml/registry/_fs.py::_atomic_write_run``).
-        The envelope written is a plain dict carrying the ``state_dict``
-        bytes (via ``torch.save`` to a ``BytesIO``), the
-        ``NnMlpConfig.model_dump()``, the resolved feature-column tuple,
-        and provenance scalars (``seed_used``, ``best_epoch``,
-        ``loss_history``, ``fit_utc``, ``device_resolved``).
+        Stage 12 D10 (Ctrl+G reversal): the project moved off ``joblib``
+        and onto :mod:`skops.io` for security — the serving layer is a
+        network-facing deserialiser and ``joblib.load`` on an
+        attacker-controlled artefact is RCE.  The envelope is the same
+        bytes-of-state_dict pattern Stage 10 pioneered, but the fields
+        that did **not** round-trip natively through skops's restricted
+        unpickler (``datetime`` objects, ``tuple``s) are flattened to
+        skops-safe primitives — ``fit_utc`` becomes an ISO-8601 string,
+        ``feature_columns`` becomes a list — so no project trust-list
+        registration is needed.
 
-        The write is atomic — :func:`bristol_ml.models.io.save_joblib`
+        Plan D5 (revised) is preserved: ``path`` is the single artefact
+        file path (the Stage 9 registry hard-codes
+        ``artefact/model.<ext>``).  The envelope written is a plain dict
+        carrying the ``state_dict`` bytes (via ``torch.save`` to a
+        ``BytesIO``), the ``NnMlpConfig.model_dump()``, the resolved
+        feature-column list, and provenance scalars (``seed_used``,
+        ``best_epoch``, ``loss_history``, ``fit_utc_isoformat``,
+        ``device_resolved``).
+
+        The write is atomic — :func:`bristol_ml.models.io.save_skops`
         stages to a sibling ``.tmp`` and renames via :func:`os.replace`,
         matching the Stage 4 contract.  No sibling ``model.pt`` or
         ``hyperparameters.json`` is created — plan D5 revision (single
@@ -640,7 +662,7 @@ class NnMlpModel:
 
         import torch
 
-        from bristol_ml.models.io import save_joblib
+        from bristol_ml.models.io import save_skops
 
         if self._module is None:
             raise RuntimeError(
@@ -657,25 +679,36 @@ class NnMlpModel:
         state_dict_bytes: bytes = buf.getvalue()
 
         envelope: dict[str, Any] = {
+            "format": _NN_MLP_ENVELOPE_FORMAT,
             "state_dict_bytes": state_dict_bytes,
             "config_dump": self._config.model_dump(),
-            "feature_columns": tuple(self._feature_columns),
+            # ``feature_columns`` becomes a list rather than a tuple —
+            # tuples are fine in skops but lists keep the envelope a pure
+            # JSON-shape primitive bag, which the trust-list reasoning
+            # leans on.  ``load`` re-tuples on the way out.
+            "feature_columns": list(self._feature_columns),
             "seed_used": self._seed_used,
             "best_epoch": self._best_epoch,
-            "loss_history": list(self.loss_history_),
-            "fit_utc": self._fit_utc,
+            "loss_history": [dict(entry) for entry in self.loss_history_],
+            # ISO-8601 string keeps ``datetime`` / ``tzinfo`` out of the
+            # artefact (each is a custom type under skops and would each
+            # need a trust-list entry).
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
             "device_resolved": self._device_resolved,
         }
-        save_joblib(envelope, path)
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> NnMlpModel:
         """Load a previously-saved :class:`NnMlpModel` from ``path``.
 
-        Plan D5 (revised): reads the joblib envelope, reconstructs
+        Stage 12 D10 (Ctrl+G reversal): reads the skops envelope written
+        by :meth:`save` through
+        :func:`bristol_ml.models.io.load_skops` (skops's restricted
+        unpickler enforces the project trust-list).  Reconstructs
         :class:`NnMlpConfig` from ``config_dump`` (Pydantic re-validation
-        catches schema drift), instantiates an ``NnMlpModel``, materialises
-        the ``state_dict`` via
+        catches schema drift), instantiates an ``NnMlpModel``,
+        materialises the ``state_dict`` via
         ``torch.load(BytesIO(state_dict_bytes), weights_only=True,
         map_location="cpu")``, and calls ``load_state_dict(strict=True)``.
         ``weights_only=True`` keeps PyTorch 2.6+'s safety rail active on
@@ -690,15 +723,30 @@ class NnMlpModel:
         Raises
         ------
         FileNotFoundError
-            If ``path`` does not exist (propagated from :mod:`joblib`).
+            If ``path`` does not exist (propagated from :func:`load_skops`).
+        TypeError
+            If the envelope's ``format`` tag is not the recognised
+            ``nn-mlp-state-v1`` (e.g. someone pointed the loader at a
+            different model family's artefact).
+        ValueError
+            If the envelope is missing ``feature_columns`` (a structural
+            signal it was not produced by a fitted ``NnMlpModel``).
         """
         import io as _io
+        from datetime import datetime as _datetime
 
         import torch
 
-        from bristol_ml.models.io import load_joblib
+        from bristol_ml.models.io import load_skops
 
-        envelope = load_joblib(path)
+        envelope = load_skops(path)
+        if not isinstance(envelope, dict) or envelope.get("format") != _NN_MLP_ENVELOPE_FORMAT:
+            raise TypeError(
+                f"Expected an NnMlpModel skops envelope at {path} (format="
+                f"{_NN_MLP_ENVELOPE_FORMAT!r}); got "
+                f"{type(envelope).__name__} with format="
+                f"{envelope.get('format') if isinstance(envelope, dict) else None!r}."
+            )
 
         # Pydantic re-validation is the schema-drift guard (plan R2).
         config = NnMlpConfig.model_validate(envelope["config_dump"])
@@ -722,9 +770,11 @@ class NnMlpModel:
 
         # Restore fit-state attributes.  ``loss_history_`` is rebuilt as a
         # fresh list so mutations via the returned instance do not alias
-        # back into the envelope dict.
+        # back into the envelope dict.  ``fit_utc`` round-trips via the
+        # ISO-8601 string the save path stored.
+        fit_utc_iso = envelope.get("fit_utc_isoformat")
         model._feature_columns = feature_cols
-        model._fit_utc = envelope.get("fit_utc")
+        model._fit_utc = _datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
         model._device = torch.device("cpu")
         model._device_resolved = envelope.get("device_resolved")
         model._seed_used = envelope.get("seed_used")

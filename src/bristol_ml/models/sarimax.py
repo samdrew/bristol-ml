@@ -65,11 +65,25 @@ from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResultsWrapper
 
 from bristol_ml.features.fourier import append_weekly_fourier
-from bristol_ml.models.io import load_joblib, save_joblib
+from bristol_ml.models.io import load_skops, save_skops
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import SarimaxConfig
 
 __all__ = ["SarimaxModel"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 D10: skops envelope tags for the statsmodels-bytes-v1 pattern.
+# Both LinearModel and SarimaxModel (this file) share the *format* tag and
+# discriminate by the *kind* tag — see ``linear.py`` for the OLS variant.
+# The ``SARIMAXResultsWrapper`` is pickled into an opaque ``bytes`` blob
+# inside a skops-safe envelope so the registry boundary stops accepting
+# attacker-controlled artefacts (Stage 12 plan §Task T4 / D10 Ctrl+G
+# reversal).
+# ---------------------------------------------------------------------------
+
+_STATSMODELS_ENVELOPE_FORMAT = "statsmodels-bytes-v1"
+_SARIMAX_KIND = "SARIMAX"
 
 
 class SarimaxModel:
@@ -261,50 +275,127 @@ class SarimaxModel:
         )
 
     def save(self, path: Path) -> None:
-        """Serialise the fitted :class:`SarimaxModel` atomically (plan D6).
+        """Serialise the fitted :class:`SarimaxModel` as a skops envelope-of-bytes.
 
-        Delegates to :func:`bristol_ml.models.io.save_joblib`.  The
+        Stage 12 D10 (Ctrl+G reversal): the project moved off
+        :mod:`joblib` and onto :mod:`skops.io` so the serving layer is
+        not a network-facing pickle deserialiser.  The
         :class:`~statsmodels.tsa.statespace.sarimax.SARIMAXResultsWrapper`
-        is pickle-compatible via
-        :meth:`~statsmodels.tsa.statespace.mlemodel.MLEResults.__getstate__`,
-        so joblib handles the whole ``SarimaxModel`` instance — including
-        its config, feature-column tuple, fit_utc, and the results wrapper —
-        in one round trip.
+        does not have a skops codec, so this method writes an
+        envelope-of-bytes: the wrapper is serialised to a ``bytes`` blob
+        via :meth:`statsmodels.base.model.Results.save` and the blob
+        rides inside a dict envelope of skops-safe primitives.
 
-        The alternative considered and rejected was
-        ``self._results.save(path, remove_data=True)``: it only serialises
-        the statsmodels results and loses the wrapping ``SarimaxModel``
-        metadata needed for reconstruction (config, feature-columns,
-        fit_utc).  Sticking with :func:`save_joblib` keeps the Stage 4
-        save/load contract in sync across every concrete model.
+        Envelope shape::
+
+            {
+                "format": "statsmodels-bytes-v1",
+                "kind": "SARIMAX",
+                "blob": <bytes>,
+                "config_dump": <dict>,           # SarimaxConfig.model_dump()
+                "feature_columns": [str, ...],
+                "endog_name": <str>,
+                "fit_utc_isoformat": <str | None>,
+            }
+
+        Two SARIMAX-specific concerns ride alongside the linear path:
+
+        - **The exog column names are inside the blob.**  The
+          :class:`SARIMAXResultsWrapper`'s internal exog matrix carries
+          its own column-name vector; that mapping is what statsmodels
+          issue #6542 makes load-bearing for ``get_forecast`` to map
+          regressors correctly across save/load.  Because the wrapper is
+          serialised whole (via :meth:`Results.save`) the exog columns
+          ride inside the blob bytes — no separate envelope field is
+          needed and the issue-#6542 regression remains caught by the
+          T5 round-trip test.
+        - **``endog_name`` is preserved alongside the blob** so the
+          reconstructed model's ``metadata.name`` and downstream
+          ``predict`` Series ``.name`` retain the exact label the
+          training target carried (rather than re-deriving it from a
+          ``target_column`` config field, which may have been overridden
+          per-fold).
 
         Raises
         ------
         RuntimeError
             If :meth:`fit` has not been called.
         """
+        import io as _io
+
         if self._results is None:
             raise RuntimeError("Cannot save unfitted SarimaxModel")
-        save_joblib(self, path)
+
+        buf = _io.BytesIO()
+        self._results.save(buf, remove_data=False)
+        blob: bytes = buf.getvalue()
+
+        envelope: dict[str, object] = {
+            "format": _STATSMODELS_ENVELOPE_FORMAT,
+            "kind": _SARIMAX_KIND,
+            "blob": blob,
+            "config_dump": self._config.model_dump(),
+            "feature_columns": list(self._feature_columns),
+            "endog_name": self._endog_name,
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
+        }
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> SarimaxModel:
         """Load a previously-saved :class:`SarimaxModel` from ``path``.
 
+        Reads the skops envelope, validates the format/kind tags, then
+        deserialises the inner SARIMAX wrapper from the bytes blob via
+        :meth:`SARIMAXResults.load`.  Pydantic re-validation of
+        ``config_dump`` is the schema-drift guard.
+
         Raises
         ------
+        FileNotFoundError
+            If ``path`` does not exist.
         TypeError
-            If the artefact at ``path`` is not a :class:`SarimaxModel`
-            (e.g. a :class:`~bristol_ml.models.linear.LinearModel` pickled
-            at the same path).  Mirrors the Stage 4 ``LinearModel.load``
-            guard.
+            If the loaded envelope's ``format`` tag is not
+            ``"statsmodels-bytes-v1"`` or its ``kind`` tag is not
+            ``"SARIMAX"`` — the latter prevents an OLS envelope from
+            being silently loaded as if it were a SarimaxModel artefact.
         """
-        obj = load_joblib(path)
-        if not isinstance(obj, cls):
+        import io as _io
+
+        from statsmodels.tsa.statespace.sarimax import SARIMAXResults
+
+        envelope = load_skops(path)
+
+        if not isinstance(envelope, dict):
             raise TypeError(
-                f"Expected a SarimaxModel artefact at {path}; got {type(obj).__name__}."
+                f"Expected a SarimaxModel skops envelope (dict) at {path}; "
+                f"got {type(envelope).__name__}."
             )
-        return obj
+        if envelope.get("format") != _STATSMODELS_ENVELOPE_FORMAT:
+            raise TypeError(
+                f"SarimaxModel.load: envelope at {path} does not carry the "
+                f"expected format tag {_STATSMODELS_ENVELOPE_FORMAT!r}; got "
+                f"{envelope.get('format')!r}."
+            )
+        if envelope.get("kind") != _SARIMAX_KIND:
+            raise TypeError(
+                f"SarimaxModel.load: envelope at {path} carries kind "
+                f"{envelope.get('kind')!r}; expected {_SARIMAX_KIND!r}.  "
+                "An OLS-kind envelope cannot be loaded as a SarimaxModel."
+            )
+
+        # Pydantic re-validation — schema-drift guard.
+        config = SarimaxConfig.model_validate(envelope["config_dump"])
+
+        results = SARIMAXResults.load(_io.BytesIO(envelope["blob"]))
+
+        model = cls(config)
+        model._results = results
+        model._feature_columns = tuple(envelope.get("feature_columns") or ())
+        model._endog_name = str(envelope.get("endog_name") or "")
+        fit_utc_iso = envelope.get("fit_utc_isoformat")
+        model._fit_utc = datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:

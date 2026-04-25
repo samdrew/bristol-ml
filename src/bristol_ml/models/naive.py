@@ -43,11 +43,17 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from bristol_ml.models.io import load_joblib, save_joblib
+from bristol_ml.models.io import load_skops, save_skops
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import NaiveConfig
 
 __all__ = ["NaiveModel"]
+
+# Format tag for the dict-envelope-of-primitives written by
+# :meth:`NaiveModel.save`.  Bumped if the envelope schema changes; load
+# rejects any tag it does not recognise so a future schema migration is
+# never silent.
+_NAIVE_ENVELOPE_FORMAT = "naive-state-v1"
 
 
 class NaiveModel:
@@ -158,12 +164,23 @@ class NaiveModel:
         return self._predict_same_weekday(features.index)
 
     def save(self, path: Path) -> None:
-        """Serialise the fitted model to ``path`` atomically.
+        """Serialise the fitted model to ``path`` atomically via :mod:`skops.io`.
 
-        Delegates to :func:`bristol_ml.models.io.save_joblib` — the tmp-file
-        + ``os.replace`` write is identical to the ingestion layer's atomic
-        pattern.  A crash mid-write therefore leaves the prior artefact
-        intact.
+        Stage 12 D10 (Ctrl+G reversal): the project moved off
+        ``joblib`` and onto :mod:`skops.io` for security — the serving
+        layer is a network-facing deserialiser and ``joblib.load`` on an
+        attacker-controlled artefact is RCE.  Rather than dump the
+        :class:`NaiveModel` instance directly, we dump a small dict
+        envelope of pure primitives — the trained ``pd.Series`` is
+        broken down into a ``numpy`` value vector plus an ``int64``
+        nanos-since-epoch index plus a tz string, so the artefact
+        contains no unregistered custom types and skops's restricted
+        unpickler accepts it without trust-list registration.
+
+        Delegates to :func:`bristol_ml.models.io.save_skops` — the
+        tmp-file + ``os.replace`` write is identical to the ingestion
+        layer's atomic pattern.  A crash mid-write therefore leaves the
+        prior artefact intact.
 
         Raises
         ------
@@ -173,22 +190,69 @@ class NaiveModel:
         """
         if self._target is None:
             raise RuntimeError("NaiveModel must be fit() before save().")
-        save_joblib(self, path)
+        target_index = self._target.index
+        # Capture the tz as a portable string ("UTC", "Europe/London", ...)
+        # rather than a tzinfo object: tzinfo subclasses are custom types
+        # under skops and would each need trust-list entries, whereas a
+        # str round-trips natively.
+        tz_str: str | None = str(target_index.tz) if target_index.tz is not None else None
+        envelope: dict[str, object] = {
+            "format": _NAIVE_ENVELOPE_FORMAT,
+            "config_dump": self._config.model_dump(),
+            "target_values": np.asarray(self._target.to_numpy(), dtype=np.float64),
+            # ``DatetimeIndex.asi8`` is the canonical int64 nanos-since-epoch
+            # vector; ``np.asarray(..., dtype=np.int64)`` defends against any
+            # future pandas changes that return a numpy-backed object array.
+            "target_index_nanos": np.asarray(target_index.asi8, dtype=np.int64),
+            "target_index_tz": tz_str,
+            "feature_columns": list(self._feature_columns),
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
+        }
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> NaiveModel:
         """Load a previously-saved :class:`NaiveModel` from ``path``.
 
+        Reads the dict-envelope-of-primitives written by :meth:`save`
+        through :func:`bristol_ml.models.io.load_skops` (skops's
+        restricted unpickler enforces the project trust-list).  The
+        envelope is then unpacked back into a :class:`NaiveModel`
+        instance — the trained Series is reconstructed from the
+        ``int64`` nanos-since-epoch index and the tz string.
+
         Raises
         ------
         TypeError
-            If the artefact at ``path`` is not a :class:`NaiveModel`
-            instance — we never silently hand back the wrong class.
+            If the artefact at ``path`` is not a recognised
+            :class:`NaiveModel` envelope (wrong outer type or wrong
+            ``format`` tag) — we never silently hand back the wrong
+            class.
         """
-        obj = load_joblib(path)
-        if not isinstance(obj, cls):
-            raise TypeError(f"Expected a NaiveModel artefact at {path}; got {type(obj).__name__}.")
-        return obj
+        envelope = load_skops(path)
+        if not isinstance(envelope, dict) or envelope.get("format") != _NAIVE_ENVELOPE_FORMAT:
+            raise TypeError(
+                f"Expected a NaiveModel skops envelope at {path} (format="
+                f"{_NAIVE_ENVELOPE_FORMAT!r}); got "
+                f"{type(envelope).__name__} with format="
+                f"{envelope.get('format') if isinstance(envelope, dict) else None!r}."
+            )
+        cfg = NaiveConfig(**envelope["config_dump"])
+        model = cls(cfg)
+        # Reconstruct the trained Series from the primitive envelope.
+        index = pd.DatetimeIndex(
+            np.asarray(envelope["target_index_nanos"], dtype="datetime64[ns]"),
+            tz=envelope["target_index_tz"],
+        )
+        model._target = pd.Series(
+            np.asarray(envelope["target_values"], dtype=np.float64),
+            index=index,
+            name=cfg.target_column,
+        )
+        model._feature_columns = tuple(envelope["feature_columns"])
+        fit_utc_iso = envelope["fit_utc_isoformat"]
+        model._fit_utc = datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:

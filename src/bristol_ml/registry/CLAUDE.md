@@ -48,7 +48,8 @@ scope).  Override by passing `registry_dir=` to any verb or via the
 - **Atomicity.** Writes go into a `.tmp_<uuid>/` staging directory
   inside `registry_dir` and rename via `os.replace` to the final
   `{run_id}/` (plan D5).  Mirrors
-  `ingestion/_common.py::_atomic_write` and `models/io.py::save_joblib`.
+  `ingestion/_common.py::_atomic_write` and `models/io.py::save_skops`
+  (Stage 12 D10 migrated the registry off joblib for security).
   A crash mid-write leaves the previous run intact (or absent) —
   never partial.
 - **Git SHA auto-capture.** `save()` calls
@@ -69,10 +70,16 @@ data/registry/
 ├── .tmp_<uuid>/                              # staging dir during save
 ├── linear-ols-weather-only_20260423T1430/
 │   ├── artefact/
-│   │   └── model.joblib
+│   │   └── model.skops
 │   └── run.json
 └── ...
 ```
+
+Stage 12 D10 (Ctrl+G reversal) flipped the canonical artefact filename
+from `model.joblib` to `model.skops`.  `registry.load` rejects a run
+directory that still carries a `model.joblib` artefact with a clear
+`RuntimeError` ("...joblib loads are disabled at the registry boundary
+for security..."); the operator must retrain to migrate.
 
 The sidecar `run.json` structure is defined by
 `bristol_ml.registry._schema.SidecarFields`.  See the layer doc for
@@ -80,17 +87,25 @@ field-by-field annotations.
 
 ## Serialisation
 
-Artefacts are joblib files written through each model's existing
+Artefacts are skops files written through each model's existing
 `Model.save` protocol method (plan D9 — the registry does not duplicate
-the serialisation logic).  The sidecar is JSON with
+the serialisation logic).  Each model family registers its custom
+classes on the project trust-list at import time via
+`bristol_ml.models.io.register_safe_types`; `load_skops` enforces the
+trust-list and refuses any artefact carrying an unregistered type.
+The sidecar is JSON with
 `json.dumps(..., indent=2, allow_nan=True, ensure_ascii=False)` —
-`allow_nan=True` lets `ScipyParametricModel`'s covariance matrix round-trip
-its `float("inf")` entries (plan R3).
+`allow_nan=True` lets `ScipyParametricModel`'s covariance matrix
+round-trip its `float("inf")` entries (plan R3).
 
-**Security note.** joblib is not a safe deserialiser for untrusted inputs.
-Stage 9 only ever loads artefacts we wrote ourselves; the `skops.io`
-upgrade seam is flagged in `models/io.py` and moves to Stage 12 (plan
-D14) when the serving layer lands.
+**Security note.** Stage 12 D10 (Ctrl+G reversal) migrated all six
+model families and the registry boundary off `joblib` and onto
+`skops.io`.  The Stage 12 serving layer is a network-facing
+deserialiser; `joblib.load` on an attacker-controlled artefact is a
+remote code-execution vector, and `skops.io.load` with a project
+trust-list is the safer primitive.  The pre-Stage-12 layer doc flagged
+this as the upgrade seam (Stage 9 plan D14); the upgrade has now
+landed.
 
 ## MLflow graduation (plan D10)
 
@@ -114,7 +129,9 @@ The `--help` output documents the `--registry-dir` override.
 
 ## Cross-references
 
-- Layer contract — `docs/architecture/layers/registry.md` (Stage 9 T6).
+- Layer contract — `docs/architecture/layers/registry.md` (Stage 9 T6; Stage 12 skops inflection point recorded there).
+- Serving layer — `docs/architecture/layers/serving.md` — the first non-author consumer of registry artefacts; trust-list contract for future model families.
 - Stage 9 plan — `docs/plans/completed/09-model-registry.md`.
 - Stage 9 retro — `docs/lld/stages/09-model-registry.md`.
+- Stage 12 retro — `docs/lld/stages/12-serving.md` — skops migration outcome; joblib rejection error contract.
 - Intent — `docs/intent/09-model-registry.md` (5 ACs + 8 Points).

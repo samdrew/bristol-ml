@@ -36,7 +36,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from bristol_ml.models.io import save_joblib
+from bristol_ml.models.io import save_skops
 from bristol_ml.models.naive import NaiveModel
 from bristol_ml.models.protocol import Model
 from conf._schemas import NaiveConfig
@@ -195,11 +195,13 @@ def test_naive_predict_raises_when_lookback_missing() -> None:
 def test_naive_save_load_round_trip(tmp_path: Path) -> None:
     """Guards T3 (plan §6 named test) and AC-3: save/load reproduces identical predictions.
 
-    Fit a model, save it to ``tmp_path / "naive.joblib"``, load it back, and
+    Fit a model, save it to ``tmp_path / "naive.skops"``, load it back, and
     assert that predictions on the same test frame are element-wise identical.
     The loaded object must also conform to the ``Model`` protocol.
 
-    Plan clause: T3 plan §6 named test / AC-3 / F-10.
+    Plan clause: T3 plan §6 named test / AC-3 / F-10.  The artefact
+    extension flipped from ``.joblib`` to ``.skops`` at Stage 12 T2 (D10
+    Ctrl+G reversal) — the round-trip semantic is identical.
     """
     n = 336
     cfg = _naive_cfg()
@@ -208,7 +210,7 @@ def test_naive_save_load_round_trip(tmp_path: Path) -> None:
     target = _target_series(n)
     model.fit(features, target)
 
-    path = tmp_path / "naive.joblib"
+    path = tmp_path / "naive.skops"
     model.save(path)
 
     assert path.exists(), f"save() must create the artefact at {path}."
@@ -370,7 +372,7 @@ def test_naive_save_before_fit_raises_runtime_error(tmp_path: Path) -> None:
     model = NaiveModel(cfg)
 
     with pytest.raises(RuntimeError):
-        model.save(tmp_path / "x.joblib")
+        model.save(tmp_path / "x.skops")
 
 
 # ---------------------------------------------------------------------------
@@ -381,14 +383,16 @@ def test_naive_save_before_fit_raises_runtime_error(tmp_path: Path) -> None:
 def test_naive_load_rejects_wrong_artefact_type(tmp_path: Path) -> None:
     """Guards naive.py ``load()`` docstring: wrong artefact type raises ``TypeError``.
 
-    A plain dict ``{"not": "a model"}`` written via ``save_joblib`` is not a
-    ``NaiveModel``.  ``NaiveModel.load(path)`` must raise ``TypeError`` rather
-    than silently returning the wrong class.
+    A plain dict ``{"not": "a model"}`` written via ``save_skops`` is not
+    a recognised :class:`NaiveModel` envelope (wrong ``format`` tag).
+    ``NaiveModel.load(path)`` must raise ``TypeError`` rather than
+    silently returning the wrong class.
 
-    Plan clause: T3 / naive.py ``load()`` ``TypeError`` contract.
+    Plan clause: T3 / naive.py ``load()`` ``TypeError`` contract; the
+    artefact format flipped from joblib to skops at Stage 12 T2 (D10).
     """
-    path = tmp_path / "wrong.joblib"
-    save_joblib({"not": "a model"}, path)
+    path = tmp_path / "wrong.skops"
+    save_skops({"not": "a model"}, path)
 
     with pytest.raises(TypeError):
         NaiveModel.load(path)
@@ -648,4 +652,63 @@ def test_naive_predict_series_index_matches_features() -> None:
         preds.index,
         test_features.index,
         obj="predict() return Series index vs features.index",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 T2 named test — skops round-trip preserves predictions
+# ---------------------------------------------------------------------------
+
+
+def test_naive_save_load_skops_roundtrip(tmp_path: Path) -> None:
+    """Guards Stage 12 T2 named test: NaiveModel skops round-trip is bit-equal.
+
+    The Stage 12 plan §6 T2 named this test as the load-bearing
+    skops-migration guard for ``NaiveModel``.  At Ctrl+G the human
+    reversed D10 ("Include skops. This includes a network facing
+    interface so security should be paramount, as I don't want an RCE
+    exploit on my PC") so every model family writes through
+    :func:`bristol_ml.models.io.save_skops` instead of joblib; the
+    artefact is a dict envelope of pure primitives (numpy values,
+    int64 nanos-since-epoch index, tz string) so skops's restricted
+    unpickler accepts the load without trust-list registration.
+
+    Round-trip semantic: fit → save → load → predict on the same test
+    frame yields element-wise identical predictions to the pre-save
+    prediction, **and** the loaded artefact has no ``.tmp`` sibling
+    (atomic-write contract inherited from
+    :func:`bristol_ml.models.io.save_skops`).
+    """
+    n = 336
+    cfg = _naive_cfg()
+    model = NaiveModel(cfg)
+    features = _features_df(n)
+    target = _target_series(n)
+    model.fit(features, target)
+
+    path = tmp_path / "naive.skops"
+    model.save(path)
+
+    # Atomic-write contract — no ``.tmp`` sibling after a successful save.
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert siblings == ["naive.skops"], (
+        f"save_skops must leave only the target artefact behind; "
+        f"found {siblings} in {tmp_path} (Stage 12 T2 atomic-write inheritance)."
+    )
+
+    loaded = NaiveModel.load(path)
+    assert isinstance(loaded, Model), (
+        "Loaded NaiveModel must satisfy isinstance(loaded, Model) "
+        "(Stage 12 T2 — protocol conformance preserved across the format flip)."
+    )
+
+    test_features = features.iloc[168:200]
+    original_preds = model.predict(test_features)
+    loaded_preds = loaded.predict(test_features)
+
+    pd.testing.assert_series_equal(
+        original_preds,
+        loaded_preds,
+        check_exact=True,
+        obj="Stage 12 T2 skops round-trip predictions",
     )

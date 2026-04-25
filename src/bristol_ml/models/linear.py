@@ -44,7 +44,7 @@ from loguru import logger
 from statsmodels.regression.linear_model import RegressionResultsWrapper
 
 from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
-from bristol_ml.models.io import load_joblib, save_joblib
+from bristol_ml.models.io import load_skops, save_skops
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import LinearConfig
 
@@ -53,6 +53,20 @@ __all__ = ["LinearModel"]
 
 # Column name ``statsmodels.api.add_constant`` writes for the intercept.
 _INTERCEPT_COLUMN = "const"
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 D10: skops envelope tags for the statsmodels-bytes-v1 pattern.
+# Both LinearModel (this file) and SarimaxModel share the *format* tag and
+# discriminate by the *kind* tag — see the layer doc and ``sarimax.py`` for
+# the matching constants.  The ``RegressionResultsWrapper`` is pickled into
+# an opaque ``bytes`` blob inside a skops-safe envelope so the registry
+# boundary stops accepting attacker-controlled artefacts (Stage 12 plan
+# §Task T4 / D10 Ctrl+G reversal).
+# ---------------------------------------------------------------------------
+
+_STATSMODELS_ENVELOPE_FORMAT = "statsmodels-bytes-v1"
+_LINEAR_KIND = "OLS"
 
 
 class LinearModel:
@@ -150,30 +164,121 @@ class LinearModel:
         )
 
     def save(self, path: Path) -> None:
-        """Serialise the fitted model atomically (plan D6).
+        """Serialise the fitted model atomically as a skops envelope-of-bytes.
+
+        Stage 12 D10 (Ctrl+G reversal): the project moved off
+        :mod:`joblib` and onto :mod:`skops.io` so the serving layer is
+        not a network-facing pickle deserialiser.  The
+        :class:`~statsmodels.regression.linear_model.RegressionResultsWrapper`
+        does not have a skops codec, so this method writes an
+        envelope-of-bytes: the wrapper is serialised to a ``bytes`` blob
+        via :meth:`statsmodels.base.model.Results.save` and the blob
+        rides inside a dict envelope of skops-safe primitives
+        (``str``, ``bytes``, ``list[str]``, ``dict[str, Any]``).
+
+        Envelope shape::
+
+            {
+                "format": "statsmodels-bytes-v1",
+                "kind": "OLS",
+                "blob": <bytes>,
+                "config_dump": <dict>,           # LinearConfig.model_dump()
+                "feature_columns": [str, ...],
+                "fit_utc_isoformat": <str | None>,
+            }
+
+        The opaque blob is *not* loaded through skops's restricted
+        unpickler — the security narrative is layered: skops protects
+        the envelope (no arbitrary class instantiation through
+        :func:`skops.io.load`); the registry's own write contract
+        guarantees that the blob bytes were produced by this project's
+        :meth:`save` and were not attacker-supplied.  An attacker who
+        can replace ``model.skops`` on disk has already breached the
+        registry, which is itself a higher trust boundary.
 
         Raises
         ------
         RuntimeError
             If :meth:`fit` has not yet been called.
         """
+        import io as _io
+
         if self._results is None:
             raise RuntimeError("LinearModel must be fit() before save().")
-        save_joblib(self, path)
+
+        buf = _io.BytesIO()
+        # ``Results.save`` accepts a file-like object via ``fname``;
+        # ``remove_data=False`` keeps the design matrix and residuals so
+        # the reloaded wrapper can answer the same ``predict``/``summary``
+        # surface the original did.
+        self._results.save(buf, remove_data=False)
+        blob: bytes = buf.getvalue()
+
+        envelope: dict[str, object] = {
+            "format": _STATSMODELS_ENVELOPE_FORMAT,
+            "kind": _LINEAR_KIND,
+            "blob": blob,
+            "config_dump": self._config.model_dump(),
+            "feature_columns": list(self._feature_columns),
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
+        }
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> LinearModel:
         """Load a previously-saved :class:`LinearModel` from ``path``.
 
+        Reads the skops envelope, validates the format/kind tags, then
+        deserialises the inner statsmodels wrapper from the bytes blob
+        via :meth:`RegressionResults.load`.  The Pydantic re-validation
+        of ``config_dump`` is the schema-drift guard (mirrors the NN
+        families' Stage 10/11 R2).
+
         Raises
         ------
+        FileNotFoundError
+            If ``path`` does not exist.
         TypeError
-            If the artefact at ``path`` is not a :class:`LinearModel`.
+            If the loaded envelope's ``format`` tag is not
+            ``"statsmodels-bytes-v1"`` or its ``kind`` tag is not
+            ``"OLS"`` — the latter prevents a SARIMAX envelope from
+            being silently loaded as if it were a LinearModel artefact.
         """
-        obj = load_joblib(path)
-        if not isinstance(obj, cls):
-            raise TypeError(f"Expected a LinearModel artefact at {path}; got {type(obj).__name__}.")
-        return obj
+        import io as _io
+
+        from statsmodels.regression.linear_model import RegressionResults
+
+        envelope = load_skops(path)
+
+        if not isinstance(envelope, dict):
+            raise TypeError(
+                f"Expected a LinearModel skops envelope (dict) at {path}; "
+                f"got {type(envelope).__name__}."
+            )
+        if envelope.get("format") != _STATSMODELS_ENVELOPE_FORMAT:
+            raise TypeError(
+                f"LinearModel.load: envelope at {path} does not carry the "
+                f"expected format tag {_STATSMODELS_ENVELOPE_FORMAT!r}; got "
+                f"{envelope.get('format')!r}."
+            )
+        if envelope.get("kind") != _LINEAR_KIND:
+            raise TypeError(
+                f"LinearModel.load: envelope at {path} carries kind "
+                f"{envelope.get('kind')!r}; expected {_LINEAR_KIND!r}.  "
+                "A SARIMAX-kind envelope cannot be loaded as a LinearModel."
+            )
+
+        # Pydantic re-validation — schema-drift guard.
+        config = LinearConfig.model_validate(envelope["config_dump"])
+
+        results = RegressionResults.load(_io.BytesIO(envelope["blob"]))
+
+        model = cls(config)
+        model._results = results
+        model._feature_columns = tuple(envelope.get("feature_columns") or ())
+        fit_utc_iso = envelope.get("fit_utc_isoformat")
+        model._fit_utc = datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:

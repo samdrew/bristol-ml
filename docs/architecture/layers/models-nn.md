@@ -147,9 +147,10 @@ class NnMlpModel:
   notebook owns the live-plot rendering.
 - `predict` returns a `pd.Series` indexed to `features.index`.  Before
   `fit`, it raises `RuntimeError` (protocol convention).
-- `save(path)` writes the single-joblib envelope (see §4 below); the
-  path is the **file** path `.../artefact/model.joblib` the Stage 9
-  registry passes down, not a directory.  Plan D5 revised.
+- `save(path)` writes the single-skops envelope (see §4 below); the
+  path is the **file** path `.../artefact/model.skops` the registry
+  passes down, not a directory.  Plan D5 revised; Stage 12 D10
+  migrated from joblib to skops.
 - `load(path)` is a `classmethod`.  Reconstructs the config from the
   envelope's `config_dump`, rebuilds the `nn.Module` skeleton, and
   applies `load_state_dict(strict=True)` so a missing buffer or an
@@ -196,11 +197,14 @@ false.
 
 ### 4. Serialisation (plan D5 revised)
 
-The Stage 9 registry passes the artefact **file path**
-`artefact/model.joblib` to `Model.save(path)` — not a directory.  The
+The registry passes the artefact **file path**
+`artefact/model.skops` to `Model.save(path)` — not a directory.  The
 path is produced by `bristol_ml.registry._fs._atomic_write_run` and the
-filename is hard-coded there.  `NnMlpModel.save(path)` therefore writes
-a single joblib artefact at exactly that path, with contents:
+filename is hard-coded there (Stage 12 D10 flipped it from `model.joblib`
+to `model.skops`).  `NnMlpModel.save(path)` writes a single skops
+artefact at exactly that path, with contents (the envelope dict is
+skops-safe — all values are `bytes`, `int`, `str`, `list`, or numpy
+arrays; no pickled `nn.Module`s pass through skops directly):
 
 ```python
 {
@@ -237,10 +241,12 @@ The scaler buffers (`feature_mean`, `feature_std`, `target_mean`,
 file and no bespoke serialisation branch.  That is the whole reason
 plan D4 picks `register_buffer` over a sibling sklearn `StandardScaler`.
 
-joblib wraps the outer envelope so every model family's artefact keeps
-the same filename (`model.joblib`) and the Stage 12 `skops.io`
-graduation applies uniformly.  Stage 9's "only load artefacts we wrote
-ourselves" rule is unchanged.
+`skops.io` wraps the outer envelope (Stage 12 D10) so every model
+family's artefact keeps the same filename (`model.skops`) and
+`load_skops` enforces the project trust-list uniformly.  The envelope's
+primitive-only values mean no custom class registrations are needed for
+the NN families' outer dict — only the inner `state_dict_bytes` values,
+which `torch.load(..., weights_only=True)` handles directly.
 
 ### 5. Cold start per fold (plan D8)
 
@@ -380,8 +386,10 @@ equivalent — Pattern A is strictly simpler (single-branch
 
 ### D. Save-envelope addition (plan D5 / R7)
 
-The Stage 10 single-joblib envelope is preserved verbatim plus *two
-new fields*:
+The Stage 10 single-skops envelope is preserved verbatim plus *two
+new fields* (the outer dict is still skops-safe primitives; Stage 12 D10
+migrated the serialiser from joblib to skops without changing the envelope
+shape):
 
 ```python
 {
@@ -526,16 +534,16 @@ Each of these is swappable without touching downstream code.
 
 ## Known trade-offs
 
-- **Single-joblib envelope vs two-file layout.** The research-draft
+- **Single-skops envelope vs two-file layout.** The research-draft
   proposed two files (`model.pt` + `hyperparameters.json`) and the
-  registry passing a directory.  Stage 9's registry hard-codes
-  `artefact/model.joblib` as a file path (see `registry/_fs.py::_atomic_write_run`);
-  refactoring it to pass a directory was out of scope for Stage 10.
-  The single-joblib envelope is functionally equivalent — `state_dict`
-  is a dict-of-tensors, so pickling it through joblib does not carry
-  the `torch.save(nn.Module)` coupling problem, and
-  `torch.load(..., weights_only=True)` on the inner bytes still applies
-  the 2.6+ safety rail.  Plan D5 revised.
+  registry passing a directory.  The registry hard-codes
+  `artefact/model.skops` as a file path (see `registry/_fs.py::_atomic_write_run`;
+  Stage 12 D10 renamed from `model.joblib`); refactoring it to pass a
+  directory was out of scope for Stage 10.  The single-skops envelope is
+  functionally equivalent — the envelope contains only skops-safe
+  primitive types (`bytes`, `int`, `str`, `list`, `numpy` arrays);
+  `torch.load(..., weights_only=True)` on the inner `state_dict_bytes`
+  still applies the 2.6+ safety rail.  Plan D5 revised.
 - **No `use_deterministic_algorithms(True)`.** Intent AC-2 carves out
   GPU non-determinism; `cudnn.deterministic = True` + `cudnn.benchmark
   = False` catch the dominant sources of cuDNN nondeterminism without

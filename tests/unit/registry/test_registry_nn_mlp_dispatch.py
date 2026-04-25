@@ -10,10 +10,12 @@ Every test is derived from:
 - ``docs/plans/active/10-simple-nn.md`` §1 D2 clauses iii + v (one new
   ``isinstance`` branch in ``train.py``; one new entry in each of the
   two registry dispatch dicts).
-- ``docs/plans/active/10-simple-nn.md`` §1 D5 (single joblib envelope —
-  the registry's ``artefact/model.joblib`` file-path contract remains
-  unchanged; the NN's save routes through ``Model.save`` exactly like
-  the four Stage-4/7/8 families).
+- ``docs/plans/active/10-simple-nn.md`` §1 D5 (single envelope — the
+  registry's ``artefact/model.<ext>`` file-path contract; the NN's save
+  routes through ``Model.save`` exactly like the four Stage-4/7/8
+  families).  Stage 12 D10 (Ctrl+G reversal) flipped the canonical
+  filename from ``model.joblib`` to ``model.skops`` for security; the
+  single-envelope contract is preserved across the migration.
 
 The structural isinstance-branch test below is the Stage-10 parallel of
 Stage 8's ``test_harness_build_model_dispatches_scipy_parametric_config``
@@ -154,8 +156,9 @@ def test_registry_save_nn_mlp_model_via_protocol(tmp_path: Path) -> None:
 
     run_dir = tmp_path / run_id
     assert run_dir.is_dir(), f"expected registry run directory {run_dir} to exist"
-    assert (run_dir / "artefact" / "model.joblib").is_file(), (
-        "Stage 10 D5 mandates the single joblib envelope at artefact/model.joblib; "
+    assert (run_dir / "artefact" / "model.skops").is_file(), (
+        "Stage 10 D5 mandates the single envelope at artefact/model.skops "
+        "(Stage 12 D10 — registry artefact filename migrated from .joblib); "
         "missing file indicates NnMlpModel.save did not route through Model.save."
     )
     assert (run_dir / "run.json").is_file(), "expected run.json sidecar to be written"

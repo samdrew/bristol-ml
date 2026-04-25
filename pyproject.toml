@@ -42,6 +42,23 @@ dependencies = [
     # auto-select helper falls back to CPU on hosts without CUDA / MPS so
     # the Stage 10 meetup demo works on any laptop.
     "torch>=2.7,<3",
+    # Stage 12 (D1, D2): FastAPI + uvicorn for the minimal HTTP serving
+    # layer.  No ``[standard]`` extra (D2 / Scope-Diff cut) — ``httpx`` is
+    # already a runtime dep for ingestion, so ``fastapi.testclient.TestClient``
+    # works without it; the extras (``jinja2``, ``python-multipart``,
+    # ``fastapi-cli``) are not required by any AC.  Upper bounds match the
+    # project's standard major-version pin convention.
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    # Stage 12 (D10 — Ctrl+G reversal): ``skops.io`` is the canonical
+    # save/load primitive across all six model families.  Joblib was the
+    # Stage 4-11 default and is *removed* at the registry boundary because
+    # the Stage 12 serving layer is a network-facing deserialiser; loading
+    # a malicious joblib artefact is RCE.  ``models/io.py`` retains
+    # ``save_joblib`` / ``load_joblib`` helpers for one stage with a
+    # ``DeprecationWarning`` so any external scripts can complete a
+    # one-off migration before Stage 13.
+    "skops>=0.10,<1",
 ]
 
 [dependency-groups]

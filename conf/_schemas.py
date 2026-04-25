@@ -928,6 +928,42 @@ class ModelMetadata(BaseModel):
         return self
 
 
+class ServingConfig(BaseModel):
+    """Configuration for the Stage 12 serving layer.
+
+    Carries the three settings the standalone CLI launcher
+    (``python -m bristol_ml.serving``) needs to bring up the FastAPI
+    app: the on-disk registry root the lifespan reads at startup, and
+    the host/port the uvicorn process binds to.  All three have
+    sensible localhost-only defaults so a fresh clone serves out of
+    the box once a model is registered.
+
+    The shape is plan §5 verbatim: per Stage 12 D13 (DESIGN §2.1.1) the
+    launcher is a thin ``argparse + uvicorn.run(...)`` wrapper, not a
+    Hydra-decorated entry point — Hydra resolves this config via
+    :func:`bristol_ml.config.load_config` and the launcher hands the
+    validated values to uvicorn.
+
+    The host/port defaults are deliberately localhost-only (``127.0.0.1``
+    rather than ``0.0.0.0``); intent §Out of scope explicitly defers
+    "deployment anywhere other than localhost".
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Filesystem root the registry layer reads via
+    # :func:`bristol_ml.registry.list_runs` at lifespan startup.  The
+    # default mirrors the project-wide convention seen elsewhere in
+    # ``conf/`` (Stage 9 ``registry/`` lives at ``data/registry``).
+    registry_dir: Path = Path("data/registry")
+    # Localhost only by default; deployment beyond localhost is explicit
+    # intent §Out of scope for Stage 12.
+    host: str = "127.0.0.1"
+    # Port range guarded by Pydantic so a bad override fails at config
+    # validation rather than at uvicorn bind time.
+    port: int = Field(default=8000, ge=1, le=65535)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -940,3 +976,10 @@ class AppConfig(BaseModel):
     # defaults list in ``conf/config.yaml`` always selects one variant when
     # composed via ``load_config()``.
     model: ModelConfig | None = Field(default=None, discriminator="type")
+    # Stage 12: ``None`` keeps the train CLI / Stage-0 config-smoke surface
+    # unchanged — only the serving CLI ever requires this group, and it
+    # composes ``serving`` into the defaults list at its own entry point.
+    # The default ``conf/config.yaml`` for the train pipeline does *not*
+    # include ``serving``, so ``cfg.serving`` resolves to ``None`` for
+    # callers that do not need it.
+    serving: ServingConfig | None = None
