@@ -59,11 +59,17 @@ from loguru import logger
 from scipy.optimize import OptimizeWarning, curve_fit
 
 from bristol_ml.features.fourier import append_weekly_fourier
-from bristol_ml.models.io import load_joblib, save_joblib
+from bristol_ml.models.io import load_skops, save_skops
 from bristol_ml.models.protocol import ModelMetadata
 from conf._schemas import ScipyParametricConfig
 
 __all__ = ["ScipyParametricModel"]
+
+# Format tag for the dict-envelope-of-primitives written by
+# :meth:`ScipyParametricModel.save`.  Bumped if the envelope schema
+# changes; load rejects any tag it does not recognise so a future
+# schema migration is never silent.
+_SCIPY_PARAMETRIC_ENVELOPE_FORMAT = "scipy-parametric-state-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -466,13 +472,25 @@ class ScipyParametricModel:
         )
 
     def save(self, path: Path) -> None:
-        """Serialise the fitted model via :func:`~bristol_ml.models.io.save_joblib`.
+        """Serialise the fitted model via :func:`~bristol_ml.models.io.save_skops`.
 
-        The whole :class:`ScipyParametricModel` instance is pickled —
-        config, ``_popt``, ``_pcov``, ``_feature_columns``, ``_fit_utc``,
-        ``_param_names``.  The module-level :func:`_parametric_fn`
-        reference round-trips because the function lives at module scope
-        (codebase surprise S2).
+        Stage 12 D10 (Ctrl+G reversal): the project moved off
+        ``joblib`` and onto :mod:`skops.io` for security — the serving
+        layer is a network-facing deserialiser and ``joblib.load`` on an
+        attacker-controlled artefact is RCE.  The fitted state of
+        :class:`ScipyParametricModel` is already a small bag of numpy
+        arrays plus Python primitives, so the artefact is a dict
+        envelope of those primitives — no custom-class registration in
+        the project trust-list is required, and skops's restricted
+        unpickler accepts the load without further configuration.
+
+        The module-level :func:`_parametric_fn` reference is *not*
+        stored in the artefact (skops would refuse to dump it); on load
+        the function is re-bound from the module namespace at
+        :meth:`predict` time.  This eliminates the codebase surprise S2
+        entirely — the round-trip no longer depends on
+        :func:`_parametric_fn` being pickleable, only on it being
+        importable.
 
         Raises
         ------
@@ -481,26 +499,60 @@ class ScipyParametricModel:
         """
         if self._popt is None:
             raise RuntimeError("Cannot save unfitted ScipyParametricModel")
-        save_joblib(self, path)
+        if self._pcov is None:
+            raise RuntimeError("Cannot save unfitted ScipyParametricModel")
+        envelope: dict[str, object] = {
+            "format": _SCIPY_PARAMETRIC_ENVELOPE_FORMAT,
+            "config_dump": self._config.model_dump(),
+            "popt": np.asarray(self._popt, dtype=np.float64),
+            "pcov": np.asarray(self._pcov, dtype=np.float64),
+            "feature_columns": list(self._feature_columns),
+            "param_names": list(self._param_names),
+            "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),
+        }
+        save_skops(envelope, path)
 
     @classmethod
     def load(cls, path: Path) -> ScipyParametricModel:
         """Load a previously-saved :class:`ScipyParametricModel` from ``path``.
 
+        Reads the dict-envelope-of-primitives written by :meth:`save`
+        through :func:`bristol_ml.models.io.load_skops` (skops's
+        restricted unpickler enforces the project trust-list).  The
+        envelope is then unpacked back into a
+        :class:`ScipyParametricModel` instance — the trained parameter
+        vector and covariance matrix are reconstructed bit-exact (numpy
+        arrays round-trip through skops without lossy conversion).
+
         Raises
         ------
         TypeError
-            If the artefact at ``path`` is not a
-            :class:`ScipyParametricModel` (e.g. a
-            :class:`~bristol_ml.models.linear.LinearModel` pickled at the
-            same path).  Mirrors the Stage 4 ``LinearModel.load`` guard.
+            If the artefact at ``path`` is not a recognised
+            :class:`ScipyParametricModel` envelope (e.g. a
+            :class:`~bristol_ml.models.linear.LinearModel` artefact, or
+            a wrong ``format`` tag).  Mirrors the Stage 4 ``LinearModel.load``
+            guard with the new envelope-tag discriminator.
         """
-        obj = load_joblib(path)
-        if not isinstance(obj, cls):
+        envelope = load_skops(path)
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("format") != _SCIPY_PARAMETRIC_ENVELOPE_FORMAT
+        ):
             raise TypeError(
-                f"Expected a ScipyParametricModel artefact at {path}; got {type(obj).__name__}."
+                f"Expected a ScipyParametricModel skops envelope at {path} (format="
+                f"{_SCIPY_PARAMETRIC_ENVELOPE_FORMAT!r}); got "
+                f"{type(envelope).__name__} with format="
+                f"{envelope.get('format') if isinstance(envelope, dict) else None!r}."
             )
-        return obj
+        cfg = ScipyParametricConfig(**envelope["config_dump"])
+        model = cls(cfg)
+        model._popt = np.asarray(envelope["popt"], dtype=np.float64)
+        model._pcov = np.asarray(envelope["pcov"], dtype=np.float64)
+        model._feature_columns = tuple(envelope["feature_columns"])
+        model._param_names = tuple(envelope["param_names"])
+        fit_utc_iso = envelope["fit_utc_isoformat"]
+        model._fit_utc = datetime.fromisoformat(fit_utc_iso) if fit_utc_iso is not None else None
+        return model
 
     @property
     def metadata(self) -> ModelMetadata:

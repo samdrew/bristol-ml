@@ -937,7 +937,7 @@ def test_scipy_parametric_save_unfitted_raises_runtime_error(
     model = ScipyParametricModel(ScipyParametricConfig())
 
     with pytest.raises(RuntimeError) as exc_info:
-        model.save(tmp_path / "x.joblib")
+        model.save(tmp_path / "x.skops")
 
     msg = str(exc_info.value)
     assert "unfitted" in msg.lower() or "fit" in msg.lower(), (
@@ -967,8 +967,9 @@ def test_scipy_parametric_save_load_roundtrip_predict_equal(
        ``predict_after``.
     4. Assert ``np.allclose(predict_before, predict_after, atol=1e-12)``.
     5. Also assert that ``restored._popt`` and ``model._popt`` are bit-equal
-       arrays (i.e. the exact parameter vector is preserved through joblib
-       serialisation).
+       arrays (i.e. the exact parameter vector is preserved through skops
+       serialisation — Stage 12 T2 D10 reversal flipped the format from
+       joblib to skops; numpy round-trips bitwise through both).
 
     Plan clause: T5 plan §Task T5 named test
     ``test_scipy_parametric_save_load_roundtrip_predict_equal`` / AC-2.
@@ -993,7 +994,7 @@ def test_scipy_parametric_save_load_roundtrip_predict_equal(
 
     predict_before = model.predict(held_out)
 
-    save_path = tmp_path / "parametric.joblib"
+    save_path = tmp_path / "parametric.skops"
     model.save(save_path)
     restored = ScipyParametricModel.load(save_path)
 
@@ -1045,7 +1046,8 @@ def test_scipy_parametric_save_load_preserves_covariance_matrix(
 
     The plan's "bit-exact" contract means the nested list must compare as
     exactly equal with ``==``; no floating-point tolerance is applied
-    because joblib round-trips numpy arrays bitwise.
+    because skops round-trips numpy arrays bitwise (Stage 12 T2 flipped
+    the format from joblib to skops; the bit-exact contract is unchanged).
 
     Plan clause: T5 plan §Task T5 named test
     ``test_scipy_parametric_save_load_preserves_covariance_matrix`` / AC-5 /
@@ -1060,7 +1062,7 @@ def test_scipy_parametric_save_load_preserves_covariance_matrix(
     cov_before = model._pcov.copy()
     cov_matrix_before: list[list[float]] = model.metadata.hyperparameters["covariance_matrix"]  # type: ignore[assignment]
 
-    save_path = tmp_path / "parametric_cov.joblib"
+    save_path = tmp_path / "parametric_cov.skops"
     model.save(save_path)
     restored = ScipyParametricModel.load(save_path)
 
@@ -1096,34 +1098,37 @@ def test_scipy_parametric_load_wrong_type_raises_type_error(
 ) -> None:
     """``ScipyParametricModel.load`` raises ``TypeError`` for a non-ScipyParametric artefact.
 
-    Fits a :class:`~bristol_ml.models.linear.LinearModel` on a minimal
-    synthetic frame, saves it to a path, then asserts that calling
-    ``ScipyParametricModel.load(path)`` raises ``TypeError``.
+    Writes a hand-built skops envelope whose ``format`` tag is *not*
+    ``scipy-parametric-state-v1`` (a stand-in for the case where the
+    operator points the loader at a different model family's artefact —
+    e.g. a ``naive-state-v1`` envelope).  The format-tag discriminator
+    in :meth:`ScipyParametricModel.load` must reject the artefact with a
+    :class:`TypeError`.
 
-    This mirrors the Stage 4 / Stage 7 precedent where ``SarimaxModel.load``
-    raises ``TypeError`` when handed the wrong artefact type.
+    Stage 12 T2 (Ctrl+G D10 reversal) replaced the joblib-based wrong-type
+    guard with a format-tag discriminator.  The semantic is identical —
+    "wrong artefact at this path raises ``TypeError``" — but the
+    detection mechanism is the envelope's ``format`` field rather than
+    Python's ``isinstance`` on a pickled instance.
 
     Plan clause: T5 plan §Task T5 named test
-    ``test_scipy_parametric_load_wrong_type_raises_type_error``.
-    Imports: ``LinearModel`` at ``bristol_ml.models.linear``;
-    ``LinearConfig`` at ``conf._schemas``.
+    ``test_scipy_parametric_load_wrong_type_raises_type_error``;
+    Stage 12 T2 envelope migration.
     """
-    from bristol_ml.features.assembler import WEATHER_VARIABLE_COLUMNS
-    from bristol_ml.models.linear import LinearModel
-    from conf._schemas import LinearConfig
+    from bristol_ml.models.io import save_skops
 
-    n = 50
-    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
-    rng = np.random.default_rng(17)
-    weather_data = {col: rng.uniform(0.0, 1.0, n) for col, _ in WEATHER_VARIABLE_COLUMNS}
-    features = pd.DataFrame(weather_data, index=index)
-    target = pd.Series(10_000.0 + rng.normal(0, 200, n), index=index, name="nd_mw")
-
-    linear_model = LinearModel(LinearConfig())
-    linear_model.fit(features, target)
-
-    save_path = tmp_path / "linear_model.joblib"
-    linear_model.save(save_path)
+    save_path = tmp_path / "wrong-family.skops"
+    # A plausible-looking but not-ours envelope.  Mirrors the shape of
+    # the ``NaiveModel`` envelope (``format`` + ``config_dump``) so the
+    # rejection is on the format-tag value rather than on outer-shape
+    # mismatch.
+    save_skops(
+        {
+            "format": "naive-state-v1",
+            "config_dump": {"strategy": "same_hour_last_week", "target_column": "nd_mw"},
+        },
+        save_path,
+    )
 
     with pytest.raises(TypeError):
         ScipyParametricModel.load(save_path)
@@ -1427,7 +1432,7 @@ def test_scipy_parametric_conforms_to_model_protocol(
     )
 
     # --- (4) save() returns None ------------------------------------------
-    save_path = tmp_path / "protocol_check.joblib"
+    save_path = tmp_path / "protocol_check.skops"
     save_result = model.save(save_path)
     assert save_result is None, (
         f"Model.save() must return None per the protocol contract; "
@@ -1564,3 +1569,84 @@ def test_scipy_parametric_fit_loss_override_changes_fit() -> None:
     # forget to update the provenance record.
     assert model_linear.metadata.hyperparameters["loss"] == "linear"
     assert model_robust.metadata.hyperparameters["loss"] == "soft_l1"
+
+
+# ===========================================================================
+# Stage 12 T2 named test — skops round-trip preserves predictions
+# ===========================================================================
+
+
+def test_scipy_parametric_save_load_skops_roundtrip(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Guards Stage 12 T2 named test: ``ScipyParametricModel`` skops round-trip is bit-equal.
+
+    The Stage 12 plan §6 T2 names this test as the load-bearing
+    skops-migration guard for :class:`ScipyParametricModel`.  At Ctrl+G
+    the human reversed D10 ("Include skops. This includes a network
+    facing interface so security should be paramount, as I don't want
+    an RCE exploit on my PC") so every model family writes through
+    :func:`bristol_ml.models.io.save_skops` instead of joblib; the
+    artefact is a dict envelope of pure primitives (``popt`` /
+    ``pcov`` numpy arrays, parameter-name list, Pydantic config dump)
+    so skops's restricted unpickler accepts the load without
+    trust-list registration of the Pydantic config or ``ndarray``
+    classes.
+
+    Round-trip semantic: fit → predict (``predict_before``) → save →
+    load → predict (``predict_after``).  ``predict_before`` and
+    ``predict_after`` must be allclose to ``atol=1e-12`` (numpy
+    round-trips bitwise through skops).  The atomic-write contract
+    inherited from :func:`bristol_ml.models.io.save_skops` is checked
+    via the absence of a ``.tmp`` sibling after the save.
+    """
+    config = ScipyParametricConfig(diurnal_harmonics=1, weekly_harmonics=1)
+    train_features, train_target = _synthetic_parametric_frame(200)
+    model = ScipyParametricModel(config)
+    model.fit(train_features, train_target)
+
+    held_out_index = pd.date_range(
+        train_features.index[-1] + pd.Timedelta(hours=1),
+        periods=48,
+        freq="h",
+        tz="UTC",
+    )
+    rng = np.random.default_rng(99)
+    held_out = pd.DataFrame(
+        {"temperature_2m": rng.uniform(5.0, 20.0, 48)},
+        index=held_out_index,
+    )
+    predict_before = model.predict(held_out)
+
+    save_path = tmp_path / "parametric_skops_roundtrip.skops"
+    model.save(save_path)
+
+    # Atomic-write contract — no ``.tmp`` sibling after a successful save.
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert siblings == ["parametric_skops_roundtrip.skops"], (
+        f"save_skops must leave only the target artefact behind; "
+        f"found {siblings} in {tmp_path} (Stage 12 T2 atomic-write inheritance)."
+    )
+
+    restored = ScipyParametricModel.load(save_path)
+    predict_after = restored.predict(held_out)
+
+    np.testing.assert_allclose(
+        predict_before.to_numpy(),
+        predict_after.to_numpy(),
+        atol=1e-12,
+        err_msg=(
+            "Predictions from the skops-restored model must be allclose "
+            "(atol=1e-12) to predictions from the pre-save model. "
+            "Stage 12 T2 named test "
+            "``test_scipy_parametric_save_load_skops_roundtrip`` (D10 reversal)."
+        ),
+    )
+
+    # ``_popt`` and ``_pcov`` round-trip bitwise through skops (numpy is
+    # native).  Bit-exact comparison guards the "no lossy conversion in
+    # the envelope" contract.
+    assert restored._popt is not None
+    assert restored._pcov is not None
+    np.testing.assert_array_equal(model._popt, restored._popt)
+    np.testing.assert_array_equal(model._pcov, restored._pcov)
