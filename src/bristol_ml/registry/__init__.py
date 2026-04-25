@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from loguru import logger
 
 from bristol_ml.models.protocol import Model
 from bristol_ml.registry._dispatch import class_for_type as _class_for_type
@@ -296,6 +297,18 @@ def list_runs(
     missing the ``sort_by`` metric are placed last regardless of
     ``ascending``.
 
+    **Legacy joblib filter (Stage 12 D10).**  A run directory whose artefact
+    is the pre-Stage-12 ``model.joblib`` file (with no ``model.skops``
+    sibling) is skipped and a single :mod:`loguru` warning naming the
+    ``run_id`` and directory is emitted.  Such a run cannot be loaded —
+    :func:`load` raises ``RuntimeError`` for it — so surfacing it on the
+    leaderboard would be misleading and would cause callers iterating
+    ``list_runs(...)`` followed by :func:`load` (e.g. the Stage 11
+    ablation notebook) to die mid-loop.  The filter is the natural
+    extension of :func:`load`'s skops-only contract to the discovery
+    surface.  The operator's options are unchanged: re-fit to migrate to
+    skops, or delete the legacy run directory.
+
     Parameters
     ----------
     target:
@@ -332,6 +345,23 @@ def list_runs(
         sidecar_path = child / "run.json"
         if not sidecar_path.is_file():
             # Partial / corrupt run — skip rather than crash the leaderboard.
+            continue
+        # Legacy joblib filter (Stage 12 D10) — see docstring.  A run
+        # whose artefact is model.joblib (no model.skops sibling) cannot
+        # be loaded; surface a warning once per call and skip it.
+        artefact_dir = child / "artefact"
+        if (
+            not (artefact_dir / "model.skops").is_file()
+            and (artefact_dir / "model.joblib").is_file()
+        ):
+            logger.warning(
+                "Skipping legacy joblib run {run_id!r} at {dir!s}; the "
+                "Stage 12 D10 migration disabled joblib loads at the "
+                "registry boundary. Re-fit the model to migrate to skops, "
+                "or delete the directory to clean up the registry.",
+                run_id=child.name,
+                dir=child,
+            )
             continue
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         # Exact-match filters (D7).

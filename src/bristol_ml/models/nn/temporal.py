@@ -1044,8 +1044,8 @@ class NnTemporalModel:
         matching the Stage 4 contract.  No sibling ``model.pt`` or
         ``hyperparameters.json`` file is created — the D5 single-envelope
         disposition is structurally enforced by
-        ``test_nn_temporal_save_writes_single_joblib_file_at_given_path``
-        (renamed in spirit at T3; the test still pins single-file).
+        ``test_nn_temporal_save_writes_single_skops_file_at_given_path``
+        (renamed at Stage 12 D10 to match the canonical filename).
 
         Raises
         ------
@@ -1089,6 +1089,16 @@ class NnTemporalModel:
         warmup_index_freq: str | None = (
             warmup_index.freqstr if warmup_index.freq is not None else None
         )
+        # Normalise the DatetimeIndex to nanosecond precision *before*
+        # extracting the int64 vector.  pandas 2.x propagates parquet's
+        # default microsecond unit into ``DatetimeIndex.unit``, so a frame
+        # loaded from the Stage 3 feature cache has ``unit="us"`` and
+        # ``asi8`` returns microseconds.  The matching ``load`` path
+        # decodes with ``dtype="datetime64[ns]"`` unconditionally, so a
+        # naive ``asi8`` round-trip would shift every timestamp by a
+        # factor of 1 000.  ``as_unit("ns")`` is a no-op when the index
+        # is already nanosecond.
+        warmup_index_ns = warmup_index.as_unit("ns")
 
         envelope: dict[str, Any] = {
             "format": _NN_TEMPORAL_ENVELOPE_FORMAT,
@@ -1110,7 +1120,7 @@ class NnTemporalModel:
             # ``len(predict) == len(features)`` (evaluation-layer §5) is
             # preserved end-to-end.
             "warmup_values": np.ascontiguousarray(warmup_df.to_numpy(dtype=np.float64)),
-            "warmup_index_nanos": np.asarray(warmup_index.asi8, dtype=np.int64),
+            "warmup_index_nanos": np.asarray(warmup_index_ns.asi8, dtype=np.int64),
             "warmup_index_tz": warmup_index_tz,
             "warmup_index_freq": warmup_index_freq,
             "warmup_columns": list(warmup_df.columns),

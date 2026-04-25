@@ -12,8 +12,10 @@ Read the sub-layer contract in
 before extending this module; the file you are reading documents the
 concrete Stage 10 surface.  The parent layer guide at
 [`src/bristol_ml/models/CLAUDE.md`](../CLAUDE.md) remains authoritative
-for the protocol, `ModelMetadata`, and the joblib IO helpers that every
-model family reuses.
+for the protocol, `ModelMetadata`, and the skops IO helpers (`save_skops`
+/ `load_skops`, Stage 12 D10 — Ctrl+G reversal) that every model family
+reuses.  The deprecated `save_joblib` / `load_joblib` shim is retained
+for one stage only and will be removed at Stage 13.
 
 ## Current surface (Stage 10)
 
@@ -100,14 +102,18 @@ the scipy / statsmodels models.
   Stage 12 serving stub is CPU-only and cannot materialise a CUDA
   `state_dict` without it.  `test_nn_mlp_save_and_load_round_trips_
   state_dict_and_hyperparameters` is the regression guard.
-- **Single-joblib envelope; `state_dict_bytes` inside.**  The Stage 9
-  registry passes a **file** path (`artefact/model.joblib`) to
+- **Single-skops envelope; `state_dict_bytes` inside.**  The Stage 9
+  registry passes a **file** path (`artefact/model.skops`, renamed
+  from `model.joblib` at Stage 12 D10 Ctrl+G reversal) to
   `Model.save`, not a directory — this was the mid-T3 plan D5
-  revision.  `NnMlpModel.save` therefore writes one joblib file
-  containing the envelope dict described in the layer doc (§4).
+  revision.  `NnMlpModel.save` therefore writes one skops file
+  containing the envelope dict described in the layer doc (§4); the
+  inner `state_dict_bytes` field is still produced by `torch.save`,
+  but the outer envelope is serialised through
+  `bristol_ml.models.io.save_skops` rather than `joblib.dump`.
   Do **not** revert to the research-draft's two-file layout
   (`model.pt` + `hyperparameters.json`); `test_nn_mlp_save_writes_
-  single_joblib_file_at_given_path` is the structural guard.
+  single_skops_file_at_given_path` is the structural guard.
 
 ## Reproducibility semantics (plan D7' + NFR-1)
 
@@ -163,9 +169,10 @@ shared by both `NnMlpModel` and `NnTemporalModel`.  The five Stage 10
 PyTorch gotchas above all carry forward unchanged (the temporal class
 re-applies the `sys.modules` install, the lazy torch import, the
 buffer-registration discipline, the `weights_only=True + map_location=
-"cpu"` load contract, and the single-joblib envelope).  The four
-gotchas that are *new at Stage 11* and that the Stage 12 / 17 reader
-cannot guess from `mlp.py` are:
+"cpu"` load contract, and the single-envelope artefact layout — now a
+single-skops envelope at `artefact/model.skops` post Stage 12 D10).
+The four gotchas that are *new at Stage 11* and that the Stage 17
+reader cannot guess from `mlp.py` are:
 
 - **Causal padding via `F.pad(x, (left, 0))` *before* a `Conv1d(padding=
   0)`, never `Conv1d(padding=...)`.**  The Bai et al. (2018) recipe.
@@ -215,13 +222,17 @@ cannot guess from `mlp.py` are:
   registered the same way Stage 10 registers them — so the scalers
   ride inside `state_dict()` and the strict-mode round-trip catches
   any drift.  Plan D7 / codebase map §4.
-- **Single-joblib envelope gains one new field: `seq_len`.**  The
+- **Single-skops envelope gains one new field: `seq_len`.**  The
   Stage 10 envelope (`state_dict_bytes` + `config_dump` +
   `feature_columns` + `seed_used` + `best_epoch` + `loss_history` +
   `fit_utc` + `device_resolved`) is preserved verbatim; Stage 11 adds
   one more field, `seq_len: int`, *redundant* with `config_dump
   ["seq_len"]` but explicit so the load path can sanity-check the
-  window size before reconstructing the module.  The reconstruction
+  window size before reconstructing the module.  The outer envelope
+  is now serialised through `bristol_ml.models.io.save_skops` (Stage
+  12 D10 — Ctrl+G reversal); the inner `state_dict_bytes` is still a
+  `torch.save` payload that round-trips through `torch.load(BytesIO(
+  ...), weights_only=True, map_location="cpu")`.  The reconstruction
   path is: read envelope → instantiate `NnTemporalConfig` from
   `config_dump` → assert envelope `seq_len == config.seq_len` →
   rebuild `_NnTemporalModuleImpl(input_dim=len(feature_columns),
@@ -233,8 +244,10 @@ cannot guess from `mlp.py` are:
   the kernel shapes differ).  Regression guards:
   `test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict`
   (asserts the loaded `config.seq_len` matches byte-exact) and
-  `test_nn_temporal_save_writes_single_joblib_file_at_given_path`
-  (structural; no sibling files).  Plan D5 / R7.
+  `test_nn_temporal_save_writes_single_skops_file_at_given_path`
+  (structural; no sibling files; renamed at Stage 12 D10 from
+  `..._single_joblib_file_at_given_path` to match the canonical
+  filename).  Plan D5 / R7.
 
 The other Stage 11 item worth surfacing — the harness-factory catch-up
 that landed *with* T6's dispatcher wiring rather than as a Stage 10
@@ -276,10 +289,11 @@ under `type = "nn_mlp"` automatically (plan D2 clause iii / v).
 
 - Sub-layer contract — `docs/architecture/layers/models-nn.md`.
 - Parent layer contract — `docs/architecture/layers/models.md` (the
-  `Model` protocol + `ModelMetadata` + joblib IO shared by every
-  family).
+  `Model` protocol + `ModelMetadata` + skops IO shared by every
+  family; Stage 12 D10 migrated the family from joblib to skops).
 - Stage 10 plan — `docs/plans/completed/10-simple-nn.md`.  Key decisions: D3 (architecture defaults),
-  D4 (scaler buffers), D5 revised (single-joblib envelope), D6 (loss
+  D4 (scaler buffers), D5 revised (single-envelope artefact, joblib at
+  Stage 10; migrated to skops at Stage 12 D10), D6 (loss
   history + `epoch_callback` seam), D7' (four-stream reproducibility),
   D8 (cold start), D9 (internal 10 % val tail + best-epoch restore),
   D10 (training-loop ownership), D11 (device auto-select), D12 (this

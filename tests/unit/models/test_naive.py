@@ -712,3 +712,72 @@ def test_naive_save_load_skops_roundtrip(tmp_path: Path) -> None:
         check_exact=True,
         obj="Stage 12 T2 skops round-trip predictions",
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression — Stage 12 D10 unit-stable DatetimeIndex round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_naive_save_load_round_trips_microsecond_unit_datetimeindex(tmp_path: Path) -> None:
+    """Regression guard: a parquet-loaded ``unit="us"`` index round-trips correctly.
+
+    The Stage 3 feature cache lands on disk as parquet; when pyarrow
+    reads it back into pandas, ``DatetimeIndex.unit`` is ``"us"`` rather
+    than the ``pd.date_range`` default ``"ns"``.  Before the fix,
+    ``NaiveModel.save`` extracted ``target_index.asi8`` (which returns
+    int64 in the index's *own* unit — microseconds in this case) while
+    ``NaiveModel.load`` decoded with ``dtype="datetime64[ns]"`` — so the
+    round-trip silently shifted every timestamp by a factor of 1 000,
+    landing the loaded index in 1970.  The Stage 11 ablation notebook
+    surfaced this as a ``ValueError`` from
+    :meth:`NaiveModel._predict_same_weekday` ("found no training row
+    matching weekday=...").
+
+    The fix normalises the index to ``"ns"`` precision via
+    :meth:`pd.DatetimeIndex.as_unit` at save time so the load decode is
+    unit-stable.  This test reproduces the parquet-shaped scenario by
+    explicitly downcasting a date-range index to ``"us"`` before fit.
+    """
+    cfg = _naive_cfg(strategy="same_hour_same_weekday")
+    model = NaiveModel(cfg)
+
+    # Build a microsecond-unit hourly index — the pyarrow / parquet
+    # default — to mirror the feature-cache shape exactly.
+    n = 336
+    idx_us = (
+        pd.DatetimeIndex(pd.date_range(start="2024-01-01 00:00", periods=n, freq="h"))
+        .as_unit("us")
+        .tz_localize("UTC")
+    )
+    features = pd.DataFrame({"t2m": [float(i) * 0.1 for i in range(n)]}, index=idx_us)
+    target = pd.Series([float(i) for i in range(n)], index=idx_us, name="nd_mw")
+    assert features.index.unit == "us", (
+        "Test fixture must reproduce the parquet microsecond-unit case."
+    )
+    model.fit(features, target)
+
+    path = tmp_path / "naive.skops"
+    model.save(path)
+    loaded = NaiveModel.load(path)
+
+    # 1. The loaded index reconstructs to the same wall-clock timestamps.
+    assert (loaded._target.index == idx_us.as_unit("ns")).all(), (
+        "Loaded NaiveModel target index must reconstruct to the same "
+        "wall-clock timestamps as the fitted index regardless of the "
+        "input frame's DatetimeIndex.unit (Stage 12 D10 regression)."
+    )
+
+    # 2. predict() succeeds on a same-unit holdout slice — pre-fix this
+    #    raised ``ValueError`` because the loaded training index landed
+    #    in 1970 and no Saturday-midnight on or before 2024-01-15
+    #    existed in the shifted training data.
+    holdout = features.iloc[200:210]
+    loaded_preds = loaded.predict(holdout)
+    original_preds = model.predict(holdout)
+    pd.testing.assert_series_equal(
+        original_preds,
+        loaded_preds,
+        check_exact=True,
+        obj="Stage 12 D10 unit-stable round-trip predictions",
+    )

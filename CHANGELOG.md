@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `bristol_ml.registry.list_runs` now skips run directories whose
+  artefact is the pre-Stage-12 `model.joblib` file (with no
+  `model.skops` sibling), emitting one `loguru.warning` per skipped run
+  that names the `run_id` and directory.  Such a run cannot be loaded
+  — `registry.load` raises `RuntimeError` for it under the Stage 12
+  D10 skops-only contract — so surfacing it on the leaderboard misled
+  callers that iterate `list_runs(...)` followed by `load(...)` (the
+  Stage 11 ablation notebook hit this in production after the Stage 12
+  migration).  Operator action remains unchanged: re-fit to migrate to
+  skops, or delete the legacy run directory.  Regression guard:
+  `tests/unit/registry/test_registry_list_describe.py::test_registry_list_skips_legacy_joblib_run`.
+- `NaiveModel.save` and `NnTemporalModel.save` now normalise the
+  saved `DatetimeIndex` to nanosecond precision via
+  `pd.DatetimeIndex.as_unit("ns")` before extracting the int64 vector.
+  Pandas 2.x propagates parquet's default microsecond unit into
+  `DatetimeIndex.unit`, so a frame loaded from the Stage 3 feature
+  cache has `unit="us"` and `asi8` returns microseconds; the matching
+  `load` paths decoded with `dtype="datetime64[ns]"` unconditionally,
+  silently shifting every timestamp by a factor of 1 000 and landing
+  the loaded indices in 1970.  This was a Stage 12 D10 envelope-of-
+  primitives migration regression: pre-skops the joblib pickle path
+  carried the `DatetimeIndex` object whole and round-tripped its unit
+  faithfully.  The Stage 11 ablation notebook surfaced the
+  `NaiveModel` half (`ValueError: Seasonal-naive 'same_hour_same_weekday'
+  found no training row matching weekday=...`); `NnTemporalModel`
+  carries the same shape via its warmup-window prefix.  Regression
+  guards: `tests/unit/models/test_naive.py::test_naive_save_load_round_trips_microsecond_unit_datetimeindex`
+  and `tests/unit/models/test_nn_temporal_save_load.py::test_nn_temporal_save_load_round_trips_microsecond_unit_warmup_index`.
+
+### Changed
+
+- `tests/unit/models/test_nn_mlp_save_load.py::test_nn_mlp_save_writes_single_joblib_file_at_given_path`
+  renamed to `..._single_skops_file_at_given_path`, matching the
+  Stage 12 D10 canonical artefact filename and the sibling
+  `NnTemporalModel` test (which was renamed in the Stage 12 PR).
+  Stage 12 documentation drift in `src/bristol_ml/models/nn/mlp.py`
+  module docstring, `src/bristol_ml/models/nn/temporal.py:1047`
+  cross-reference, and `src/bristol_ml/models/nn/CLAUDE.md` (six
+  references to "single-joblib envelope" / `model.joblib`) swept to
+  use the post-Stage-12 skops vocabulary; historical context preserved
+  inline with explicit "Stage 12 D10 — Ctrl+G reversal" attribution.
+
 ### Added
 
 - Stage 12: `bristol_ml.serving` — minimal FastAPI prediction endpoint loading from the Stage 9 registry. `build_app(registry_dir: Path) -> FastAPI` is the public factory. The lifespan resolves the lowest-MAE registered run across **all six** model families (naive, linear, sarimax, scipy_parametric, nn_mlp, nn_temporal — D9 Ctrl+G reversal: every family is eligible, including nn_temporal via Stage 11's warmup-envelope) and stashes it in `app.state.loaded`. `GET /` returns the default-model summary; `POST /predict` is features-in (D4), `AwareDatetime`-typed target_dt normalised to UTC (D8), default-or-supplied `run_id` (D5), lazy-loaded non-default runs cached in `app.state.loaded` (D7 single highest-leverage cut). Unknown `run_id` → HTTP 404 with detail naming the missing id and the registry directory. Empty registry → `RuntimeError` at lifespan startup with the registry path in the message (AC-1). Per-request seven-field structured log via `loguru.logger.bind(...).info("served prediction")` (D11 — `request_id`, `model_name`, `model_run_id`, `target_dt`, `prediction`, `latency_ms`, `feature_hash` — the load-bearing contract Stage 18 drift monitoring will consume). OpenAPI 3.0 document auto-emitted by FastAPI with `PredictRequest` and `PredictResponse` as named components (AC-4). Standalone CLI `python -m bristol_ml.serving` with `--registry-dir`, `--host`, `--port`, and Hydra `overrides` positional (DESIGN §2.1.1); `--help` prints the resolved `ServingConfig` schema (NFR-2). `conf/_schemas.py` gains `ServingConfig` (`registry_dir`, `host`, `port`) and `AppConfig.serving: ServingConfig | None = None` (the `None` default keeps the train CLI and config-smoke surface unchanged). `conf/serving/default.yaml` mirrors schema defaults (Hydra group-directory layout; load via `+serving=default`). 17 integration tests in `tests/integration/serving/test_api.py` covering AC-1..AC-4, D6/D9 default selection, D7 lazy-load cache, D11 log schema, and the six-family parity parametrisation.
