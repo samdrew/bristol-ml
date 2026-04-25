@@ -14,9 +14,11 @@ for Stage 11 are:
 - the four-stream reproducibility recipe (plan D7'; bit-identical on
   CPU, close-match on CUDA / MPS — also relocated to ``_training.py``);
 - the cold-start-per-fold contract (plan D8);
-- the single-joblib artefact layout (plan D5 revised), which plugs into
-  the Stage 9 registry's ``artefact/model.joblib`` file-path contract
-  without any registry change.
+- the single-envelope artefact layout (plan D5 revised), which plugs
+  into the Stage 9 registry's ``artefact/model.skops`` file-path
+  contract (Stage 12 D10 — Ctrl+G reversal flipped the canonical
+  filename from ``model.joblib`` to ``model.skops``) without any
+  registry change.
 
 Stage 10 shipped T1-T3 (scaffold, fit/predict, save/load).  Stage 11
 T1 (this commit) extracted the training-loop body to

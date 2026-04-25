@@ -202,6 +202,68 @@ def test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict(
 
 
 # ===========================================================================
+# Regression — Stage 12 D10 unit-stable warmup-DatetimeIndex round-trip
+# ===========================================================================
+
+
+def test_nn_temporal_save_load_round_trips_microsecond_unit_warmup_index(
+    tmp_path: Path,
+) -> None:
+    """Regression guard: a parquet-loaded ``unit="us"`` warmup index round-trips correctly.
+
+    The Stage 3 feature cache lands on disk as parquet; pyarrow → pandas
+    yields ``DatetimeIndex.unit == "us"``.  Before the fix,
+    :meth:`NnTemporalModel.save` extracted ``warmup_index.asi8`` (int64
+    in the index's *own* unit) while :meth:`load` decoded with
+    ``dtype="datetime64[ns]"`` — so the round-trip silently shifted the
+    warmup window's timestamps by a factor of 1 000 and downstream
+    alignment in :meth:`predict` no longer matched the request frame.
+
+    The Stage 11 ablation notebook surfaced the sister bug for
+    :class:`NaiveModel`; the same shape exists here at
+    :attr:`_warmup_features`.
+
+    The fix normalises the index to ``"ns"`` precision via
+    :meth:`pd.DatetimeIndex.as_unit` at save time so the load decode is
+    unit-stable.  This test reproduces the parquet-shaped scenario by
+    explicitly downcasting a date-range index to ``"us"`` before fit.
+    """
+    n = 200
+    rng = np.random.default_rng(0)
+    n_features = 4
+    X = rng.standard_normal(size=(n, n_features)).astype(np.float64)
+    y = 0.7 * X[:, 0] - 0.3 * X[:, 1] + 0.5 * np.sin(X[:, 2])
+    idx_us = (
+        pd.DatetimeIndex(pd.date_range("2024-01-01", periods=n, freq="h"))
+        .as_unit("us")
+        .tz_localize("UTC")
+    )
+    features = pd.DataFrame(X, columns=[f"f{i}" for i in range(n_features)], index=idx_us)
+    target = pd.Series(y, index=idx_us, name="nd_mw")
+    assert features.index.unit == "us", (
+        "Test fixture must reproduce the parquet microsecond-unit case."
+    )
+
+    model = NnTemporalModel(_cpu_temporal_config())
+    model.fit(features, target, seed=17)
+
+    artefact_path = tmp_path / "artefact" / "model.skops"
+    artefact_path.parent.mkdir()
+    model.save(artefact_path)
+    loaded = NnTemporalModel.load(artefact_path)
+
+    # The loaded warmup index must reconstruct to the same wall-clock
+    # timestamps as the fitted index regardless of the input frame's
+    # DatetimeIndex.unit (Stage 12 D10 regression).
+    assert loaded._warmup_features is not None
+    assert (loaded._warmup_features.index == model._warmup_features.index).all(), (
+        "Loaded NnTemporalModel warmup index must reconstruct to the "
+        "same wall-clock timestamps as the fitted warmup regardless of "
+        "the input frame's DatetimeIndex.unit (Stage 12 D10 regression)."
+    )
+
+
+# ===========================================================================
 # 2. test_nn_temporal_load_raises_file_not_found_for_missing_artefact
 # ===========================================================================
 

@@ -182,11 +182,13 @@ def test_nn_mlp_load_raises_file_not_found_for_missing_artefact(tmp_path: Path) 
 
 
 # ===========================================================================
-# 3. test_nn_mlp_save_writes_single_joblib_file_at_given_path
+# 3. test_nn_mlp_save_writes_single_skops_file_at_given_path
+#    (renamed at Stage 12 D10 — Ctrl+G reversal flipped the canonical
+#    artefact filename from ``model.joblib`` to ``model.skops``)
 # ===========================================================================
 
 
-def test_nn_mlp_save_writes_single_joblib_file_at_given_path(tmp_path: Path) -> None:
+def test_nn_mlp_save_writes_single_skops_file_at_given_path(tmp_path: Path) -> None:
     """Guards plan D5 revised (single-envelope layout).
 
     ``save(path)`` must create exactly one file at ``path`` and no
@@ -214,12 +216,13 @@ def test_nn_mlp_save_writes_single_joblib_file_at_given_path(tmp_path: Path) -> 
         f"Plan D5 (revised) mandates the single-envelope layout."
     )
 
-    # Specifically, neither the pre-D5 two-file layout nor a stray
-    # ``.tmp`` may exist.
+    # Specifically, neither the pre-D5 two-file layout, the deprecated
+    # joblib filename (Stage 12 D10), nor a stray ``.tmp`` may exist.
     for banned in ("model.pt", "hyperparameters.json", "model.skops.tmp", "model.joblib"):
         assert not (artefact_dir / banned).exists(), (
             f"NnMlpModel.save created banned sibling {banned!r}. "
-            "Plan D5 (revised): single joblib envelope only."
+            "Plan D5 (revised): single skops envelope only "
+            "(Stage 12 D10 — model.joblib is the legacy filename)."
         )
 
 

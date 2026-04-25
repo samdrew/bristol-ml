@@ -196,14 +196,26 @@ class NaiveModel:
         # under skops and would each need trust-list entries, whereas a
         # str round-trips natively.
         tz_str: str | None = str(target_index.tz) if target_index.tz is not None else None
+        # Normalise the DatetimeIndex to nanosecond precision *before*
+        # extracting the int64 vector — pandas 2.x propagates parquet's
+        # default microsecond unit into ``DatetimeIndex.unit``, so a frame
+        # loaded from the Stage 3 feature cache has ``unit="us"`` and
+        # ``asi8`` returns microseconds.  The matching ``load`` path
+        # decodes with ``dtype="datetime64[ns]"`` unconditionally, so a
+        # naive ``asi8`` round-trip would shift every timestamp by a
+        # factor of 1 000.  ``as_unit("ns")`` is the canonical pandas
+        # idiom and is a no-op when the index is already nanosecond.
+        target_index_ns = target_index.as_unit("ns")
         envelope: dict[str, object] = {
             "format": _NAIVE_ENVELOPE_FORMAT,
             "config_dump": self._config.model_dump(),
             "target_values": np.asarray(self._target.to_numpy(), dtype=np.float64),
-            # ``DatetimeIndex.asi8`` is the canonical int64 nanos-since-epoch
-            # vector; ``np.asarray(..., dtype=np.int64)`` defends against any
-            # future pandas changes that return a numpy-backed object array.
-            "target_index_nanos": np.asarray(target_index.asi8, dtype=np.int64),
+            # ``DatetimeIndex.asi8`` returns int64 in the index's own
+            # unit; we always normalise to nanoseconds at save time so the
+            # ``load`` path's ``datetime64[ns]`` decode is unit-stable
+            # regardless of whether the training frame came from
+            # ``pd.date_range`` (default ns) or parquet (default us).
+            "target_index_nanos": np.asarray(target_index_ns.asi8, dtype=np.int64),
             "target_index_tz": tz_str,
             "feature_columns": list(self._feature_columns),
             "fit_utc_isoformat": (self._fit_utc.isoformat() if self._fit_utc is not None else None),

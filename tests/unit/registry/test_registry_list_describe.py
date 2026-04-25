@@ -225,6 +225,57 @@ def test_registry_list_returns_empty_on_nonexistent_registry(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
+# Stage 12 D10 — legacy joblib runs are filtered out of the leaderboard
+# ---------------------------------------------------------------------------
+
+
+def test_registry_list_skips_legacy_joblib_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A legacy ``model.joblib``-only run is excluded from ``list_runs``.
+
+    Stage 12 D10 disabled joblib loads at the registry boundary
+    (:func:`registry.load` raises ``RuntimeError``).  ``list_runs`` is
+    the discovery surface that feeds the Stage 11 ablation notebook and
+    every harness-driven workflow; if a legacy run is reported as
+    "registered" the caller's subsequent :func:`load` will die.  This
+    regression guard asserts the filter:
+
+    1. A legacy joblib-only run is **not** returned.
+    2. A healthy skops sibling run **is** returned.
+    3. A loguru warning is emitted naming the skipped ``run_id``.
+    """
+    # Healthy skops run — written through the standard atomic-write path.
+    _write_run(tmp_path, _make_sidecar("skops_run_20260424T2331", mae_mean=42.0))
+
+    # Legacy joblib run — synthesise the on-disk shape directly so we
+    # do not have to reach back into pre-Stage-12 IO helpers.
+    legacy_dir = tmp_path / "joblib_run_20260424T2331"
+    (legacy_dir / "artefact").mkdir(parents=True)
+    (legacy_dir / "artefact" / "model.joblib").write_bytes(b"")
+    legacy_sidecar = _make_sidecar("joblib_run_20260424T2331", mae_mean=10.0)
+    (legacy_dir / "run.json").write_text(
+        json.dumps(dict(legacy_sidecar), indent=2),
+        encoding="utf-8",
+    )
+
+    from loguru import logger as _loguru_logger
+
+    sink_id = _loguru_logger.add(caplog.handler, format="{message}")
+    try:
+        runs = registry.list_runs(registry_dir=tmp_path)
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    assert [r["run_id"] for r in runs] == ["skops_run_20260424T2331"], (
+        f"list_runs must filter out the legacy joblib run; saw {[r['run_id'] for r in runs]!r}."
+    )
+    assert any("joblib_run_20260424T2331" in record.getMessage() for record in caplog.records), (
+        "list_runs must emit a warning naming the skipped legacy run."
+    )
+
+
+# ---------------------------------------------------------------------------
 # describe — plan T4 named test
 # ---------------------------------------------------------------------------
 
