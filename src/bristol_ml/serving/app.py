@@ -1,9 +1,11 @@
 """FastAPI app factory for the bristol_ml serving layer (Stage 12).
 
-Implements Stage 12 T7: a single ``POST /predict`` endpoint backed by
-the Stage 9 registry, plus a ``GET /`` root that returns the resolved
-default model so a facilitator can introspect the service before the
-demo curl.
+Implements Stage 12 T7 + T8: a single ``POST /predict`` endpoint
+backed by the Stage 9 registry, plus a ``GET /`` root that returns the
+resolved default model so a facilitator can introspect the service
+before the demo curl.  Per-request seven-field structured logging
+(plan D11) lands at T8 alongside the standalone CLI in
+``bristol_ml.serving.__main__``.
 
 Public surface — see ``docs/plans/active/12-serving.md`` §5:
 
@@ -23,15 +25,31 @@ Public surface — see ``docs/plans/active/12-serving.md`` §5:
   artefact, so single-row predict works uniformly across all six
   families (D9 Ctrl+G reversal).
 
-The seven-field structured prediction log (D11) is wired up at T8;
-this T7 implementation already emits the lifespan info line that
-records the default ``run_id`` + ``model_name`` so the operator sees
-what is being served before the first request.
+The per-request log (D11) emits a single ``loguru`` info line per
+served prediction, with seven structured fields bound through
+``logger.bind(...).info("served prediction")`` so Stage 18's drift
+monitoring can consume the log without a retrofit:
+
+- ``request_id``    — UUID4 generated per request.
+- ``model_name``    — the resolved model's human-readable name.
+- ``model_run_id``  — the registry run id that served the request.
+- ``target_dt``     — UTC ISO 8601 (post-``astimezone(dt.UTC)``).
+- ``prediction``    — float, MW.
+- ``latency_ms``    — wall-clock predict time, ``time.perf_counter``.
+- ``feature_hash``  — first 16 hex chars of
+  ``sha256(canonical_json(features_in))``.
+
+Logs route to ``stdout`` per the project default; no file rotation
+or shipper is configured (intent §Out of scope).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -193,8 +211,37 @@ def build_app(registry_dir: Path) -> FastAPI:
             [req.features],
             index=pd.DatetimeIndex([target_utc], tz="UTC"),
         )
+        # D11 latency window — wraps ``model.predict`` only.  Excludes
+        # the lazy-load cost (which would dominate first-call latency
+        # for non-default run_ids and confuse the Stage-18 drift
+        # consumer) and excludes the response-model construction (a
+        # constant cost the operator cannot influence).
+        t0 = time.perf_counter()
         prediction_series = model.predict(feature_frame)
         prediction = float(prediction_series.iloc[0])
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        # D11 feature_hash: canonical JSON ensures the hash is stable
+        # under dict-iteration-order differences (the Pydantic model
+        # already gives us the dict, but ``sort_keys=True`` removes any
+        # remaining ambiguity from feature-name ordering downstream).
+        # Truncated to 16 hex chars per the plan §1 D11 / R8 minimum.
+        feature_hash = hashlib.sha256(
+            json.dumps(req.features, sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+        # D11 seven-field structured log — bound as loguru extras so
+        # Stage 18's drift consumer can read each field by name.  Field
+        # order matches the plan §1 D11 spec verbatim.
+        logger.bind(
+            request_id=str(uuid.uuid4()),
+            model_name=sidecar["name"],
+            model_run_id=run_id,
+            target_dt=target_utc.isoformat(),
+            prediction=prediction,
+            latency_ms=latency_ms,
+            feature_hash=feature_hash,
+        ).info("served prediction")
 
         return PredictResponse(
             prediction=prediction,

@@ -58,12 +58,25 @@ def test_serving_module_imports_without_torch() -> None:
 
 
 def test_serving_cli_help_exits_zero() -> None:
-    """Guards Stage 12 NFR-2: ``python -m bristol_ml.serving --help`` exits 0.
+    """Guards Stage 12 NFR-2: ``python -m bristol_ml.serving --help`` exits 0
+    and surfaces the resolved ``ServingConfig`` schema.
 
-    The plan §6 T8 names this test for the eventual CLI surface;
-    the T1 scaffold honours the contract early — ``--help`` must
-    not error during the partial-implementation window so any
-    smoke-test of the package import surface continues to work.
+    The plan §6 T8 names this test for the CLI surface.  Two
+    behaviours are load-bearing:
+
+    1.  ``--help`` exits zero — no Hydra resolve, no uvicorn import,
+        no registry I/O happens during ``--help`` (the imports are
+        deferred inside :func:`bristol_ml.serving.__main__._cli_main`),
+        so a stale registry or a missing config file does not turn
+        ``--help`` into an error path.
+    2.  The output surfaces the resolved ``ServingConfig`` defaults
+        (``data/registry``, ``127.0.0.1``, ``8000``) inline thanks to
+        :class:`argparse.ArgumentDefaultsHelpFormatter`, so the demo
+        facilitator can read the schema without opening
+        ``conf/serving/default.yaml``.
+
+    Subprocess invocation (rather than in-process call) reproduces the
+    way the user actually triggers the CLI.
     """
     result = subprocess.run(
         [sys.executable, "-m", "bristol_ml.serving", "--help"],
@@ -78,6 +91,15 @@ def test_serving_cli_help_exits_zero() -> None:
     assert "bristol_ml" in result.stdout, (
         f"--help output should mention bristol_ml; got {result.stdout!r}"
     )
+    # NFR-2: --help must surface the resolved ServingConfig schema.
+    # ArgumentDefaultsHelpFormatter prints the defaults inline; we
+    # assert each expected default appears so a future schema rename
+    # without a flag-default refresh fails this test.
+    for expected in ("data/registry", "127.0.0.1", "8000"):
+        assert expected in result.stdout, (
+            f"--help output should surface ServingConfig default {expected!r}; "
+            f"got {result.stdout!r}"
+        )
 
 
 def test_serving_package_exposes_build_app() -> None:

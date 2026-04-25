@@ -1,4 +1,4 @@
-"""Stage 12 T7 — FastAPI app factory + lifespan + ``GET /`` + ``POST /predict``.
+"""Stage 12 T7 + T8 — FastAPI app factory, lifespan, predict endpoint, log.
 
 Spec-derived integration tests for the Stage 12 serving endpoint, all
 exercised through :class:`fastapi.testclient.TestClient` so the
@@ -18,6 +18,10 @@ all in scope:
   over **all six model families** per the D9 Ctrl+G reversal (AC-3).
 - ``test_lazy_load_caches_run_id_after_first_request`` (D7 single
   highest-leverage cut)
+- ``test_request_log_record_carries_seven_fields`` (T8 / D11 — the
+  per-request structured log Stage 18 will consume)
+- ``test_openapi_json_contains_predict_request_and_response`` (T8 /
+  AC-4 — the schema-discoverability gate)
 
 The file existence + ``TestClient``-driven integration shape together
 satisfy AC-5 (smoke test exercises the endpoint with a small fixture).
@@ -29,7 +33,7 @@ upstream registry / model layer; do not weaken the test.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -37,6 +41,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from loguru import logger
 
 from bristol_ml import registry
 from bristol_ml.models.protocol import Model
@@ -499,6 +504,175 @@ def test_lazy_load_caches_run_id_after_first_request(tmp_path: Path) -> None:
     # confirmation that the request resolved to the secondary run.
     assert r1.json()["run_id"] == secondary_run_id
     assert r2.json()["run_id"] == secondary_run_id
+
+
+# ---------------------------------------------------------------------------
+# T8 / D11 — seven-field structured prediction log
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def captured_log_records() -> Iterator[list[dict[str, Any]]]:
+    """Capture full loguru records (including bound extras) for the test.
+
+    The repo-level ``loguru_caplog`` fixture only routes the formatted
+    *message* into pytest's caplog (``format="{message}"``); the D11
+    seven-field assertion needs the full ``record["extra"]`` payload,
+    so this local fixture installs a function-sink that appends each
+    record dict to a list.  The sink is removed on teardown to keep
+    successive tests isolated.
+
+    Returns a list that the test populates by issuing a request; each
+    entry is the loguru record dict (``{"message", "level", "extra",
+    ...}``).
+    """
+    captured: list[dict[str, Any]] = []
+
+    def _sink(message: Any) -> None:
+        # ``message.record`` is a ``dict``-like; copy so a teardown that
+        # mutates the live record doesn't break later assertions.
+        captured.append(dict(message.record))
+
+    handler_id = logger.add(_sink, level="INFO")
+    try:
+        yield captured
+    finally:
+        logger.remove(handler_id)
+
+
+def test_request_log_record_carries_seven_fields(
+    tmp_path: Path,
+    captured_log_records: list[dict[str, Any]],
+) -> None:
+    """Stage 12 T8 / D11: ``logger.bind(...).info("served prediction")`` carries the seven fields.
+
+    The seven fields are the contract Stage 18 (drift monitoring) will
+    consume; this test pins each field name and a per-field type
+    invariant so a regression that drops a key or coerces a type fails
+    here rather than silently breaking the downstream consumer.
+
+    Cited criterion: plan §4 (D-derived) named test
+    ``test_request_log_record_carries_seven_fields``; plan §1 D11.
+    """
+    model, predict_features = fit_linear()
+    run_id = register_run(model, registry_dir=tmp_path)
+    payload = {
+        "target_dt": predict_features.index[-1].isoformat(),
+        "features": _features_payload(model, predict_features),
+    }
+    app = build_app(tmp_path)
+    with TestClient(app) as client:
+        response = _post_predict(client, payload)
+    assert response.status_code == 200, response.text
+
+    served = [r for r in captured_log_records if r.get("message") == "served prediction"]
+    assert len(served) == 1, (
+        f"D11: exactly one 'served prediction' log line per request; "
+        f"got {len(served)} ({[r.get('message') for r in captured_log_records]!r})."
+    )
+    extra = served[0]["extra"]
+    expected_fields = {
+        "request_id",
+        "model_name",
+        "model_run_id",
+        "target_dt",
+        "prediction",
+        "latency_ms",
+        "feature_hash",
+    }
+    missing = expected_fields - set(extra)
+    assert not missing, (
+        f"D11: served-prediction log must carry all seven fields; missing {missing!r}; "
+        f"extras present: {sorted(extra)!r}."
+    )
+    # Per-field type / shape invariants.  A broken bind that turned a
+    # float into a string (or a UUID4 into something else) must fail
+    # here so the Stage 18 consumer's parser stays load-bearing.
+    assert isinstance(extra["request_id"], str) and len(extra["request_id"]) == 36, (
+        f"request_id must be a UUID4 string (36 chars incl. hyphens); got {extra['request_id']!r}."
+    )
+    assert isinstance(extra["model_name"], str) and extra["model_name"], extra["model_name"]
+    assert extra["model_run_id"] == run_id, (
+        f"model_run_id must be the resolved run_id={run_id!r}; got {extra['model_run_id']!r}."
+    )
+    assert isinstance(extra["target_dt"], str) and "T" in extra["target_dt"], (
+        f"target_dt must be an ISO 8601 string; got {extra['target_dt']!r}."
+    )
+    assert isinstance(extra["prediction"], float), (
+        f"prediction must be a float; got {type(extra['prediction']).__name__}."
+    )
+    assert isinstance(extra["latency_ms"], float) and extra["latency_ms"] >= 0.0, (
+        f"latency_ms must be a non-negative float; got {extra['latency_ms']!r}."
+    )
+    assert isinstance(extra["feature_hash"], str) and len(extra["feature_hash"]) == 16, (
+        f"feature_hash must be a 16-char hex string; got {extra['feature_hash']!r}."
+    )
+    # Sanity: feature_hash must be hex (sha256 truncated).
+    int(extra["feature_hash"], 16)
+
+
+# ---------------------------------------------------------------------------
+# T8 / AC-4 — OpenAPI schema discoverability
+# ---------------------------------------------------------------------------
+
+
+def test_openapi_json_contains_predict_request_and_response(tmp_path: Path) -> None:
+    """Stage 12 AC-4: ``GET /openapi.json`` carries the predict schemas.
+
+    AC-4 is satisfied by FastAPI's auto-emitted OpenAPI document; this
+    test pins the document's path-shape so a refactor that drops the
+    ``response_model=`` from ``POST /predict`` (and therefore drops
+    the response schema from the OpenAPI doc) fails here.
+
+    Cited criterion: plan §4 AC-4 / §6 T8 named test
+    ``test_openapi_json_contains_predict_request_and_response``.
+    """
+    model, _ = fit_naive()
+    register_run(model, registry_dir=tmp_path)
+
+    app = build_app(tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/openapi.json")
+    assert response.status_code == 200, response.text
+    doc = response.json()
+    predict_op = doc.get("paths", {}).get("/predict", {}).get("post", {})
+    assert predict_op, (
+        "OpenAPI document must include a POST /predict operation; "
+        f"got paths={list(doc.get('paths', {}))!r}."
+    )
+
+    request_schema = (
+        predict_op.get("requestBody", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema", {})
+    )
+    assert request_schema, (
+        f"POST /predict must declare a JSON requestBody schema; got {predict_op!r}."
+    )
+
+    response_200_schema = (
+        predict_op.get("responses", {})
+        .get("200", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema", {})
+    )
+    assert response_200_schema, (
+        f"POST /predict must declare a 200 application/json response schema; "
+        f"got {predict_op.get('responses', {})!r}."
+    )
+
+    # Inline-or-$ref doesn't matter; both shapes satisfy AC-4.  We
+    # require a stable component name so the schema is greppable for
+    # downstream consumers (Stage 18 may codegen against it).
+    components = doc.get("components", {}).get("schemas", {})
+    assert "PredictRequest" in components, (
+        f"OpenAPI components must include PredictRequest; got {sorted(components)!r}."
+    )
+    assert "PredictResponse" in components, (
+        f"OpenAPI components must include PredictResponse; got {sorted(components)!r}."
+    )
 
 
 # ---------------------------------------------------------------------------
