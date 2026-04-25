@@ -129,7 +129,9 @@ The `--help` output documents the `--registry-dir` override.
 
 ## Cross-references
 
-- Layer contract — `docs/architecture/layers/registry.md` (Stage 9 T6).
+- Layer contract — `docs/architecture/layers/registry.md` (Stage 9 T6; Stage 12 skops inflection point recorded there).
+- Serving layer — `docs/architecture/layers/serving.md` — the first non-author consumer of registry artefacts; trust-list contract for future model families.
 - Stage 9 plan — `docs/plans/completed/09-model-registry.md`.
 - Stage 9 retro — `docs/lld/stages/09-model-registry.md`.
+- Stage 12 retro — `docs/lld/stages/12-serving.md` — skops migration outcome; joblib rejection error contract.
 - Intent — `docs/intent/09-model-registry.md` (5 ACs + 8 Points).

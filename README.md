@@ -70,6 +70,32 @@ The registry is filesystem-backed (`data/registry/`, gitignored); run IDs are hu
 
 `notebooks/11-complex-nn.ipynb` fits a Bai-et-al.-2018 Temporal Convolutional Network (`NnTemporalModel` — dilated causal 1D convolutions, residual blocks, weight-norm, `seq_len=168` weekly anchor) behind the Stage 4 `Model` protocol and registers it through the Stage 9 registry. The demo moment is a **six-row ablation table** (Cell 6) placing every shipped model family — naive, linear, SARIMAX, scipy parametric, MLP, TCN — head-to-head on the same single-holdout slice, all loaded predict-only via `registry.load`. Training uses the shared `_training.run_training_loop` extracted from Stage 10; the live loss-curve callback is the same Stage 10 `epoch_callback` seam. Entry points: `python -m bristol_ml.models.nn.temporal --help` (prints `NnTemporalConfig` schema), `python -m bristol_ml.models.nn --help`, and `uv run python -m bristol_ml.train model=nn_temporal`. See [`src/bristol_ml/models/nn/CLAUDE.md`](src/bristol_ml/models/nn/CLAUDE.md), [`docs/architecture/layers/models-nn.md`](docs/architecture/layers/models-nn.md), and the [Stage 11 retrospective](docs/lld/stages/11-complex-nn.md).
 
+## Worked example: serving (Stage 12)
+
+`python -m bristol_ml.serving` is the Stage 12 demo moment: a single command starts a FastAPI prediction service that loads the lowest-MAE registered model and answers forecast requests over HTTP.
+
+```bash
+# Start the service (requires at least one trained model in data/registry/)
+uv run python -m bristol_ml.serving --registry-dir data/registry
+
+# Check which model is being served
+curl http://localhost:8000/
+
+# Issue a prediction (replace the feature values with the keys in GET / feature_columns)
+curl -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"target_dt": "2025-06-15T13:00:00Z", "features": {"temp_c": 12.5, "cloud_cover": 0.4}}'
+
+# Inspect the auto-generated OpenAPI schema
+curl http://localhost:8000/openapi.json
+```
+
+All six model families (`naive`, `linear`, `sarimax`, `scipy_parametric`, `nn_mlp`, `nn_temporal`) are served through the same endpoint — no model-family special-casing. The default model is the lowest-MAE registered run across all families. Non-default runs are named via the optional `run_id` field in the request body and lazy-loaded on first use.
+
+**Breaking change — skops migration.** Stage 12 migrated all six model families' save / load paths from `joblib` to `skops.io` for security (the serving layer is a network-facing deserialiser; `joblib.load` on an attacker-controlled artefact is RCE). **Any existing `data/registry/` directory containing `model.joblib` artefacts must be rebuilt by retraining.** `registry.load` rejects pre-Stage-12 artefacts with a clear error naming the path and the required migration action.
+
+See [`src/bristol_ml/serving/CLAUDE.md`](src/bristol_ml/serving/CLAUDE.md), [`docs/architecture/layers/serving.md`](docs/architecture/layers/serving.md), and the [Stage 12 retrospective](docs/lld/stages/12-serving.md).
+
 ## Worked example: calendar features (Stage 5)
 
 `notebooks/05_calendar_features.ipynb` adds a 44-column calendar feature block — hour-of-day, day-of-week, and month-of-year one-hots plus `is_bank_holiday_ew` / `is_bank_holiday_sco` / `is_day_before_holiday` / `is_day_after_holiday` flags — on top of the Stage 3 weather feature table. The same `LinearModel` class runs twice: once with the 5-column `weather_only` feature set and once with the 49-column `weather_calendar` feature set. The calendar extension closes much of the gap to the NESO benchmark on MAPE (quantified in the notebook) and visibly flattens the weekly residual ripple. Swap feature sets on the CLI via Hydra group-override: `uv run python -m bristol_ml.train` (weather only; default) or `uv run python -m bristol_ml.train features=weather_calendar`. Bank-holiday data comes from [gov.uk](https://www.gov.uk/bank-holidays.json) (OGL v3); first run warms the local cache, subsequent runs work offline. Entry points: `python -m bristol_ml.ingestion.holidays --help`, `python -m bristol_ml.features.calendar --help`, and the extended `python -m bristol_ml.features.assembler --help`. See [`src/bristol_ml/features/CLAUDE.md`](src/bristol_ml/features/CLAUDE.md) and the [Stage 5 retrospective](docs/lld/stages/05-calendar-features.md).
