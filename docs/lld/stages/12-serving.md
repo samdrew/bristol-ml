@@ -192,20 +192,39 @@ review 2026-04-25.  Key points:
 
 ## Observed latencies per model family
 
-Observed latencies pending — NFR-4 cut from CI (`PREMATURE OPTIMISATION`
-per Scope Diff); measure against a local registry and record here before
-the Stage 12 PR merges.  One measurement per family (fit on the
-`weather_only` feature table, single-row predict through the serving
-boundary, `time.perf_counter` wrapped around `model.predict` only):
+NFR-4 cut from CI (`PREMATURE OPTIMISATION` per Scope Diff §4).  The
+measurement below is recorded for the retro only — it is **not** a
+regression gate.  Measurement protocol: fit each family on the
+integration-test fixture recipe (the same recipes the AC-3 six-family
+parity test parametrises over — see
+[`tests/integration/serving/conftest.py`](../../../tests/integration/serving/conftest.py)),
+then time `model.predict(single_row)` 100 times with `time.perf_counter`
+wrapped around `model.predict` only — the same boundary the FastAPI
+handler uses for the seven-field log's `latency_ms` field.  Measured on
+the dev container (CPU only, 2026-04-25).
 
-| Family | `latency_ms` (observed) |
-|--------|------------------------|
-| `naive` | — |
-| `linear` | — |
-| `sarimax` | — |
-| `scipy_parametric` | — |
-| `nn_mlp` | — |
-| `nn_temporal` | — |
+| Family | `latency_ms` median | `latency_ms` p99 |
+|--------|---------------------|------------------|
+| `naive` | 0.15 | 0.30 |
+| `linear` | 0.88 | 0.96 |
+| `sarimax` | 2.23 | 3.17 |
+| `scipy_parametric` | 1.51 | 1.97 |
+| `nn_mlp` | 0.29 | 0.36 |
+| `nn_temporal` | 0.97 | 1.20 |
+
+All six families serve a single-row predict in **under 4 ms p99** on
+this CPU — well inside the "single-digit-millisecond" envelope a small
+demo service is expected to hit.  SARIMAX is the slowest; the cost is
+dominated by `statsmodels.tsa.statespace` re-binding the exogenous
+Fourier regressors per call, not by Kalman filtering itself.  The
+remaining five families are all under 1 ms median and will not be the
+bottleneck of any serving deployment short of bulk batch scoring.
+
+The numbers above are not committed to as a contract.  The
+`latency_ms` field of the per-request log (D11) is the load-bearing
+field for downstream drift monitoring at Stage 18; that field is
+populated and structured-logged on every serving request and Stage 18
+can compute its own observed distributions from production traffic.
 
 ## Next-stage handoff
 
@@ -228,7 +247,9 @@ Carry-forwards from Stage 12:
   three sites.  The `0004-model-dispatcher-consolidation.md` ADR
   earmark carries forward to Stage 13 or Stage 17 (whichever first
   ships a seventh family).
-- **Observed latencies.**  Fill in the table above before merging.
+- **Observed latencies.**  Recorded inline in the table above; not a
+  contract.  Stage 18 will compute its own latency distributions from
+  the per-request log's `latency_ms` field.
 
 ## Cross-references
 
