@@ -109,7 +109,7 @@ def test_nn_mlp_save_and_load_round_trips_state_dict_and_hyperparameters(
     model_before, features, _target = _fit_tiny_model(tmp_path)
     pred_before = model_before.predict(features)
 
-    artefact_path = tmp_path / "artefact" / "model.joblib"
+    artefact_path = tmp_path / "artefact" / "model.skops"
     model_before.save(artefact_path)
 
     assert artefact_path.is_file(), f"save() did not create {artefact_path!s}."
@@ -170,12 +170,12 @@ def test_nn_mlp_load_raises_file_not_found_for_missing_artefact(tmp_path: Path) 
     """Guards the Stage 4 ``load`` convention.
 
     ``load()`` on a non-existent path must raise :class:`FileNotFoundError`
-    (propagated from :func:`joblib.load`) rather than silently returning
-    ``None`` or a half-initialised model.
+    (propagated from :func:`bristol_ml.models.io.load_skops`) rather than
+    silently returning ``None`` or a half-initialised model.
 
     Plan clause: T3 §Task T3.
     """
-    missing = tmp_path / "does_not_exist" / "model.joblib"
+    missing = tmp_path / "does_not_exist" / "model.skops"
 
     with pytest.raises(FileNotFoundError):
         NnMlpModel.load(missing)
@@ -192,7 +192,7 @@ def test_nn_mlp_save_writes_single_joblib_file_at_given_path(tmp_path: Path) -> 
     ``save(path)`` must create exactly one file at ``path`` and no
     siblings.  Regressing to the pre-D5-revision two-file layout
     (``model.pt`` + ``hyperparameters.json``) would break the Stage 9
-    registry's single-file ``artefact/model.joblib`` contract —
+    registry's single-file ``artefact/model.skops`` contract —
     structurally caught here.
 
     Plan clause: T3 §Task T3.
@@ -200,23 +200,23 @@ def test_nn_mlp_save_writes_single_joblib_file_at_given_path(tmp_path: Path) -> 
     model, _features, _target = _fit_tiny_model(tmp_path)
 
     artefact_dir = tmp_path / "artefact"
-    artefact_path = artefact_dir / "model.joblib"
+    artefact_path = artefact_dir / "model.skops"
     model.save(artefact_path)
 
     # Exactly one file at the configured path.
     assert artefact_path.is_file(), f"save() did not create {artefact_path!s}."
 
-    # No ``.tmp`` sibling left behind — save_joblib is atomic, the tmp
+    # No ``.tmp`` sibling left behind — save_skops is atomic, the tmp
     # is renamed via os.replace, so the post-save directory must be clean.
     siblings = sorted(p.name for p in artefact_dir.iterdir())
-    assert siblings == ["model.joblib"], (
+    assert siblings == ["model.skops"], (
         f"NnMlpModel.save created unexpected sibling files: {siblings!r}. "
         f"Plan D5 (revised) mandates the single-envelope layout."
     )
 
     # Specifically, neither the pre-D5 two-file layout nor a stray
     # ``.tmp`` may exist.
-    for banned in ("model.pt", "hyperparameters.json", "model.joblib.tmp"):
+    for banned in ("model.pt", "hyperparameters.json", "model.skops.tmp", "model.joblib"):
         assert not (artefact_dir / banned).exists(), (
             f"NnMlpModel.save created banned sibling {banned!r}. "
             "Plan D5 (revised): single joblib envelope only."
@@ -240,7 +240,7 @@ def test_nn_mlp_save_before_fit_raises_runtime_error(tmp_path: Path) -> None:
     "predict-before-fit" contract — save extends the same invariant).
     """
     model = NnMlpModel(_cpu_config())
-    path = tmp_path / "artefact" / "model.joblib"
+    path = tmp_path / "artefact" / "model.skops"
 
     with pytest.raises(RuntimeError, match=r"fit\(\) to have been called"):
         model.save(path)
@@ -263,13 +263,13 @@ def test_nn_mlp_load_rejects_state_dict_with_missing_buffer(tmp_path: Path) -> N
     """
     import io as _io
 
-    from bristol_ml.models.io import load_joblib, save_joblib
+    from bristol_ml.models.io import load_skops, save_skops
 
     model, _features, _target = _fit_tiny_model(tmp_path)
-    artefact_path = tmp_path / "artefact" / "model.joblib"
+    artefact_path = tmp_path / "artefact" / "model.skops"
     model.save(artefact_path)
 
-    envelope = load_joblib(artefact_path)
+    envelope = load_skops(artefact_path)
     original_state_dict = torch.load(
         _io.BytesIO(envelope["state_dict_bytes"]),
         weights_only=True,
@@ -279,12 +279,15 @@ def test_nn_mlp_load_rejects_state_dict_with_missing_buffer(tmp_path: Path) -> N
         "Pre-check: state_dict must carry target_std (plan D4 / R3)."
     )
 
-    # Drop the buffer and re-save the envelope.
+    # Drop the buffer and re-save the envelope (preserving the
+    # ``format`` tag so the load path's discriminator is not the failure
+    # mode under inspection — we want the strict-mode load_state_dict
+    # check to be the one that fires).
     tampered = {k: v for k, v in original_state_dict.items() if k != "target_std"}
     buf = _io.BytesIO()
     torch.save(tampered, buf)
     envelope["state_dict_bytes"] = buf.getvalue()
-    save_joblib(envelope, artefact_path)
+    save_skops(envelope, artefact_path)
 
     with pytest.raises(RuntimeError, match=r"(?i)missing|target_std"):
         NnMlpModel.load(artefact_path)
@@ -341,3 +344,81 @@ def test_nn_mlp_module_impl_is_pickleable() -> None:
             f"pickle round-trip lost buffer {buf_name!r} — the scaler "
             "buffers must ride inside state_dict (plan D4 / R3)."
         )
+
+
+# ===========================================================================
+# 7. test_nn_mlp_save_load_skops_roundtrip  (Stage 12 T3 — skops migration)
+# ===========================================================================
+
+
+def test_nn_mlp_save_load_skops_roundtrip(tmp_path: Path) -> None:
+    """T3 named test (Stage 12 D10) — skops migration round-trip guard.
+
+    The Stage 12 D10 Ctrl+G reversal moved every model family off
+    :mod:`joblib` and onto :mod:`skops.io` for security: the serving
+    layer is a network-facing deserialiser and ``joblib.load`` on an
+    attacker-controlled artefact is RCE.  This test asserts the
+    round-trip behaviour the migration must preserve:
+
+    (a) ``save()`` writes a single ``.skops`` file at the given path —
+        no ``.tmp`` sibling left behind, no joblib artefact, no extra
+        sidecars (the atomic-write contract from Stage 4 carries over
+        unchanged across the serialiser flip).
+    (b) ``load()`` reconstructs an instance that conforms to the Stage 4
+        :class:`Model` protocol (``runtime_checkable`` ``isinstance``).
+    (c) ``load()`` rejects an artefact whose top-level ``format`` tag is
+        wrong with :class:`TypeError`, naming the unexpected tag.  This
+        is the discriminator that prevents a foreign envelope from being
+        silently loaded as if it were an :class:`NnMlpModel`.
+    (d) ``predict(features)`` after ``load()`` matches the pre-save
+        ``predict(features)`` under :func:`torch.equal` on CPU
+        (state_dict + scaler buffers round-trip bit-exactly).
+
+    Plan clauses: Stage 12 plan §Task T3 ("test_nn_mlp_save_load_skops_
+    roundtrip") + D10 (skops migration) + Stage 10 D5 (single-envelope)
+    + Stage 4 Model protocol.
+    """
+    from bristol_ml.models.io import save_skops
+    from bristol_ml.models.protocol import Model
+
+    model_before, features, _target = _fit_tiny_model(tmp_path)
+    pred_before = model_before.predict(features)
+
+    artefact_dir = tmp_path / "artefact"
+    artefact_path = artefact_dir / "model.skops"
+    model_before.save(artefact_path)
+
+    # (a) Atomic-write contract: exactly one file at ``path`` and no
+    # stray ``.tmp`` sibling or pre-Stage-12 joblib artefact.
+    siblings = sorted(p.name for p in artefact_dir.iterdir())
+    assert siblings == ["model.skops"], (
+        "skops migration must preserve the atomic single-file save "
+        f"contract; got siblings {siblings!r}."
+    )
+
+    model_after = NnMlpModel.load(artefact_path)
+
+    # (b) Protocol conformance — runtime_checkable.
+    assert isinstance(model_after, Model), (
+        "Loaded NnMlpModel must satisfy the Stage 4 Model protocol (runtime_checkable isinstance)."
+    )
+
+    # (c) Wrong-tag rejection: write a foreign envelope and assert
+    # ``load`` raises TypeError naming the mismatch.
+    bad_path = tmp_path / "wrong_tag.skops"
+    save_skops({"format": "naive-state-v1", "config_dump": {}}, bad_path)
+    with pytest.raises(TypeError, match=r"format tag|nn-mlp-state"):
+        NnMlpModel.load(bad_path)
+
+    # (d) Bit-exact predict round-trip on CPU.
+    pred_after = model_after.predict(features)
+    assert torch.equal(
+        torch.from_numpy(pred_before.to_numpy()),
+        torch.from_numpy(pred_after.to_numpy()),
+    ), (
+        "skops migration: predict() after load() must equal predict() "
+        "pre-save bit-exactly on CPU (state_dict + scaler buffers must "
+        "round-trip cleanly)."
+    )
+    assert pred_after.index.equals(pred_before.index)
+    assert pred_after.name == pred_before.name

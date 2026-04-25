@@ -131,7 +131,7 @@ def test_nn_temporal_save_and_load_round_trips_seq_len_and_state_dict(
     features_test = features.iloc[-50:]
     pred_before = model.predict(features_test)
 
-    artefact_path = tmp_path / "artefact" / "model.joblib"
+    artefact_path = tmp_path / "artefact" / "model.skops"
     model.save(artefact_path)
 
     assert artefact_path.is_file(), f"save() did not create {artefact_path!s}."
@@ -212,23 +212,23 @@ def test_nn_temporal_load_raises_file_not_found_for_missing_artefact(
     """Guards the Stage 4 ``load`` convention (plan §Task T5 line 517).
 
     ``load()`` on a non-existent path must raise :class:`FileNotFoundError`
-    (propagated from :mod:`joblib`) rather than silently returning ``None``
-    or a half-initialised model.
+    (propagated from :mod:`skops.io` after Stage 12 D10) rather than
+    silently returning ``None`` or a half-initialised model.
 
     Plan clause: T5 §Task T5.
     """
-    missing = tmp_path / "does_not_exist.joblib"
+    missing = tmp_path / "does_not_exist.skops"
 
     with pytest.raises(FileNotFoundError):
         NnTemporalModel.load(missing)
 
 
 # ===========================================================================
-# 3. test_nn_temporal_save_writes_single_joblib_file_at_given_path
+# 3. test_nn_temporal_save_writes_single_skops_file_at_given_path
 # ===========================================================================
 
 
-def test_nn_temporal_save_writes_single_joblib_file_at_given_path(
+def test_nn_temporal_save_writes_single_skops_file_at_given_path(
     tmp_path: Path,
 ) -> None:
     """Guards plan D5 revised (single-envelope layout) — Stage 10 T3 structural
@@ -237,34 +237,44 @@ def test_nn_temporal_save_writes_single_joblib_file_at_given_path(
     ``save(path)`` must create exactly one file at ``path`` and no
     siblings.  Regressing to a two-file layout (e.g. ``model.pt`` +
     ``hyperparameters.json``) would break the Stage 9 registry's single-file
-    ``artefact/model.joblib`` contract — structurally caught here.
+    ``artefact/model.skops`` contract — structurally caught here.  After
+    the Stage 12 D10 Ctrl+G reversal the artefact lives at
+    ``artefact/model.skops`` rather than ``model.joblib``; the structural
+    guarantee is unchanged.
 
-    Plan clause: T5 §Task T5 / D5 single-joblib envelope.
+    Plan clause: T5 §Task T5 / D5 single-envelope contract / Stage 12 D10.
     """
     features, target = _tiny_temporal_fixture()
     model = NnTemporalModel(_cpu_temporal_config())
     model.fit(features, target, seed=0)
 
     artefact_dir = tmp_path / "artefact"
-    artefact_path = artefact_dir / "model.joblib"
+    artefact_path = artefact_dir / "model.skops"
     model.save(artefact_path)
 
     # Exactly one file at the configured path.
     assert artefact_path.is_file(), f"save() did not create {artefact_path!s}."
-    # ``save_joblib`` is atomic (tmp + ``os.replace``), so no ``.tmp`` sibling
+    # ``save_skops`` is atomic (tmp + ``os.replace``), so no ``.tmp`` sibling
     # should survive.  The directory must contain exactly one entry.
     siblings = sorted(p.name for p in artefact_dir.iterdir())
-    assert siblings == ["model.joblib"], (
+    assert siblings == ["model.skops"], (
         f"NnTemporalModel.save created unexpected sibling files: {siblings!r}. "
-        "Plan D5 (single-joblib envelope) mandates exactly one file at the "
+        "Plan D5 (single-envelope) mandates exactly one file at the "
         "given path — no ``model.pt`` / ``hyperparameters.json`` / ``.tmp``."
     )
-    # Belt-and-braces: check the three most common pre-D5 regression artefacts
-    # individually so the failure message names the culprit.
-    for banned in ("model.pt", "hyperparameters.json", "model.joblib.tmp"):
+    # Belt-and-braces: check the most common regression artefacts (including
+    # a stale ``model.joblib`` from the pre-Stage-12 layout) so the failure
+    # message names the culprit.
+    for banned in (
+        "model.pt",
+        "hyperparameters.json",
+        "model.skops.tmp",
+        "model.joblib",
+    ):
         assert not (artefact_dir / banned).exists(), (
             f"NnTemporalModel.save created banned sibling file {banned!r}. "
-            "Plan D5 (single-joblib envelope): single file only."
+            "Plan D5 (single-envelope): single file only; Stage 12 D10 "
+            "moved the artefact extension from .joblib to .skops."
         )
 
 
@@ -405,51 +415,59 @@ def test_nn_temporal_load_rejects_envelope_with_mismatched_seq_len(
     loudly under that refactor.
 
     The recipe: save a fitted model, mutate the envelope's top-level
-    ``seq_len`` field on disk via :func:`load_joblib` /
-    :func:`save_joblib`, then assert :meth:`NnTemporalModel.load` raises
+    ``seq_len`` field on disk via :func:`load_skops` /
+    :func:`save_skops` (preserving the format tag so the reload path
+    reaches the R7 guard rather than tripping on the format-tag check
+    first), then assert :meth:`NnTemporalModel.load` raises
     :class:`ValueError` mentioning the mismatch.
 
     Phase 3 review (code-reviewer R2): the R7 guard had no adversarial
     coverage in the T5 happy-path tests.
     """
-    from bristol_ml.models.io import load_joblib, save_joblib
+    from bristol_ml.models.io import load_skops, save_skops
 
     features, target = _tiny_temporal_fixture()
     model = NnTemporalModel(_cpu_temporal_config())
     model.fit(features, target, seed=0)
 
-    artefact_path = tmp_path / "model.joblib"
+    artefact_path = tmp_path / "model.skops"
     model.save(artefact_path)
 
     # Tamper with the on-disk envelope: bump the top-level ``seq_len``
     # by one so it disagrees with ``config_dump["seq_len"]``.
-    envelope = load_joblib(artefact_path)
+    envelope = load_skops(artefact_path)
     original_seq_len = int(envelope["seq_len"])
     envelope["seq_len"] = original_seq_len + 1
-    save_joblib(envelope, artefact_path)
+    save_skops(envelope, artefact_path)
 
     with pytest.raises(ValueError, match=r"seq_len.*disagrees|R7"):
         NnTemporalModel.load(artefact_path)
 
 
 # ===========================================================================
-# 6. test_nn_temporal_load_rejects_envelope_missing_warmup_features  (Phase 3)
+# 6. test_nn_temporal_load_rejects_envelope_missing_warmup_fields  (Phase 3)
 # ===========================================================================
 
 
-def test_nn_temporal_load_rejects_envelope_missing_warmup_features(
+def test_nn_temporal_load_rejects_envelope_missing_warmup_fields(
     tmp_path: Path,
 ) -> None:
-    """Adversarial guard for the Stage 11 ``warmup_features`` envelope contract.
+    """Adversarial guard for the Stage 11 warmup-prefix envelope contract.
 
-    ``warmup_features`` is load-bearing for the harness alignment
+    The warmup prefix is load-bearing for the harness alignment
     contract (``len(predict) == len(features)`` — see layer doc §D and
-    ``NnTemporalModel.predict``).  A corrupted artefact missing this
-    field would silently produce a model whose ``predict`` returns a
-    series shorter than the caller's index by ``seq_len`` rows, breaking
-    every harness call site.  The :meth:`NnTemporalModel.load` guard at
-    ``temporal.py:1153-1158`` raises :class:`ValueError` to make the
-    corruption loud.
+    ``NnTemporalModel.predict``).  A corrupted artefact missing the
+    warmup arrays would silently produce a model whose ``predict``
+    returns a series shorter than the caller's index by ``seq_len``
+    rows, breaking every harness call site.  The
+    :meth:`NnTemporalModel.load` guard raises :class:`ValueError` to
+    make the corruption loud.
+
+    Stage 12 D10: under the skops-migration the warmup DataFrame is
+    decomposed into three primitive fields (``warmup_values`` numpy
+    array + ``warmup_index_nanos`` int64 vector + ``warmup_columns``
+    list, plus the optional ``warmup_index_tz`` string).  This test
+    drops ``warmup_values`` to cover the missing-warmup guard.
 
     A future refactor that drops the missing-warmup guard would leave
     every existing save/load test green; this adversarial test fails
@@ -458,23 +476,116 @@ def test_nn_temporal_load_rejects_envelope_missing_warmup_features(
     Phase 3 review (code-reviewer R2): the missing-warmup guard had no
     adversarial coverage in the T5 happy-path tests.
     """
-    from bristol_ml.models.io import load_joblib, save_joblib
+    from bristol_ml.models.io import load_skops, save_skops
 
     features, target = _tiny_temporal_fixture()
     model = NnTemporalModel(_cpu_temporal_config())
     model.fit(features, target, seed=0)
 
-    artefact_path = tmp_path / "model.joblib"
+    artefact_path = tmp_path / "model.skops"
     model.save(artefact_path)
 
-    # Tamper with the on-disk envelope: drop the ``warmup_features`` field.
-    envelope = load_joblib(artefact_path)
-    assert "warmup_features" in envelope, (
-        "Pre-condition: a freshly-saved envelope must contain warmup_features; "
+    # Tamper with the on-disk envelope: drop the ``warmup_values`` field.
+    envelope = load_skops(artefact_path)
+    assert "warmup_values" in envelope, (
+        "Pre-condition: a freshly-saved envelope must contain warmup_values; "
         "this test could only meaningfully tamper if the field is present."
     )
-    del envelope["warmup_features"]
-    save_joblib(envelope, artefact_path)
+    del envelope["warmup_values"]
+    save_skops(envelope, artefact_path)
 
-    with pytest.raises(ValueError, match=r"warmup_features"):
+    with pytest.raises(ValueError, match=r"warmup_values|warmup_columns|warmup"):
         NnTemporalModel.load(artefact_path)
+
+
+# ===========================================================================
+# 7. test_nn_temporal_save_load_skops_roundtrip  (Stage 12 T3 — load-bearing
+#    for D9 Ctrl+G reversal: nn_temporal stays a first-class family)
+# ===========================================================================
+
+
+def test_nn_temporal_save_load_skops_roundtrip(tmp_path: Path) -> None:
+    """T3 named test (Stage 12 D10) — skops migration round-trip guard.
+
+    The Stage 12 D10 Ctrl+G reversal moved every model family off
+    :mod:`joblib` and onto :mod:`skops.io` for security.  This test
+    asserts the round-trip behaviour the migration must preserve:
+
+    (a) ``save()`` writes a single ``.skops`` file at the given path —
+        no ``.tmp`` sibling left behind, no joblib artefact, no extra
+        sidecars (the atomic-write contract from Stage 4 carries over
+        unchanged across the serialiser flip).
+    (b) ``load()`` reconstructs an instance that conforms to the Stage 4
+        :class:`Model` protocol (``runtime_checkable`` ``isinstance`` —
+        every save / load round-trip must preserve protocol shape).
+    (c) ``load()`` rejects an artefact whose top-level ``format`` tag is
+        wrong with :class:`TypeError`, naming the unexpected tag.  This
+        is the discriminator that prevents a NaiveModel envelope (or any
+        other dict envelope) from being silently loaded as if it were an
+        :class:`NnTemporalModel`.
+    (d) **D9 load-bearing assertion** — single-row predict after load
+        equals single-row predict pre-save under :func:`torch.equal`.
+        The Ctrl+G reversal kept ``nn_temporal`` as a first-class
+        family; if a future refactor breaks the warmup-prefix
+        reconstruction (e.g. forgets to restore the
+        :class:`pandas.DatetimeIndex` from the int64 nanos vector), the
+        per-row predict will silently drift and this test fails.
+
+    Plan clauses: Stage 12 plan §Task T3 ("test_nn_temporal_save_load_
+    skops_roundtrip — load-bearing for D9 reversal") + D10 (skops
+    migration) + Stage 11 D5 (single-envelope) + Stage 4 Model protocol.
+    """
+    from bristol_ml.models.io import save_skops
+    from bristol_ml.models.protocol import Model
+
+    features, target = _tiny_temporal_fixture()
+    model_before = NnTemporalModel(_cpu_temporal_config())
+    model_before.fit(features, target, seed=17)
+
+    artefact_dir = tmp_path / "artefact"
+    artefact_path = artefact_dir / "model.skops"
+    model_before.save(artefact_path)
+
+    # (a) Atomic-write contract: exactly one file at ``path`` and no
+    # stray ``.tmp`` sibling.
+    siblings = sorted(p.name for p in artefact_dir.iterdir())
+    assert siblings == ["model.skops"], (
+        "skops migration must preserve the atomic single-file save "
+        f"contract; got siblings {siblings!r}."
+    )
+
+    model_after = NnTemporalModel.load(artefact_path)
+
+    # (b) Protocol conformance — runtime_checkable.
+    assert isinstance(model_after, Model), (
+        "Loaded NnTemporalModel must satisfy the Stage 4 Model protocol "
+        "(runtime_checkable isinstance)."
+    )
+
+    # (c) Wrong-tag rejection: write a foreign envelope and assert
+    # ``load`` raises TypeError naming the mismatch.
+    bad_path = tmp_path / "wrong_tag.skops"
+    save_skops({"format": "naive-state-v1", "config_dump": {}}, bad_path)
+    with pytest.raises(TypeError, match=r"format tag|nn-temporal-state"):
+        NnTemporalModel.load(bad_path)
+
+    # (d) Single-row predict identity — load-bearing for D9.  Take the
+    # last single row of ``features`` and assert that the model's
+    # one-row predict before and after save matches under torch.equal.
+    one_row = features.iloc[[-1]]
+    pred_before = model_before.predict(one_row)
+    pred_after = model_after.predict(one_row)
+    assert torch.equal(
+        torch.from_numpy(pred_before.to_numpy()),
+        torch.from_numpy(pred_after.to_numpy()),
+    ), (
+        "D9 reversal: single-row predict after load must equal single-row "
+        "predict pre-save bit-exactly on CPU.  A mismatch points at the "
+        "warmup-prefix reconstruction (DatetimeIndex from int64 nanos + tz "
+        "string + columns) drifting from the saved DataFrame, or at the "
+        "scaler buffers not riding cleanly through state_dict."
+    )
+    assert pred_after.index.equals(pred_before.index), (
+        "Single-row predict index must round-trip; harness alignment "
+        "contract (evaluation-layer §5)."
+    )
