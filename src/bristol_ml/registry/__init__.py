@@ -1,11 +1,16 @@
-"""Filesystem-backed model registry (Stage 9).
+"""Filesystem-backed model registry (Stage 9; Stage 12 migrated to skops).
 
 Four-verb public surface — :func:`save`, :func:`load`, :func:`list_runs`,
 :func:`describe` — storing one run per call under
-``{DEFAULT_REGISTRY_DIR}/{run_id}/`` with ``artefact/model.joblib`` and a
-``run.json`` sidecar.  The Stage 9 pedagogical moment is a single CLI
-command that prints a leaderboard of every registered model ranked by a
-chosen metric (intent §Demo moment):
+``{DEFAULT_REGISTRY_DIR}/{run_id}/`` with ``artefact/model.skops`` and a
+``run.json`` sidecar.  Stage 12 D10 (Ctrl+G reversal) flipped the
+canonical artefact filename from ``model.joblib`` to ``model.skops``;
+:func:`load` rejects pre-Stage-12 joblib artefacts with a clear error
+pointing the operator at the retraining migration path.
+
+The Stage 9 pedagogical moment is a single CLI command that prints a
+leaderboard of every registered model ranked by a chosen metric
+(intent §Demo moment):
 
 .. code-block:: bash
 
@@ -231,7 +236,12 @@ def load(run_id: str, *, registry_dir: Path | None = None) -> Model:
     ------
     FileNotFoundError
         If ``run_id`` is not present under ``registry_dir`` or its
-        ``run.json`` / ``artefact/model.joblib`` is missing.
+        ``run.json`` / ``artefact/model.skops`` is missing.
+    RuntimeError
+        If the run directory contains a pre-Stage-12 ``model.joblib``
+        artefact (joblib loads are disabled at the registry boundary
+        for security under Stage 12 D10 — the operator must retrain
+        to migrate to skops).
     ValueError
         If the sidecar's ``type`` field is not one of the four
         registered model types.
@@ -240,7 +250,9 @@ def load(run_id: str, *, registry_dir: Path | None = None) -> Model:
     registry_root = registry_dir if registry_dir is not None else DEFAULT_REGISTRY_DIR
     run_dir = _run_dir(registry_root, run_id)
     sidecar_path = run_dir / "run.json"
-    artefact_path = run_dir / "artefact" / "model.joblib"
+    artefact_dir = run_dir / "artefact"
+    artefact_path = artefact_dir / "model.skops"
+    legacy_joblib_path = artefact_dir / "model.joblib"
     if not sidecar_path.is_file():
         raise FileNotFoundError(
             f"No registered run at {run_dir!s}; expected a run.json sidecar. "
@@ -248,6 +260,16 @@ def load(run_id: str, *, registry_dir: Path | None = None) -> Model:
             "pass registry_dir=..."
         )
     if not artefact_path.is_file():
+        # Stage 12 D10: a pre-existing model.joblib artefact is a hard
+        # security failure rather than a missing-file case — joblib is
+        # an unrestricted unpickler and the registry is now skops-only.
+        if legacy_joblib_path.is_file():
+            raise RuntimeError(
+                f"Registry artefact at {legacy_joblib_path!s} is in the "
+                "pre-Stage-12 joblib format; retrain to migrate to skops "
+                "(Stage 12 D10 — joblib loads are disabled at the registry "
+                "boundary for security)."
+            )
         raise FileNotFoundError(
             f"Registered run {run_id!r} is missing its artefact at {artefact_path!s}. "
             "The run directory is in a partial state; try re-saving."

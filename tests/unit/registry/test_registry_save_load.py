@@ -90,8 +90,13 @@ def _assert_run_layout(tmp_path: Path, run_id: str) -> Path:
     """Assert the D1 on-disk layout and return the run directory."""
     run_dir = tmp_path / run_id
     assert run_dir.is_dir(), f"expected run directory {run_dir} to exist"
-    assert (run_dir / "artefact" / "model.joblib").is_file(), (
-        "expected artefact/model.joblib to be written by the model protocol"
+    assert (run_dir / "artefact" / "model.skops").is_file(), (
+        "expected artefact/model.skops to be written by the model protocol "
+        "(Stage 12 D10 — registry artefact filename migrated from .joblib)"
+    )
+    assert not (run_dir / "artefact" / "model.joblib").exists(), (
+        "no .joblib artefact must remain alongside the .skops file "
+        "(Stage 12 D10 — joblib is disabled at the registry boundary)"
     )
     assert (run_dir / "run.json").is_file(), "expected run.json sidecar to be written"
     # Atomic-write (D5) invariant: no staging directories left behind.

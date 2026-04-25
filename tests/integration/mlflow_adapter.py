@@ -67,8 +67,10 @@ class RegistryPyfuncAdapter(mlflow.pyfunc.PythonModel):
 
         MLflow passes the resolved artefact path via
         ``context.artifacts["registry_run"]`` — this is the registry
-        ``run_dir`` (containing ``run.json`` + ``artefact/model.joblib``)
-        that :func:`package_run_as_pyfunc` staged at packaging time.
+        ``run_dir`` (containing ``run.json`` + ``artefact/model.skops``,
+        post-Stage-12 D10 — the canonical artefact filename was
+        ``model.joblib`` in Stages 9-11) that
+        :func:`package_run_as_pyfunc` staged at packaging time.
         """
         # Local import: keep the registry off the import graph of the
         # adapter module itself so plain ``import mlflow.pyfunc`` does
@@ -116,10 +118,14 @@ def package_run_as_pyfunc(run_id: str, dst: Path, *, registry_dir: Path) -> None
         Registry root containing the ``run_id`` directory.
 
     The produced MLflow artefact bundles the full registry run directory
-    (both the sidecar and the joblib) into its ``artifacts/`` tree so
-    :func:`mlflow.pyfunc.load_model` reconstructs the original via
-    :func:`bristol_ml.registry.load` without needing the original
-    registry directory to still exist on disk.
+    (both the sidecar and the skops artefact) into its ``artifacts/``
+    tree so :func:`mlflow.pyfunc.load_model` reconstructs the original
+    via :func:`bristol_ml.registry.load` without needing the original
+    registry directory to still exist on disk.  Stage 12 D10 (Ctrl+G
+    reversal) flipped the canonical artefact filename from
+    ``model.joblib`` to ``model.skops``; the bundling logic is
+    artefact-agnostic so this comment is the only place the filename
+    is named.
     """
     if dst.exists():
         # mlflow.pyfunc.save_model refuses to overwrite an existing path.

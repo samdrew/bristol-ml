@@ -119,7 +119,12 @@ def _sidecar(run_id: str) -> SidecarFields:
 
 
 def test_atomic_write_run_produces_expected_layout(tmp_path: Path) -> None:
-    """``_atomic_write_run`` creates ``{run_id}/artefact/model.joblib`` + ``run.json``."""
+    """``_atomic_write_run`` creates ``{run_id}/artefact/model.skops`` + ``run.json``.
+
+    Stage 12 D10 (Ctrl+G reversal): the canonical artefact filename
+    inside ``artefact/`` is ``model.skops``; the registry writes
+    nothing else (no stray ``model.joblib`` and no ``.tmp`` siblings).
+    """
     run_id = "m_20260423T1430"
     final = _atomic_write_run(
         tmp_path,
@@ -128,7 +133,8 @@ def test_atomic_write_run_produces_expected_layout(tmp_path: Path) -> None:
         sidecar=_sidecar(run_id),
     )
     assert final == _run_dir(tmp_path, run_id)
-    assert (final / "artefact" / "model.joblib").exists()
+    assert (final / "artefact" / "model.skops").exists()
+    assert not (final / "artefact" / "model.joblib").exists()
     assert (final / "run.json").exists()
     # No staging directories left behind.
     assert not list(tmp_path.glob(".tmp_*"))
@@ -150,7 +156,7 @@ def test_atomic_write_run_last_write_wins_on_collision(tmp_path: Path) -> None:
         sidecar=_sidecar(run_id),
     )
     final = _run_dir(tmp_path, run_id)
-    assert (final / "artefact" / "model.joblib").read_bytes() == b"second"
+    assert (final / "artefact" / "model.skops").read_bytes() == b"second"
 
 
 def test_atomic_write_run_cleans_up_staging_on_error(tmp_path: Path) -> None:
