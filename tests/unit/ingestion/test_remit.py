@@ -18,18 +18,24 @@ All tests are pure in-memory — no disk I/O, no mocks, no cassettes.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from bristol_ml.ingestion import remit
 from bristol_ml.ingestion.remit import (
     FUEL_TYPES,
     MESSAGE_STATUSES,
     OUTPUT_SCHEMA,
     as_of,
 )
+from conf._schemas import RemitIngestionConfig
 
 # ---------------------------------------------------------------------------
 # Canonical "now" anchor used across all tests (UTC-aware, readable value).
@@ -255,8 +261,7 @@ def test_as_of_open_ended_effective_to_treated_as_active() -> None:
     result = as_of(df, T)
 
     assert len(result) == 1, (
-        f"Open-ended (effective_to=NaT) row must appear in as_of result; "
-        f"got {len(result)} row(s)."
+        f"Open-ended (effective_to=NaT) row must appear in as_of result; got {len(result)} row(s)."
     )
     assert result.iloc[0]["mrid"] == "MSG-004"
     assert pd.isna(result.iloc[0]["effective_to"]), (
@@ -325,7 +330,7 @@ def test_output_schema_columns_and_types_pinned() -> None:
     temporal_columns = {
         "published_at": {"type": utc_timestamp_type, "nullable": False},
         "effective_from": {"type": utc_timestamp_type, "nullable": False},
-        "effective_to": {"type": utc_timestamp_type, "nullable": True},   # D10 load-bearing
+        "effective_to": {"type": utc_timestamp_type, "nullable": True},  # D10 load-bearing
         "retrieved_at_utc": {"type": utc_timestamp_type, "nullable": False},
     }
 
@@ -350,14 +355,20 @@ def test_output_schema_columns_and_types_pinned() -> None:
         )
 
     # --- Spot-check a few nullable columns (asset / capacity axis) ---
-    nullable_columns = ("affected_unit", "asset_id", "fuel_type", "affected_mw",
-                        "normal_capacity_mw", "event_type", "cause", "message_description")
+    nullable_columns = (
+        "affected_unit",
+        "asset_id",
+        "fuel_type",
+        "affected_mw",
+        "normal_capacity_mw",
+        "event_type",
+        "cause",
+        "message_description",
+    )
     for col in nullable_columns:
         assert col in schema_names, f"Column {col!r} missing from OUTPUT_SCHEMA."
         field = OUTPUT_SCHEMA.field(col)
-        assert field.nullable, (
-            f"Column {col!r} must be nullable; got nullable=False."
-        )
+        assert field.nullable, f"Column {col!r} must be nullable; got nullable=False."
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +394,164 @@ def test_fuel_types_is_non_empty_closed_set() -> None:
         assert isinstance(item, str), f"Every FUEL_TYPES entry must be a str; got {type(item)}."
     # Nuclear is the pedagogically prominent fuel type named in the intent §Demo moment.
     assert "Nuclear" in FUEL_TYPES, "'Nuclear' must be in FUEL_TYPES (intent §Demo moment)."
+
+
+# ---------------------------------------------------------------------------
+# T3 — stub fetch + load + CLI
+# ---------------------------------------------------------------------------
+#
+# Tests in this section exercise the paths wired at Stage 13 Task T3:
+#   - fetch(config, cache=REFRESH) with BRISTOL_ML_REMIT_STUB=1
+#   - load(path) round-trip (schema, timestamp tz, NaT open-ended rows)
+#   - CacheMissingError from CachePolicy.OFFLINE with no warm cache
+#   - Standalone CLI (python -m bristol_ml.ingestion.remit --help)
+#
+# All five tests are drawn from plan §6 T3 and §4 acceptance criteria
+# (AC-2/AC-5/NFR-2/AC-11).  No cassette or live network needed.
+# ---------------------------------------------------------------------------
+
+
+def _build_remit_config(tmp_path: Path) -> RemitIngestionConfig:
+    """Return a ``RemitIngestionConfig`` pointing at ``tmp_path``.
+
+    All protocol fields take their declared defaults; only ``cache_dir``
+    and ``cache_filename`` are overridden so the cache lands under the
+    test's temporary directory.
+    """
+    return RemitIngestionConfig(cache_dir=tmp_path, cache_filename="remit.parquet")
+
+
+def test_fetch_with_stub_env_var_writes_canonical_parquet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins NFR-2 + D12 + AC-3: stub path writes a valid parquet with 10 rows.
+
+    When ``BRISTOL_ML_REMIT_STUB=1`` is set, ``fetch`` with
+    ``CachePolicy.REFRESH`` must:
+
+    1. Return a path equal to ``cache_dir / cache_filename`` and that path
+       must exist on disk.
+    2. Produce a parquet file whose arrow schema equals ``OUTPUT_SCHEMA``
+       exactly (16 columns, correct types, correct nullability).
+    3. Contain exactly 10 rows — the ten hand-crafted records in
+       ``_stub_records()``.
+    """
+    monkeypatch.setenv("BRISTOL_ML_REMIT_STUB", "1")
+    cfg = _build_remit_config(tmp_path)
+
+    result_path = remit.fetch(cfg, cache=remit.CachePolicy.REFRESH)
+
+    expected_path = tmp_path / "remit.parquet"
+    assert result_path == expected_path, (
+        f"fetch must return cache_dir / cache_filename; got {result_path}."
+    )
+    assert result_path.exists(), f"Parquet file must exist at {result_path}."
+
+    table = pq.read_table(result_path)
+    assert table.schema == remit.OUTPUT_SCHEMA, (
+        f"On-disk schema does not match OUTPUT_SCHEMA.\n"
+        f"Got:      {table.schema}\n"
+        f"Expected: {remit.OUTPUT_SCHEMA}"
+    )
+    assert table.num_rows == 10, f"Stub fixture must write exactly 10 rows; got {table.num_rows}."
+
+
+def test_load_round_trips_all_four_timestamps_with_tz_utc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins D8 + D18g + AC-5: all four temporal columns round-trip with tz=UTC.
+
+    After a stub fetch and a ``load``, each of the four temporal columns
+    must carry a ``pd.DatetimeTZDtype`` whose ``tz`` attribute resolves to
+    ``'UTC'``.  This pins the plan §5 requirement that no naive datetimes
+    survive the parquet round-trip (NFR-7).
+    """
+    monkeypatch.setenv("BRISTOL_ML_REMIT_STUB", "1")
+    cfg = _build_remit_config(tmp_path)
+    path = remit.fetch(cfg, cache=remit.CachePolicy.REFRESH)
+
+    df = remit.load(path)
+
+    temporal_columns = ("published_at", "effective_from", "effective_to", "retrieved_at_utc")
+    for col in temporal_columns:
+        assert col in df.columns, f"Column {col!r} missing from loaded frame."
+        dtype = df[col].dtype
+        assert isinstance(dtype, pd.DatetimeTZDtype), (
+            f"Column {col!r} must have pd.DatetimeTZDtype; got {dtype!r}."
+        )
+        assert str(dtype.tz) == "UTC", f"Column {col!r} must have tz='UTC'; got tz={dtype.tz!r}."
+
+
+def test_load_round_trips_open_ended_effective_to_as_pd_nat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins D10 + D18g + AC-5: open-ended rows have effective_to == pd.NaT.
+
+    The stub fixture contains exactly two open-ended records: ``M-D``
+    (Wind) and ``M-F`` (Hydro), both with ``effective_to=None``.
+    After a parquet round-trip via ``load``, those two rows must carry
+    ``pd.NaT`` in ``effective_to`` and all other rows must be non-null.
+    """
+    monkeypatch.setenv("BRISTOL_ML_REMIT_STUB", "1")
+    cfg = _build_remit_config(tmp_path)
+    path = remit.fetch(cfg, cache=remit.CachePolicy.REFRESH)
+
+    df = remit.load(path)
+
+    null_count = df["effective_to"].isna().sum()
+    assert null_count == 2, f"Exactly 2 open-ended rows expected (M-D + M-F); got {null_count}."
+    open_ended_mrids = set(df.loc[df["effective_to"].isna(), "mrid"])
+    assert open_ended_mrids == {"M-D", "M-F"}, (
+        f"Open-ended mRIDs must be exactly {{'M-D', 'M-F'}}; got {open_ended_mrids}."
+    )
+
+
+def test_fetch_offline_without_cache_raises_cache_missing(tmp_path: Path) -> None:
+    """Pins AC-2 + D18d + NFR-6: CachePolicy.OFFLINE raises when the cache is absent.
+
+    An empty ``cache_dir`` with ``CachePolicy.OFFLINE`` must raise
+    ``CacheMissingError``.  The stub env var need not be set — the
+    ``OFFLINE`` branch checks for the cache file before deciding whether
+    to reach the network (or the stub), so the test exercises the guard
+    path regardless.
+
+    The raised error message must contain the absolute cache path so the
+    user knows where to place the missing file.
+    """
+    cfg = _build_remit_config(tmp_path)
+    expected_cache = tmp_path / "remit.parquet"
+    assert not expected_cache.exists(), "Pre-condition: cache must be absent before the call."
+
+    with pytest.raises(remit.CacheMissingError) as exc_info:
+        remit.fetch(cfg, cache=remit.CachePolicy.OFFLINE)
+
+    error_text = str(exc_info.value)
+    assert str(expected_cache) in error_text, (
+        f"CacheMissingError message must contain the absolute cache path "
+        f"{str(expected_cache)!r}; got: {error_text!r}"
+    )
+
+
+def test_remit_module_runs_standalone() -> None:
+    """Pins AC-11 + NFR-2: ``python -m bristol_ml.ingestion.remit --help`` exits 0.
+
+    Every ingestion module must be runnable as ``python -m <module>``
+    (DESIGN §2.1.1).  The ``--help`` flag exercises the CLI entry point
+    without performing any network access or requiring a warm cache,
+    and provides a smoke test that the module imports cleanly and the
+    argparse surface is wired.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "bristol_ml.ingestion.remit", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--help must exit 0; got {result.returncode}.\n"
+        f"stdout: {result.stdout!r}\n"
+        f"stderr: {result.stderr!r}"
+    )
+    assert "usage:" in result.stdout.lower(), (
+        f"--help output must contain 'usage:'; got stdout: {result.stdout!r}"
+    )

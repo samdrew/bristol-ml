@@ -46,17 +46,31 @@ Run standalone (principle §2.1.1)::
 
 from __future__ import annotations
 
+import argparse
+import os
+import sys
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
+from loguru import logger
 
 from bristol_ml.ingestion._common import (
     CacheMissingError,
     CachePolicy,
+    _atomic_write,
+    _cache_path,
 )
 from conf._schemas import RemitIngestionConfig
+
+# Env-var trigger for the stub fetch path (NFR-2 / DESIGN §2.1.3).  The
+# CI default is ``BRISTOL_ML_REMIT_STUB=1``; setting it to anything other
+# than ``"1"`` (or leaving it unset) takes the live fetch path.
+_STUB_ENV_VAR: Final[str] = "BRISTOL_ML_REMIT_STUB"
 
 # ---------------------------------------------------------------------------
 # Public surface
@@ -150,22 +164,386 @@ def fetch(
 ) -> Path:
     """Fetch REMIT messages from the Insights API or reuse a local cache.
 
-    *Stub at T2 — implementation lands in T3 (stub path) and T4 (live path).*
+    Behaviour matches the layer contract:
+
+    - ``AUTO``: if the cache file exists, return it without touching the
+      network.  Otherwise fetch and persist.
+    - ``REFRESH``: fetch and overwrite the cache atomically.
+    - ``OFFLINE``: return the cache if present; raise
+      :class:`CacheMissingError` if not.
+
+    Stub-first: when ``BRISTOL_ML_REMIT_STUB=1`` is set in the
+    environment, the "fetch" step builds a small in-memory record set
+    (:func:`_stub_records`) instead of calling the live Insights API.
+    The on-disk schema is identical, so notebook + CI exercise the same
+    `load` / `as_of` code paths against deterministic fixture data
+    (NFR-2 / DESIGN §2.1.3).  The live path lands at T4.
     """
-    raise NotImplementedError(
-        "remit.fetch is stubbed at T2; T3 wires the stub path and T4 the "
-        "live path against /datasets/REMIT/stream."
+    cache_path = _cache_path(config)
+
+    if cache is CachePolicy.OFFLINE:
+        if not cache_path.exists():
+            raise CacheMissingError(
+                f"REMIT cache not found at {cache_path}. "
+                "Re-run with CachePolicy.AUTO (or REFRESH) to populate it."
+            )
+        logger.info("REMIT cache hit (offline) at {}", cache_path)
+        return cache_path
+
+    if cache is CachePolicy.AUTO and cache_path.exists():
+        logger.info("REMIT cache hit (auto) at {}", cache_path)
+        return cache_path
+
+    use_stub = os.environ.get(_STUB_ENV_VAR) == "1"
+    logger.info(
+        "REMIT fetch: {}{} → {} (policy={})",
+        config.base_url,
+        config.endpoint_path,
+        cache_path,
+        cache.value,
     )
+    retrieved_at = datetime.now(UTC).replace(microsecond=0)
+
+    if use_stub:
+        logger.info("REMIT fetch via stub fixture ({}=1)", _STUB_ENV_VAR)
+        records = _stub_records()
+    else:  # pragma: no cover — wired in T4
+        raise NotImplementedError(
+            "remit.fetch live path is stubbed until Stage 13 T4. "
+            f"Set {_STUB_ENV_VAR}=1 to use the in-memory stub fixture."
+        )
+
+    table = _to_arrow(records, retrieved_at=retrieved_at)
+    _atomic_write(table, cache_path)
+    logger.info(
+        "REMIT cache written: {} row(s) covering {} mRID(s) → {}",
+        table.num_rows,
+        len({r["mrid"] for r in records}),
+        cache_path,
+    )
+    return cache_path
 
 
 def load(path: Path) -> pd.DataFrame:
-    """Read the cached REMIT parquet and assert the schema.
+    """Read the cached REMIT parquet; assert the schema; return a frame.
 
-    *Stub at T2 — implementation lands in T3.*
+    The returned dataframe carries the canonical schema declared on
+    :data:`OUTPUT_SCHEMA`.  All four temporal columns
+    (``published_at``, ``effective_from``, ``effective_to``,
+    ``retrieved_at_utc``) round-trip with ``tz=UTC``; ``effective_to``
+    is ``pd.NaT`` for open-ended events (D10).
+
+    A schema mismatch raises :class:`ValueError` naming the offending
+    column — the on-disk type or the missing-column case.
     """
-    raise NotImplementedError(
-        "remit.load is stubbed at T2; T3 wires the parquet read."
+    table = pq.read_table(path)
+    actual = table.schema
+    for field in OUTPUT_SCHEMA:
+        if field.name not in actual.names:
+            raise ValueError(
+                f"Cached REMIT parquet at {path} is missing required column {field.name!r}"
+            )
+        actual_field = actual.field(field.name)
+        if actual_field.type != field.type:
+            raise ValueError(
+                f"Column {field.name!r} in {path} has type {actual_field.type}; "
+                f"expected {field.type}"
+            )
+    return table.to_pandas(types_mapper=None)
+
+
+# ---------------------------------------------------------------------------
+# Stub fixture (NFR-2 / DESIGN §2.1.3).  Ten hand-crafted records covering
+# all four AC-1 cases (fresh / revised / withdrawn / open-ended).  The
+# shape exactly matches the live ``OUTPUT_SCHEMA`` so notebook + CI
+# exercise the same load/as_of code paths against deterministic data.
+# ---------------------------------------------------------------------------
+
+
+def _stub_records() -> list[dict[str, Any]]:
+    """Return the canonical stub fixture for offline / CI use.
+
+    Ten records spanning seven mRIDs:
+
+    - ``M-A`` — fresh single-revision Active (Nuclear, closed window).
+    - ``M-B`` — three revisions 0/1/2, all Active (Gas, end-time extended
+      across revisions; tests "latest revision wins").
+    - ``M-C`` — two revisions: rev 0 Active, rev 1 Withdrawn (Coal;
+      tests as-of withdrawal exclusion).
+    - ``M-D`` — single revision, ``effective_to=None`` (Wind; open-ended).
+    - ``M-E`` — fresh single-revision Active (Nuclear, larger MW).
+    - ``M-F`` — single revision, ``effective_to=None`` (Hydro; open-ended).
+    - ``M-G`` — fresh single-revision Active (Solar, closed window).
+
+    All times are UTC-aware ``datetime`` objects so the arrow cast picks
+    them up as ``timestamp[us, tz=UTC]`` directly.
+    """
+
+    def utc(year: int, month: int, day: int, hour: int = 0) -> datetime:
+        return datetime(year, month, day, hour, tzinfo=UTC)
+
+    return [
+        # M-A: fresh, single revision, closed window
+        {
+            "mrid": "M-A",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 1, 1, 9),
+            "effective_from": utc(2024, 1, 15),
+            "effective_to": utc(2024, 1, 20),
+            "affected_unit": "T_HARTLEPOOL-1",
+            "asset_id": "T_HARTLEPOOL-1",
+            "fuel_type": "Nuclear",
+            "affected_mw": 600.0,
+            "normal_capacity_mw": 1180.0,
+            "event_type": "Outage",
+            "cause": "Planned",
+            "message_description": "Stub: planned nuclear outage for refuelling.",
+        },
+        # M-B: revised three times — all Active, latest revision wins
+        {
+            "mrid": "M-B",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 2, 1, 10),
+            "effective_from": utc(2024, 2, 10),
+            "effective_to": utc(2024, 2, 15),
+            "affected_unit": "T_PEMBROKE-1",
+            "asset_id": "T_PEMBROKE-1",
+            "fuel_type": "Gas",
+            "affected_mw": 400.0,
+            "normal_capacity_mw": 540.0,
+            "event_type": "Outage",
+            "cause": "Unplanned",
+            "message_description": "Stub: gas unit unplanned outage.",
+        },
+        {
+            "mrid": "M-B",
+            "revision_number": 1,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 2, 2, 11),
+            "effective_from": utc(2024, 2, 10),
+            "effective_to": utc(2024, 2, 16),
+            "affected_unit": "T_PEMBROKE-1",
+            "asset_id": "T_PEMBROKE-1",
+            "fuel_type": "Gas",
+            "affected_mw": 400.0,
+            "normal_capacity_mw": 540.0,
+            "event_type": "Outage",
+            "cause": "Unplanned",
+            "message_description": "Stub: extended end time after diagnostics.",
+        },
+        {
+            "mrid": "M-B",
+            "revision_number": 2,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 2, 3, 12),
+            "effective_from": utc(2024, 2, 10),
+            "effective_to": utc(2024, 2, 18),
+            "affected_unit": "T_PEMBROKE-1",
+            "asset_id": "T_PEMBROKE-1",
+            "fuel_type": "Gas",
+            "affected_mw": 380.0,
+            "normal_capacity_mw": 540.0,
+            "event_type": "Outage",
+            "cause": "Unplanned",
+            "message_description": "Stub: derate revised slightly downward.",
+        },
+        # M-C: rev 0 Active, rev 1 Withdrawn (excluded from as-of after t-1h)
+        {
+            "mrid": "M-C",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 3, 1, 8),
+            "effective_from": utc(2024, 3, 5),
+            "effective_to": utc(2024, 3, 8),
+            "affected_unit": "T_RATCLIFFE-1",
+            "asset_id": "T_RATCLIFFE-1",
+            "fuel_type": "Coal",
+            "affected_mw": 500.0,
+            "normal_capacity_mw": 500.0,
+            "event_type": "Outage",
+            "cause": "Planned",
+            "message_description": "Stub: coal unit outage — later withdrawn.",
+        },
+        {
+            "mrid": "M-C",
+            "revision_number": 1,
+            "message_type": "Production",
+            "message_status": "Withdrawn",
+            "published_at": utc(2024, 3, 2, 9),
+            "effective_from": utc(2024, 3, 5),
+            "effective_to": utc(2024, 3, 8),
+            "affected_unit": "T_RATCLIFFE-1",
+            "asset_id": "T_RATCLIFFE-1",
+            "fuel_type": "Coal",
+            "affected_mw": 500.0,
+            "normal_capacity_mw": 500.0,
+            "event_type": "Outage",
+            "cause": "Planned",
+            "message_description": "Stub: message withdrawn by participant.",
+        },
+        # M-D: open-ended event (effective_to=None)
+        {
+            "mrid": "M-D",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 4, 1, 14),
+            "effective_from": utc(2024, 4, 10),
+            "effective_to": None,
+            "affected_unit": "T_HOWA-1",
+            "asset_id": "T_HOWA-1",
+            "fuel_type": "Wind",
+            "affected_mw": 250.0,
+            "normal_capacity_mw": 600.0,
+            "event_type": "Restriction",
+            "cause": "Forced",
+            "message_description": "Stub: open-ended wind farm restriction.",
+        },
+        # M-E: fresh, single revision, closed window — second nuclear datapoint
+        {
+            "mrid": "M-E",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 5, 1, 7),
+            "effective_from": utc(2024, 5, 15),
+            "effective_to": utc(2024, 5, 20),
+            "affected_unit": "T_HEYSHAM-1",
+            "asset_id": "T_HEYSHAM-1",
+            "fuel_type": "Nuclear",
+            "affected_mw": 1100.0,
+            "normal_capacity_mw": 1100.0,
+            "event_type": "Outage",
+            "cause": "Planned",
+            "message_description": "Stub: planned nuclear maintenance.",
+        },
+        # M-F: open-ended hydro restriction
+        {
+            "mrid": "M-F",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 6, 1, 9),
+            "effective_from": utc(2024, 6, 5),
+            "effective_to": None,
+            "affected_unit": "T_DINORWIG-1",
+            "asset_id": "T_DINORWIG-1",
+            "fuel_type": "Hydro",
+            "affected_mw": 100.0,
+            "normal_capacity_mw": 288.0,
+            "event_type": "Restriction",
+            "cause": "Planned",
+            "message_description": "Stub: open-ended hydro restriction.",
+        },
+        # M-G: fresh, single revision, closed window — solar
+        {
+            "mrid": "M-G",
+            "revision_number": 0,
+            "message_type": "Production",
+            "message_status": "Active",
+            "published_at": utc(2024, 7, 1, 10),
+            "effective_from": utc(2024, 7, 5),
+            "effective_to": utc(2024, 7, 12),
+            "affected_unit": "T_CLEVE-1",
+            "asset_id": "T_CLEVE-1",
+            "fuel_type": "Solar",
+            "affected_mw": 150.0,
+            "normal_capacity_mw": 200.0,
+            "event_type": "Outage",
+            "cause": "Forced",
+            "message_description": "Stub: solar inverter fault.",
+        },
+    ]
+
+
+def _to_arrow(
+    records: Sequence[dict[str, Any]],
+    *,
+    retrieved_at: datetime,
+) -> pa.Table:
+    """Cast the canonical record list to an arrow table matching ``OUTPUT_SCHEMA``.
+
+    ``records`` carry every column on the schema except
+    ``retrieved_at_utc`` — that is project-axis provenance the ingester
+    stamps once per fetch (NFR-9).
+
+    Sorted by ``(published_at ASC, mrid ASC, revision_number ASC)`` so
+    the on-disk parquet is deterministic for byte-identical idempotent
+    re-fetch (D18c, AC-4 / NFR-1).
+    """
+    if not records:
+        raise RuntimeError("REMIT fetch produced zero records; refusing to persist an empty cache.")
+    frame = pd.DataFrame.from_records(list(records))
+    frame["retrieved_at_utc"] = retrieved_at
+    frame = frame.sort_values(
+        ["published_at", "mrid", "revision_number"], kind="stable"
+    ).reset_index(drop=True)
+
+    # Project to the canonical column order before casting so the arrow
+    # table's field order matches OUTPUT_SCHEMA exactly.
+    frame = frame[[field.name for field in OUTPUT_SCHEMA]]
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    return table.cast(OUTPUT_SCHEMA, safe=True)
+
+
+# ---------------------------------------------------------------------------
+# CLI — ``python -m bristol_ml.ingestion.remit``
+# ---------------------------------------------------------------------------
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m bristol_ml.ingestion.remit",
+        description=(
+            "Fetch and persist REMIT messages from the Elexon Insights API. "
+            "Reads `conf/config.yaml` via Hydra; prints the resulting cache path. "
+            f"Set {_STUB_ENV_VAR}=1 in the environment to use the stub fixture."
+        ),
     )
+    parser.add_argument(
+        "--cache",
+        choices=[p.value for p in CachePolicy],
+        default=CachePolicy.AUTO.value,
+        help="Cache policy: auto (default), refresh (force re-fetch), offline (cache only).",
+    )
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        help="Hydra overrides, e.g. ingestion.remit.cache_dir=/tmp/remit",
+    )
+    return parser
+
+
+def _cli_main(argv: Iterable[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    # Imported locally so ``--help`` does not pull Hydra into the import chain.
+    from bristol_ml.config import load_config
+
+    cfg = load_config(overrides=list(args.overrides))
+    if cfg.ingestion.remit is None:
+        print(
+            "No REMIT ingestion config resolved. Ensure "
+            "`ingestion/remit@ingestion.remit` is in "
+            "`conf/config.yaml` defaults.",
+            file=sys.stderr,
+        )
+        return 2
+    path = fetch(cfg.ingestion.remit, cache=CachePolicy(args.cache))
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — CLI wrapper
+    raise SystemExit(_cli_main())
 
 
 def as_of(df: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:

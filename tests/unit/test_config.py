@@ -993,17 +993,13 @@ def test_remit_config_round_trips_through_hydra() -> None:
 
     assert cfg.ingestion is not None
     remit = cfg.ingestion.remit
-    assert remit is not None, (
-        "D3: cfg.ingestion.remit must be populated from the defaults list."
-    )
+    assert remit is not None, "D3: cfg.ingestion.remit must be populated from the defaults list."
     assert isinstance(remit, RemitIngestionConfig)
     assert "data.elexon.co.uk/bmrs/api/v1/" in str(remit.base_url), (
-        f"D5: base_url must point at the unauthenticated Insights API; "
-        f"got {remit.base_url!r}."
+        f"D5: base_url must point at the unauthenticated Insights API; got {remit.base_url!r}."
     )
     assert remit.endpoint_path == "datasets/REMIT/stream", (
-        f"D4: endpoint_path must be the stream endpoint (no 24h cap); "
-        f"got {remit.endpoint_path!r}."
+        f"D4: endpoint_path must be the stream endpoint (no 24h cap); got {remit.endpoint_path!r}."
     )
     assert remit.window_start == date(2018, 1, 1), (
         f"D6: default window_start must be 2018-01-01; got {remit.window_start}."
@@ -1057,9 +1053,7 @@ def test_ingestion_group_remit_field_defaults_to_none() -> None:
     """
     ig = IngestionGroup()
 
-    assert ig.remit is None, (
-        "Backwards-compat: IngestionGroup().remit must be None by default."
-    )
+    assert ig.remit is None, "Backwards-compat: IngestionGroup().remit must be None by default."
 
 
 def test_weather_calendar_override_cache_filename_from_yaml() -> None:
