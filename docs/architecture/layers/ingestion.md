@@ -32,7 +32,7 @@ Seven concrete ingestion modules land across the stage plan: NESO demand, NESO d
 | Derived aggregates (hourly from half-hourly, population-weighted national weather) | — | features layer (Stage 2 seeds `features/weather.py`) |
 | Holding state beyond the cache file | — | not anywhere |
 
-The split is enforced by the `fetch`/`load` public interface (below): a module that reaches outside those two callables is doing something that does not belong here.
+The split is enforced by the public interface (§2 below): a module that reaches outside the `fetch` / `load` core — plus, for event-log sources, a temporal-query primitive ([ADR-0007](../decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md)) — is doing something that does not belong here.
 
 ## Cross-module conventions
 
@@ -48,7 +48,14 @@ No dispatcher, no registry of ingestion names. Hydra's `_target_` pattern is the
 
 ### 2. Public interface
 
-Every module exposes exactly two public callables:
+The public surface bifurcates by the data shape an ingester targets — see [ADR-0007](../decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md) for the rationale and the rule a future event-log author follows.
+
+| Data shape | Public surface | Examples |
+|------------|----------------|----------|
+| **Level data** — one row per asset per timestamp; single canonical `timestamp_utc`. | `fetch` + `load`. Temporal queries are one-line pandas predicates the caller writes inline. | NESO demand, NESO forecast, weather, holidays — every Stage 1–5 ingester. |
+| **Event log** — append-only multi-temporal records (entity-id × revision grain, ≥ 2 publish-axis timestamps per row). | `fetch` + `load` + at least one *temporal-query primitive* (canonical: `as_of(df, t)`). The primitive is mandatory — temporal correctness of the data shape depends on it. | REMIT (Stage 13). |
+
+Every module exposes the load-bearing core:
 
 ```python
 def fetch(config: SourceConfig, *, cache: CachePolicy = CachePolicy.AUTO) -> Path: ...
@@ -62,6 +69,8 @@ def load(path: Path) -> pd.DataFrame: ...
   - `REFRESH` — always fetch, overwrite cache. Explicit.
   - `OFFLINE` — never touch the network; fail loudly if cache is missing. CI default.
 - `python -m bristol_ml.ingestion.<source>` is every module's CLI; it calls `fetch(config, cache=CachePolicy.AUTO)` and prints the resulting path. Satisfies §2.1.1.
+
+Event-log ingesters additionally expose at least one temporal-query primitive — for REMIT this is `as_of(df, t)`, documented in §"Bi-temporal storage shape" below. Level-data ingesters do not expose `as_of`; their callers compose the equivalent predicate inline. Promoting it to a shared verb across all ingesters would add four files of degenerate boilerplate without eliminating any failure mode (DESIGN §2.1.7); see ADR-0007 §Alternatives considered for the full reasoning.
 
 The enum is tri-valued deliberately — a boolean `force_refresh` collapses two distinct situations (cold-start-with-network and cold-start-without) into one codepath, and the collapsed version silently fetches in CI if someone ships a misconfiguration.
 
@@ -186,7 +195,7 @@ withdraw the message). That is the leakage failure mode the
 
 ## Upgrade seams
 
-Each of these is swappable without touching downstream code. The `fetch`/`load`/`CachePolicy` interface is what's load-bearing.
+Each of these is swappable without touching downstream code. The `fetch`/`load`/`CachePolicy` interface is what's load-bearing for every ingester; event-log ingesters also pin their temporal-query primitive (`as_of` for REMIT) — see [ADR-0007](../decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md).
 
 | Swappable | Load-bearing |
 |-----------|--------------|
@@ -211,7 +220,7 @@ Each of these is swappable without touching downstream code. The `fetch`/`load`/
 ## Open questions
 
 - **Shared `ingestion/_common.py` — trigger now met.** Stage 1 shipped with its atomic-write, retry wrapper, rate-limit helper, and cassette harness inlined. Stage 2 repeats all four. The extraction should happen *during* Stage 2 rather than speculatively before — two concrete callers is the threshold, and the candidate symbols are visible (`_atomic_write`, `_retrying_get`, `_RetryableStatusError`, `_respect_rate_limit`, a pytest-recording cassette fixture). Stage 2 LLD §11 records the extraction plan; Stage 13 is where bi-temporal storage may force further reshaping.
-- **Bi-temporal storage (Stage 13) — resolved.** REMIT shipped as a sibling ingester under `bristol_ml.ingestion.remit`, not a separate layer or a features-layer concern. Storage shape: four `timestamp[us, tz=UTC]` columns + append-only `(mrid, revision_number)` grain. The cross-stage convention now allows two storage shapes (single-timestamp level data, four-timestamp event data); see §"Bi-temporal storage shape". A formal ADR was deferred per the Stage 13 plan's Scope Diff (D17) — the layer doc is the canonical record until a future stage finds the choice contested.
+- **Bi-temporal storage (Stage 13) — resolved.** REMIT shipped as a sibling ingester under `bristol_ml.ingestion.remit`, not a separate layer or a features-layer concern. Storage shape: four `timestamp[us, tz=UTC]` columns + append-only `(mrid, revision_number)` grain. The cross-stage convention now allows two storage shapes (single-timestamp level data, four-timestamp event data); see §"Bi-temporal storage shape". The *contract* aspect — adding `as_of` to REMIT's public surface and bifurcating the layer's "exactly two public callables" rule by data shape — is governed by [ADR-0007](../decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md), recorded after Phase 3 review of Stage 13. The *storage shape* itself remains in this layer doc per the Stage 13 plan's Scope Diff (D17).
 - **Schema-discovery mode.** CKAN `package_show` and Elexon swagger both let a client enumerate resources at runtime. Today, year → UUID mapping for NESO is hand-maintained in `conf/ingestion/neso.yaml`. An opt-in discovery mode would remove the maintenance toil but adds complexity and runtime network dependence on metadata endpoints — not currently earned.
 - **Client-side throttling.** NESO's advertised 2 req/min on the datastore is unusually strict; whether enforced server-side is unclear. Stage 1 inserts a conservative inter-request delay. Open-Meteo's 600/min free-tier limit is never approached at Stage 2's ten-station scale. Whether this becomes a shared concern depends on Stage 17 (Elexon) — Elexon has no comparable documented limit.
 - **Multi-endpoint fetch concurrency.** Stage 2 issues ~10 independent station requests. Serial httpx calls are fine at this scale and keep retry accounting simple; `httpx.AsyncClient` gains concurrency at the cost of an async call tree. Deferred until a source has many endpoints and a live-demo delay is observable.

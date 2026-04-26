@@ -66,6 +66,7 @@ Append-only by convention — supersede older ADRs rather than editing.
 - [`0001-use-hydra-plus-pydantic.md`](./decisions/0001-use-hydra-plus-pydantic.md) — config framework.
 - [`0002-filesystem-registry-first.md`](./decisions/0002-filesystem-registry-first.md) — registry storage before Stage 9 builds it.
 - [`0003-protocol-for-model-interface.md`](./decisions/0003-protocol-for-model-interface.md) — `typing.Protocol` over `abc.ABC` for the `Model` interface.
+- [`0007-ingestion-public-contract-bifurcates-by-data-shape.md`](./decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md) — ingestion-layer public contract is two-tier (level data: `fetch`+`load`; event log: `fetch`+`load`+temporal-query primitive).
 
 ## Changing the architecture
 
