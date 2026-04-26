@@ -50,10 +50,11 @@ import argparse
 import os
 import sys
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final
 
+import httpx
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -64,6 +65,8 @@ from bristol_ml.ingestion._common import (
     CachePolicy,
     _atomic_write,
     _cache_path,
+    _respect_rate_limit,
+    _retrying_get,
 )
 from conf._schemas import RemitIngestionConfig
 
@@ -207,11 +210,10 @@ def fetch(
     if use_stub:
         logger.info("REMIT fetch via stub fixture ({}=1)", _STUB_ENV_VAR)
         records = _stub_records()
-    else:  # pragma: no cover — wired in T4
-        raise NotImplementedError(
-            "remit.fetch live path is stubbed until Stage 13 T4. "
-            f"Set {_STUB_ENV_VAR}=1 to use the in-memory stub fixture."
-        )
+    else:
+        with httpx.Client(timeout=config.request_timeout_seconds) as client:
+            _respect_rate_limit(None, config.min_inter_request_seconds)
+            records = _live_fetch(config, client=client)
 
     table = _to_arrow(records, retrieved_at=retrieved_at)
     _atomic_write(table, cache_path)
@@ -250,6 +252,163 @@ def load(path: Path) -> pd.DataFrame:
                 f"expected {field.type}"
             )
     return table.to_pandas(types_mapper=None)
+
+
+# ---------------------------------------------------------------------------
+# Live fetch — Elexon Insights API ``/datasets/REMIT/stream``.  Single GET
+# (the stream endpoint returns the full window in one response, no
+# pagination cap — domain research §R3).  The Elexon JSON shape is
+# normalised to the canonical column set by :func:`_parse_message`; the
+# field-name mapping snake-cases the API's camelCase and renames a few
+# Elexon idioms to project conventions (``unavailableCapacity`` →
+# ``affected_mw``; ``eventStatus`` → ``message_status``).
+# ---------------------------------------------------------------------------
+
+
+# Elexon timestamp parser.  The Insights API emits ISO-8601 strings with
+# the ``Z`` suffix (e.g. ``"2024-01-01T23:54:02Z"``); ``datetime.fromisoformat``
+# handles ``Z`` natively from Python 3.11 onward.  Returns a tz-aware
+# ``datetime`` so the arrow cast picks it up as ``timestamp[us, tz=UTC]``.
+def _parse_elexon_timestamp(value: str | None) -> datetime | None:
+    """Parse an Elexon ISO-8601 timestamp; ``None`` passes through."""
+    if value is None or value == "":
+        return None
+    parsed = datetime.fromisoformat(value)
+    # Elexon always emits UTC.  Defensive: if a future field lacks tzinfo,
+    # raise rather than silently lose the offset.
+    if parsed.tzinfo is None:
+        raise ValueError(f"Elexon REMIT timestamp {value!r} is naive; expected UTC offset (Z).")
+    return parsed.astimezone(UTC)
+
+
+def _parse_message(record: dict[str, Any]) -> dict[str, Any]:
+    """Map one Elexon REMIT JSON record to the canonical row dict.
+
+    The mapping is deliberately conservative: every column on
+    :data:`OUTPUT_SCHEMA` is populated (using ``None`` when the API
+    omits the source field), so the downstream ``_to_arrow`` cast does
+    not need to invent missing columns.  Field-name correspondences
+    (Elexon → project) are recorded inline.
+    """
+    return {
+        # Identifier axis
+        "mrid": record["mrid"],
+        "revision_number": int(record["revisionNumber"]),
+        "message_type": record.get("messageType", "Unknown"),
+        # Elexon's ``eventStatus`` carries the Active / Inactive /
+        # Cancelled / Withdrawn / Dismissed vocabulary documented in
+        # MESSAGE_STATUSES; rename to message_status for the project.
+        "message_status": record.get("eventStatus", "Unknown"),
+        # Bi-temporal axis
+        "published_at": _parse_elexon_timestamp(record["publishTime"]),
+        "effective_from": _parse_elexon_timestamp(record["eventStartTime"]),
+        "effective_to": _parse_elexon_timestamp(record.get("eventEndTime")),
+        # Asset axis (raw — no master-data normalisation per intent OOS)
+        "affected_unit": record.get("affectedUnit"),
+        "asset_id": record.get("assetId"),
+        "fuel_type": record.get("fuelType"),
+        # Capacity axis — Elexon's ``unavailableCapacity`` is the
+        # headline "MW down" number we use for the demo aggregate.
+        "affected_mw": _coerce_optional_float(record.get("unavailableCapacity")),
+        "normal_capacity_mw": _coerce_optional_float(record.get("normalCapacity")),
+        # Event metadata
+        "event_type": record.get("eventType"),
+        "cause": record.get("cause"),
+        # Free text — the stream endpoint does not return a long-form
+        # message description today (per the live response observed
+        # 2026-04 in domain research §R6); kept on the schema so Stage 14
+        # can populate it from a follow-up ``/remit/{mrid}`` call without
+        # a schema migration.
+        "message_description": record.get("messageDescription"),
+    }
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    """Coerce ``int`` / ``float`` / ``None`` → ``float | None``.
+
+    Elexon's JSON sometimes ships capacity as an int, sometimes a float;
+    pyarrow's float64 cast accepts both but pandas' dtype-inference does
+    not, so normalise here.
+    """
+    if value is None:
+        return None
+    return float(value)
+
+
+def _live_fetch(
+    config: RemitIngestionConfig,
+    *,
+    client: httpx.Client,
+) -> list[dict[str, Any]]:
+    """Fetch the REMIT window from the Insights API and return canonical rows.
+
+    Issues a single GET against ``/datasets/REMIT/stream`` with
+    ``publishDateTimeFrom`` / ``publishDateTimeTo`` query parameters
+    spanning ``config.window_start`` to ``config.window_end`` (defaulting
+    to today's UTC date when ``window_end is None``).  The endpoint has
+    no documented page cap (domain research §R3) so a single request
+    suffices.
+
+    Logs INFO with the record count + window slice (NFR-10 observability)
+    and emits a WARNING for any ``message_status`` outside
+    :data:`MESSAGE_STATUSES` — the row is still persisted so a downstream
+    consumer can investigate.
+    """
+    window_end = config.window_end or date.today()
+    window_start = config.window_start
+    if window_end < window_start:
+        # The Pydantic ``model_validator`` already catches this when the
+        # config is built; defensive duplicate to keep this helper safe
+        # if it is ever called with a hand-crafted config.
+        raise ValueError(
+            f"REMIT fetch window_end ({window_end}) is before window_start ({window_start})."
+        )
+
+    url = f"{config.base_url}{config.endpoint_path}"
+    params: dict[str, object] = {
+        "publishDateTimeFrom": f"{window_start.isoformat()}T00:00Z",
+        "publishDateTimeTo": f"{window_end.isoformat()}T00:00Z",
+    }
+
+    logger.info(
+        "REMIT live fetch: GET {} window={}..{}",
+        url,
+        window_start,
+        window_end,
+    )
+    response = _retrying_get(client, url, params, config)
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise RuntimeError(
+            f"REMIT stream at {url} returned non-array payload: type={type(payload).__name__}"
+        )
+
+    records: list[dict[str, Any]] = []
+    unknown_statuses: set[str] = set()
+    for raw in payload:
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"REMIT stream record is not an object: {raw!r}; expected JSON object."
+            )
+        parsed = _parse_message(raw)
+        status = parsed["message_status"]
+        if status not in MESSAGE_STATUSES:
+            unknown_statuses.add(status)
+        records.append(parsed)
+
+    logger.info(
+        "REMIT live fetch: {} record(s) covering window {}..{}",
+        len(records),
+        window_start,
+        window_end,
+    )
+    if unknown_statuses:
+        logger.warning(
+            "REMIT response carried unknown message_status value(s): {}; "
+            "rows preserved on disk for downstream investigation.",
+            sorted(unknown_statuses),
+        )
+    return records
 
 
 # ---------------------------------------------------------------------------
