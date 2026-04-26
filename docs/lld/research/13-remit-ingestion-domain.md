@@ -354,4 +354,3 @@ The API is currently unauthenticated. Elexon previously required scripting keys 
 | Elexon — REMIT XML Implementation Guide v1.2 | https://assets.elexon.co.uk/wp-content/uploads/sites/11/2014/08/28164207/REMIT-XML-Implementation-Guide-v1.2.pdf | Original GB REMIT XSD; mRID definition |
 
 ---
-

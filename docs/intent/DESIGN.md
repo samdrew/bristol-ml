@@ -251,7 +251,7 @@ bristol-ml-reference/
     │       └── 0002-filesystem-registry-first.md
     ├── plans/                   # Per-stage implementation plans
     │   ├── active/              # Plans for approval or implementation
-    │   └── completed/           # Plans where they are fully implemented    
+    │   └── completed/           # Plans where they are fully implemented
     ├── stages/                  # Deprecated in favour of plans/
     │   ├── README.md            # Index across all stages (Warn: status transitions only)
     │   └── NN-<slug>.md         # Allow: living work brief per stage

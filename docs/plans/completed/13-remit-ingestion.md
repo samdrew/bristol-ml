@@ -1,6 +1,6 @@
 # Plan — Stage 13: REMIT ingestion
 
-**Status:** `approved` — Ctrl+G review on 2026-04-26 accepted all 21 decisions and all four open-question defaults; OQ-D (DESIGN §6 flip) explicitly removed from scope. Ready for Phase 2.
+**Status:** `completed` — shipped on 2026-04-26 across seven sequential commits (Phase-1 research + T1–T7). Ctrl+G review on 2026-04-26 had accepted all 21 decisions and all four open-question defaults; OQ-D (DESIGN §6 flip) explicitly removed from scope. See [`docs/lld/stages/13-remit-ingestion.md`](../../lld/stages/13-remit-ingestion.md) for the retrospective.
 **Intent:** [`docs/intent/13-remit-ingestion.md`](../../intent/13-remit-ingestion.md)
 **Upstream stages shipped:** Stages 0–12 (foundation → ingestion → features → six model families → enhanced evaluation → registry → MLP → TCN → serving). Stage 13 depends only on the ingestion-layer conventions established at Stages 1, 2, and 5; it does not touch any modelling stage.
 **Downstream consumers:** Stage 14 (LLM extractor — consumes the persisted free-text descriptions), Stage 16 (model with REMIT — joins bi-temporal events into the feature table). Stage 15 (embedding index) consumes Stage 14, not Stage 13 directly.
