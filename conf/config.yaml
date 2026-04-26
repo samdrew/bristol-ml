@@ -4,6 +4,7 @@ defaults:
   - ingestion/weather@ingestion.weather
   - ingestion/neso_forecast@ingestion.neso_forecast
   - ingestion/holidays@ingestion.holidays
+  - ingestion/remit@ingestion.remit
   # Stage 5 D-10: ``features`` is a Hydra group (not a package override) so
   # ``features=weather_calendar`` swaps feature sets at the CLI, symmetric
   # with how ``model=naive`` / ``model=linear`` work.  Exactly one of

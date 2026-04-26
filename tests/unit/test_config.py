@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -41,6 +41,7 @@ from conf._schemas import (
     NesoForecastIngestionConfig,
     PlotsConfig,
     ProjectConfig,
+    RemitIngestionConfig,
     SarimaxConfig,
     SarimaxKwargs,
     ScipyParametricConfig,
@@ -967,6 +968,92 @@ def test_ingestion_group_holidays_field_defaults_to_none() -> None:
     assert ig.holidays is None, (
         "Backwards-compat: IngestionGroup().holidays must be None by default."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 13 T1 — RemitIngestionConfig + IngestionGroup.remit slot
+# ---------------------------------------------------------------------------
+
+
+def test_remit_config_round_trips_through_hydra() -> None:
+    """Pins D3: load_config() populates cfg.ingestion.remit from remit.yaml.
+
+    After a defaults-only ``load_config()`` the resolved config must carry
+    ``cfg.ingestion.remit`` as a ``RemitIngestionConfig`` whose values match
+    ``conf/ingestion/remit.yaml`` exactly:
+
+    - ``base_url`` points at ``data.elexon.co.uk/bmrs/api/v1/``.
+    - ``endpoint_path`` is ``datasets/REMIT/stream`` (D4 — stream endpoint).
+    - ``window_start`` is 2018-01-01 (D6 — matches demand training window).
+    - ``window_end`` is None (means "today" at fetch time).
+    - ``cache_filename`` is ``remit.parquet`` (D7).
+    - ``min_inter_request_seconds`` is 0.5 (polite default for the public API).
+    """
+    cfg = load_config()
+
+    assert cfg.ingestion is not None
+    remit = cfg.ingestion.remit
+    assert remit is not None, "D3: cfg.ingestion.remit must be populated from the defaults list."
+    assert isinstance(remit, RemitIngestionConfig)
+    assert "data.elexon.co.uk/bmrs/api/v1/" in str(remit.base_url), (
+        f"D5: base_url must point at the unauthenticated Insights API; got {remit.base_url!r}."
+    )
+    assert remit.endpoint_path == "datasets/REMIT/stream", (
+        f"D4: endpoint_path must be the stream endpoint (no 24h cap); got {remit.endpoint_path!r}."
+    )
+    assert remit.window_start == date(2018, 1, 1), (
+        f"D6: default window_start must be 2018-01-01; got {remit.window_start}."
+    )
+    assert remit.window_end is None, (
+        f"D6: default window_end is None ('today'); got {remit.window_end}."
+    )
+    assert remit.cache_filename == "remit.parquet", (
+        f"D7: cache_filename must be 'remit.parquet'; got {remit.cache_filename!r}."
+    )
+    assert remit.min_inter_request_seconds == 0.5, (
+        f"polite-default rate-limit gap; got {remit.min_inter_request_seconds}."
+    )
+
+
+def test_remit_config_rejects_extra_keys() -> None:
+    """Pins ConfigDict(extra='forbid') on RemitIngestionConfig.
+
+    Mis-typed field names must surface immediately rather than silently
+    extending the schema with garbage.
+    """
+    with pytest.raises(ValidationError):
+        RemitIngestionConfig(  # type: ignore[call-arg]  # testing extra='forbid'
+            cache_dir=Path("/tmp/x"),
+            bogus=1,
+        )
+
+
+def test_remit_config_rejects_inverted_window() -> None:
+    """Pins the window_start/window_end ordering validator.
+
+    A ``window_end`` strictly before ``window_start`` is a configuration
+    mistake and must fail validation rather than silently producing an
+    empty fetch window.
+    """
+    with pytest.raises(ValidationError):
+        RemitIngestionConfig(
+            cache_dir=Path("/tmp/x"),
+            window_start=date(2024, 6, 1),
+            window_end=date(2024, 5, 1),
+        )
+
+
+def test_ingestion_group_remit_field_defaults_to_none() -> None:
+    """Pins backwards-compat: IngestionGroup() with no args produces remit=None.
+
+    Pre-Stage-13 call sites that construct ``IngestionGroup`` programmatically
+    (without a ``remit`` argument) must not break.  The ``remit:
+    RemitIngestionConfig | None = None`` default must hold so Stages 1-12
+    code paths remain valid after the Stage 13 schema extension.
+    """
+    ig = IngestionGroup()
+
+    assert ig.remit is None, "Backwards-compat: IngestionGroup().remit must be None by default."
 
 
 def test_weather_calendar_override_cache_filename_from_yaml() -> None:

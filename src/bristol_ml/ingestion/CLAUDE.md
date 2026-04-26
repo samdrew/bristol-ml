@@ -208,6 +208,80 @@ defaults to `0.0` and the tenacity retry loop covers transient 5xx /
 feed is a single GET — no pagination, no per-division loop at the HTTP
 layer.
 
+## `remit.py` — output schema
+
+File path: `<cache_dir>/remit.parquet` where `<cache_dir>` defaults to
+`${BRISTOL_ML_CACHE_DIR:-./data/raw/remit}`. **Bi-temporal event log**:
+one row per `(mrid, revision_number)` pair. Append-only — every
+revision is its own row; `as_of(df, t)` is the query that derives the
+"active state at `t`" view, never an overwrite at ingest time.
+
+| Column                | Parquet type               | Notes                                                                                       |
+|-----------------------|----------------------------|---------------------------------------------------------------------------------------------|
+| `mrid`                | `string`                   | Elexon message id. Multiple rows per mrid when the message is revised.                      |
+| `revision_number`     | `int32`                    | 0-indexed. `(mrid, revision_number)` is the storage grain.                                  |
+| `message_type`        | `string`                   | `"Production"`, `"Consumption"`, ...                                                        |
+| `message_status`      | `string`                   | `"Active"`, `"Inactive"`, `"Dismissed"`, `"Withdrawn"` — `as_of` filters out Withdrawn.     |
+| `published_at`        | `timestamp[us, tz=UTC]`    | **Transaction-time** — when the participant disclosed this message.                         |
+| `effective_from`      | `timestamp[us, tz=UTC]`    | **Valid-time start** — when the unavailability window opens.                                |
+| `effective_to`        | `timestamp[us, tz=UTC]`    | **Valid-time end** — **nullable** (`pd.NaT` denotes an open-ended event still in force).    |
+| `retrieved_at_utc`    | `timestamp[us, tz=UTC]`    | Per-fetch provenance (§2.1.6) — same scalar for every row of a given `fetch` call.          |
+| `affected_unit`       | `string`                   | BMU id (e.g. `"WBURB-1"`); nullable.                                                        |
+| `asset_id`            | `string`                   | Prefixed BMU (e.g. `"T_WBURB-1"`); nullable.                                                |
+| `fuel_type`           | `string`                   | `"Nuclear"`, `"Gas"`, `"Coal"`, ...; nullable. Row-level — no reference-table join needed.  |
+| `affected_mw`         | `float64`                  | Unavailable capacity in MW (the headline number); nullable.                                 |
+| `normal_capacity_mw`  | `float64`                  | Normal capacity for context; nullable.                                                      |
+| `event_type`          | `string`                   | `"Outage"`, `"Restriction"`, ...; nullable.                                                 |
+| `cause`               | `string`                   | `"Planned"`, `"Unplanned"`, `"Forced"`, ...; nullable.                                      |
+| `message_description` | `string`                   | Free-text payload; Stage 14 will extract structured fields from this column.                |
+
+Primary key: `(mrid, revision_number)` unique; sorted by
+`published_at ASC, mrid ASC, revision_number ASC`. Idempotent re-fetch
+(NFR-1): two REFRESH runs over the same window produce row-identical
+parquet modulo `retrieved_at_utc` (the per-fetch provenance scalar
+that necessarily differs between runs).
+
+### As-of query
+
+`bristol_ml.ingestion.remit.as_of(df, t)` is the new public primitive
+Stage 13 introduces. The full algorithm and worked
+"published / revised / withdrawn" example live in
+[`docs/architecture/layers/ingestion.md` §"Bi-temporal storage shape"](../../../docs/architecture/layers/ingestion.md#bi-temporal-storage-shape).
+The short version:
+
+```python
+def as_of(df: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
+    """Active state as known to the market at time t (transaction-time only)."""
+```
+
+1. Filter `published_at <= t` (transaction-time as-of).
+2. `groupby(mrid).idxmax(revision_number)` within the filtered frame.
+3. Drop rows whose `message_status == "Withdrawn"`.
+
+The function is strictly transaction-time. Callers wanting
+"events active at `t`" (valid-time) chain a second predicate on
+`effective_from` / `effective_to` after `as_of`. Naive timestamps raise
+`ValueError`.
+
+### Stub mode
+
+Setting `BRISTOL_ML_REMIT_STUB=1` routes `fetch` through an in-memory
+fixture of 10 hand-crafted records spanning seven mRIDs across the
+first half of 2024 — fresh / revised / withdrawn / open-ended cases
+all represented (AC-1 coverage). The stub's records cast through the
+same `OUTPUT_SCHEMA` as a live fetch and write the same on-disk
+parquet shape, so the notebook + tests exercise an identical code
+path with deterministic offline data.
+
+### Cassette scope
+
+The committed cassette `tests/fixtures/remit/cassettes/remit_2024_01_01.yaml`
+(~20 kB) covers a single one-day window of `/datasets/REMIT/stream`
+— ~125 messages across 70 mRIDs with 31 in-window revision chains.
+A `Withdrawn` row is rare in any naturally selected window and would
+balloon the cassette if forced; the synthetic-withdrawal case is
+covered at the unit level via `test_as_of_withdrawn_message_excludes_row`.
+
 ## Fixtures
 
 Cassettes live at `tests/fixtures/<source>/cassettes/` via

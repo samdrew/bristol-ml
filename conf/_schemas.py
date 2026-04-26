@@ -208,6 +208,62 @@ class HolidaysIngestionConfig(BaseModel):
     )
 
 
+class RemitIngestionConfig(BaseModel):
+    """Configuration for the Elexon REMIT ingester (Stage 13).
+
+    Source: the Elexon Insights API at ``https://data.elexon.co.uk/bmrs/api/v1/``,
+    the public unauthenticated successor to the decommissioned BMRS API
+    (per Stage 13 domain research §R1).  Stage 13 reads the bulk-streaming
+    endpoint ``GET /datasets/REMIT/stream`` (no observed window cap, unlike
+    ``GET /datasets/REMIT`` which is capped at 24 hours per call).
+
+    REMIT messages are append-only: every revision is preserved on disk so
+    the bi-temporal "what did the market know at time T?" query is correct
+    over historical points.  The schema keeps four UTC-aware timestamp axes
+    on every row: ``published_at`` (transaction-time), ``effective_from`` /
+    ``effective_to`` (valid-time; ``effective_to`` nullable for open-ended
+    events), ``retrieved_at_utc`` (project-axis provenance per row).
+
+    Retry / rate-limit / cache fields mirror ``NesoIngestionConfig`` and
+    ``HolidaysIngestionConfig`` structurally so the shared helpers in
+    ``bristol_ml.ingestion._common`` accept this config via their ``Protocol``
+    types — same seven structural fields (``max_attempts``,
+    ``backoff_base_seconds``, ``backoff_cap_seconds``,
+    ``request_timeout_seconds``, ``min_inter_request_seconds``, ``cache_dir``,
+    ``cache_filename``).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_url: HttpUrl = Field(
+        default=HttpUrl("https://data.elexon.co.uk/bmrs/api/v1/"),
+    )
+    endpoint_path: str = Field(default="datasets/REMIT/stream")
+    # Default window matches the demand-model training window referenced in
+    # the intent §Points; backfill via Hydra CLI override.
+    window_start: date = Field(default=date(2018, 1, 1))
+    window_end: date | None = Field(default=None)
+
+    cache_dir: Path
+    cache_filename: str = Field(default="remit.parquet")
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+    max_attempts: int = Field(default=5, ge=1, le=10)
+    backoff_base_seconds: float = Field(default=1.0, gt=0)
+    backoff_cap_seconds: float = Field(default=30.0, gt=0)
+    # Polite default for the public Insights API; can be raised on slow
+    # networks via Hydra override.
+    min_inter_request_seconds: float = Field(default=0.5, ge=0)
+
+    @model_validator(mode="after")
+    def _check_window_order(self) -> RemitIngestionConfig:
+        if self.window_end is not None and self.window_end < self.window_start:
+            raise ValueError(
+                f"window_end ({self.window_end}) must be on or after "
+                f"window_start ({self.window_start})"
+            )
+        return self
+
+
 class IngestionGroup(BaseModel):
     """Container for per-source ingestion configs.
 
@@ -222,6 +278,7 @@ class IngestionGroup(BaseModel):
     weather: WeatherIngestionConfig | None = None
     neso_forecast: NesoForecastIngestionConfig | None = None
     holidays: HolidaysIngestionConfig | None = None
+    remit: RemitIngestionConfig | None = None
 
 
 class FeatureSetConfig(BaseModel):
