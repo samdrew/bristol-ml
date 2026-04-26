@@ -158,7 +158,7 @@ All five intent-ACs are copied verbatim from `docs/intent/13-remit-ingestion.md 
 - **AC-1 (intent).** "The module can answer the question 'what REMIT events were known to the market at time T?' correctly for any T within the cached period, including revisions."
   - Tests:
     - `test_as_of_fresh_message_returns_active_state` (D18a) — single mRID, single revision, `published_at = t-1h`; `as_of(df, t)` returns that row.
-    - `test_as_of_revised_message_returns_latest_revision` (D18a) — single mRID with revisions 0/1/2 published at t-3h/t-2h/t-1h; `as_of(df, t-2.5h)` returns rev 1, `as_of(df, t)` returns rev 2.
+    - `test_as_of_revised_message_returns_latest_revision` (D18a) — single mRID with revisions 0/1/2 published at t-3h/t-2h/t-1h; `as_of(df, t-1.5h)` returns rev 1 (the latest revision visible at that point in time, since rev 2 has not yet been published), `as_of(df, t)` returns rev 2.
     - `test_as_of_withdrawn_message_excludes_row` (D18a) — single mRID with rev 0 published at t-2h then `messageStatus="Withdrawn"` at t-1h; `as_of(df, t)` excludes this mRID.
     - `test_as_of_open_ended_effective_to_treated_as_active` (D18a) — `effective_to=None`, `effective_from < t`; `as_of(df, t)` includes the row.
     - `test_as_of_against_cassette_fixture_at_three_sample_times` (D18h, integration) — full cassette load + three timestamp slices; mRID-set + count assertions against hand-computed expected.
