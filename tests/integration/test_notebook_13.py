@@ -31,13 +31,24 @@ NOTEBOOK_PATH = REPO_ROOT / "notebooks" / "13_remit_ingestion.ipynb"
 def test_notebook_13_remit_executes_top_to_bottom(tmp_path: Path) -> None:
     """``jupyter nbconvert --execute`` returns 0 and key cells emit output.
 
-    The test executes the committed notebook against a sibling copy
-    placed under ``notebooks/`` so the test run does not mutate the
-    source-controlled artefact (Cell 1's bootstrap walks up from
-    ``Path.cwd()`` looking for ``pyproject.toml``; a copy under
-    ``/tmp`` defeats the walk).  After ``nbconvert`` exits 0 the test
-    re-reads the executed copy and asserts the three load-bearing code
-    cells produced non-empty output:
+    The executed copy is written into ``notebooks/`` rather than
+    ``tmp_path``: nbconvert sets the kernel's cwd to the notebook
+    file's parent directory and silently ignores
+    ``--ExecutePreprocessor.cwd``.  Cell 1's bootstrap walks
+    ``Path.cwd()`` upward looking for ``pyproject.toml`` to anchor
+    Hydra's config root, so under ``tmp_path`` it would walk to ``/``
+    and Hydra would resolve config to ``/conf`` and fail.  Keeping the
+    copy a sibling of the source notebook keeps the walk landing on
+    the real repo root.
+
+    The copy uses a ``.pytest-exec-<unique>.ipynb`` suffix derived from
+    ``tmp_path`` so concurrent test workers do not collide, and the
+    ``try/finally`` plus a session-scoped fixture (below) belt-and-
+    braces clean up the file even if the test process is killed.
+
+    After ``nbconvert`` exits 0 the test re-reads the executed copy
+    and asserts the three load-bearing code cells produced non-empty
+    output:
 
     - Cell 1 (``T5 Cell 1``) — fetch + load summary lines.
     - Cell 3 (``T5 Cell 3``) — monthly aggregate table.
@@ -53,7 +64,10 @@ def test_notebook_13_remit_executes_top_to_bottom(tmp_path: Path) -> None:
         f"`uv run python scripts/_build_notebook_13.py`."
     )
 
-    executed_path = NOTEBOOK_PATH.with_suffix(".pytest-exec.ipynb")
+    # Unique suffix per pytest invocation so parallel workers — and
+    # any leaked artefact from a killed prior run — do not collide.
+    suffix = tmp_path.name
+    executed_path = NOTEBOOK_PATH.with_name(f"{NOTEBOOK_PATH.stem}.pytest-exec-{suffix}.ipynb")
     executed_path.write_bytes(NOTEBOOK_PATH.read_bytes())
     try:
         _run_and_assert(executed_path, tmp_path)
@@ -113,6 +127,20 @@ def _run_and_assert(executed_path: Path, tmp_path: Path) -> None:
             f"AC-9 requires the load summary / aggregate table / stacked-area chart "
             f"to render in the demo notebook."
         )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _sweep_stale_pytest_exec_notebooks() -> None:
+    """Belt-and-braces cleanup of orphaned ``.pytest-exec-*.ipynb`` files.
+
+    If a previous pytest run was killed before the ``try/finally``
+    fired, an executed-copy notebook can be left behind under
+    ``notebooks/``.  Sweep them at session start so ``git status``
+    stays clean and CI does not pick them up as artefacts.
+    """
+    notebooks_dir = NOTEBOOK_PATH.parent
+    for stale in notebooks_dir.glob(f"{NOTEBOOK_PATH.stem}.pytest-exec-*.ipynb"):
+        stale.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("expected_count", [7])

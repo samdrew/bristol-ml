@@ -506,6 +506,65 @@ def test_load_round_trips_open_ended_effective_to_as_pd_nat(
     )
 
 
+def test_fetch_offline_with_warm_cache_returns_path_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins AC-2 + D18d: ``CachePolicy.OFFLINE`` returns the cache path on a warm cache.
+
+    The warm-cache offline contract is half of AC-2: ``OFFLINE`` raises
+    when the cache is missing (covered by the sibling
+    ``test_fetch_offline_without_cache_raises_cache_missing``) and
+    returns the path **without touching the network** when it is warm.
+
+    The test exercises the warm path by:
+
+    1. Populating the cache via a stub-mode REFRESH so the parquet
+       lands at ``tmp_path / remit.parquet``.
+    2. Removing the stub env-var so any code path that *does* reach the
+       network (or the stub's in-memory fallback) would do unintended
+       work — neither should happen on a warm OFFLINE call.
+    3. Monkeypatching ``httpx.Client`` to a sentinel that raises on any
+       attribute access; if ``fetch`` opens an HTTP client under
+       ``OFFLINE``, the access fault surfaces as a clear test failure.
+    4. Calling ``fetch(cfg, cache=OFFLINE)`` and asserting it returns
+       the expected path.
+
+    Together with the sibling ``raises`` test, this pins both branches
+    of the AC-2 acceptance criterion: warm-OFFLINE returns the path,
+    cold-OFFLINE raises ``CacheMissingError``.
+    """
+    cfg = _build_remit_config(tmp_path)
+
+    # Step 1: warm the cache via stub mode.
+    monkeypatch.setenv("BRISTOL_ML_REMIT_STUB", "1")
+    warm_path = remit.fetch(cfg, cache=remit.CachePolicy.REFRESH)
+    assert warm_path.exists(), "Pre-condition: stub fetch must populate the cache."
+
+    # Step 2: clear the stub trigger so the OFFLINE path is exercised
+    # without any in-memory fallback waiting in the wings.
+    monkeypatch.delenv("BRISTOL_ML_REMIT_STUB", raising=False)
+
+    # Step 3: poison ``httpx.Client`` so any HTTP-client construction
+    # attempt during the OFFLINE call surfaces as a loud test failure
+    # rather than silently doing network work.
+    class _NoNetworkClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError(
+                "OFFLINE cache hit must not construct an httpx.Client; got call with "
+                f"args={args!r} kwargs={kwargs!r}."
+            )
+
+    monkeypatch.setattr("bristol_ml.ingestion.remit.httpx.Client", _NoNetworkClient)
+
+    # Step 4: warm-OFFLINE call returns the same path without network I/O.
+    offline_path = remit.fetch(cfg, cache=remit.CachePolicy.OFFLINE)
+
+    assert offline_path == warm_path, (
+        f"Warm OFFLINE fetch must return the cached path {warm_path}; got {offline_path}."
+    )
+    assert offline_path.exists(), "Cache path must still exist after the OFFLINE call."
+
+
 def test_fetch_offline_without_cache_raises_cache_missing(tmp_path: Path) -> None:
     """Pins AC-2 + D18d + NFR-6: CachePolicy.OFFLINE raises when the cache is absent.
 
@@ -529,6 +588,177 @@ def test_fetch_offline_without_cache_raises_cache_missing(tmp_path: Path) -> Non
     assert str(expected_cache) in error_text, (
         f"CacheMissingError message must contain the absolute cache path "
         f"{str(expected_cache)!r}; got: {error_text!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 review-finding regression tests (R1 / R2 / R3 / N2)
+# ---------------------------------------------------------------------------
+#
+# These tests pin behavioural fixes raised by the Phase-3 code-reviewer.
+# They exist to prevent the exact bug from regressing — each docstring
+# names the original failure mode.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_message_missing_required_field_raises_typed_parse_error() -> None:
+    """Pins R2: missing required field surfaces as ``RemitParseError``, not bare ``KeyError``.
+
+    The previous implementation raised ``KeyError('mrid')`` from a bare
+    ``record["mrid"]`` lookup, leaving the operator with no context
+    about which record was malformed or what other fields it carried.
+    The fix wraps the lookup in an explicit ``required_fields`` loop
+    and raises a typed ``RemitParseError`` carrying the field name and
+    the available keys.
+
+    The test feeds a record missing ``mrid`` and asserts:
+
+    1. The exception type is :class:`remit.RemitParseError`
+       (and therefore a :class:`ValueError` for callers that catch the
+       broader category).
+    2. The error message names the missing field (``'mrid'``).
+    3. The error message lists the available keys so the operator can
+       see *which* malformed record triggered the failure.
+    """
+    record = {
+        "revisionNumber": 1,
+        "publishTime": "2024-01-01T09:00:00Z",
+        "eventStartTime": "2024-01-02T00:00:00Z",
+        "eventStatus": "Active",
+    }
+
+    with pytest.raises(remit.RemitParseError) as exc_info:
+        remit._parse_message(record)
+
+    error_text = str(exc_info.value)
+    assert "'mrid'" in error_text, (
+        f"RemitParseError must name the missing field 'mrid'; got: {error_text!r}"
+    )
+    assert "revisionNumber" in error_text, (
+        f"RemitParseError must list the available keys for context; got: {error_text!r}"
+    )
+    # Also verify it's a ValueError so existing 'except ValueError' callers still work.
+    assert isinstance(exc_info.value, ValueError), (
+        "RemitParseError must inherit from ValueError for catch-broader compatibility."
+    )
+
+
+def test_live_fetch_url_construction_handles_slash_variations() -> None:
+    """Pins R3: URL composition produces a single separator under any slash combination.
+
+    The previous implementation was ``f"{config.base_url}{config.endpoint_path}"``
+    which silently produced ``"https://api/example.compath/foo"`` on
+    no-trailing/no-leading and ``"https://api/example.com//path/foo"``
+    on trailing/leading.  The fix mirrors ``neso.py`` /
+    ``neso_forecast.py``: ``rstrip('/')`` the base, ``lstrip('/')`` the
+    endpoint, join with a single ``"/"``.
+
+    The test inspects the source of ``_live_fetch`` to confirm the
+    rstrip/lstrip pattern is in place — a structural guard against
+    regressing to the f-string concat.  This is a source-level test
+    rather than a behavioural one because exercising the live URL
+    construction without hitting the network would require an httpx
+    mock that defeats the purpose; the structural guard catches the
+    intended regression cheaply.
+    """
+    import inspect
+
+    source = inspect.getsource(remit._live_fetch)
+    assert '.rstrip("/")' in source and '.lstrip("/")' in source, (
+        f"_live_fetch must use rstrip/lstrip URL composition (R3 fix); "
+        f"got source without the pattern. Excerpt:\n{source[:400]}"
+    )
+    # And confirm the bare f-string concat is gone.
+    assert 'f"{config.base_url}{config.endpoint_path}"' not in source, (
+        f"_live_fetch must not use the bare f-string concat that R3 fixed; "
+        f"got source with regression: {source[:400]}"
+    )
+
+
+def test_live_fetch_default_window_end_uses_utc_not_local_time() -> None:
+    """Pins R1: ``window_end`` defaults to UTC date, not local-time date.
+
+    The previous implementation was ``config.window_end or date.today()``
+    which uses the host's local timezone — a Bristol host at 23:30
+    local on 30 June would resolve ``date.today()`` to 30 June, while
+    ``datetime.now(UTC).date()`` would (on BST) resolve to 30 June and
+    (on GMT) to 30 June; the failure mode bites at midnight crossings,
+    where the local clock can show a different calendar date from UTC.
+
+    The same UTC-discipline failure mode surfaced and was patched on
+    NESO ingestion at Stage 1; this test makes the discipline explicit
+    for REMIT.
+
+    Test approach: source-level inspection of the *call expression*
+    (not the docstring/comment text — the explanatory comment for the
+    fix necessarily mentions ``date.today()``, so the regression check
+    targets the actual statement ``= config.window_end or ...``).
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(remit._live_fetch)
+    # Strip comments and docstrings — leave just the code statements.
+    code_only_lines = [
+        line for line in source.splitlines() if line.strip() and not line.strip().startswith("#")
+    ]
+    # Drop the docstring block by finding the first triple-quote pair.
+    in_docstring = False
+    code_only: list[str] = []
+    for line in code_only_lines:
+        triple = line.count('"""')
+        if in_docstring:
+            if triple >= 1:
+                in_docstring = False
+            continue
+        if triple >= 2:
+            # Single-line docstring; skip
+            continue
+        if triple == 1:
+            in_docstring = True
+            continue
+        code_only.append(line)
+    code_text = "\n".join(code_only)
+
+    # The fixed assignment must be present; the previous bug must not.
+    assert re.search(r"window_end\s*=.*datetime\.now\(UTC\)\.date\(\)", code_text), (
+        f"_live_fetch must assign window_end via datetime.now(UTC).date() "
+        f"(R1 fix). Code-only source:\n{code_text[:600]}"
+    )
+    assert not re.search(r"window_end\s*=.*\bdate\.today\(\)", code_text), (
+        f"_live_fetch must not assign window_end from date.today() "
+        f"(R1 regression). Code-only source:\n{code_text[:600]}"
+    )
+
+
+def test_to_arrow_or_live_fetch_uses_remit_parse_error_for_payload_shape() -> None:
+    """Pins N2: payload-shape errors raise ``RemitParseError``, not bare ``RuntimeError``.
+
+    The previous implementation raised ``RuntimeError`` for two
+    payload-shape failures in ``_live_fetch``:
+
+    - top-level payload not a list
+    - per-record payload not a dict
+
+    Both are now ``RemitParseError(ValueError)`` so callers can
+    distinguish parse errors from generic runtime issues without
+    string-matching.  Source-level guard.
+    """
+    import inspect
+
+    source = inspect.getsource(remit._live_fetch)
+    # Both payload-shape errors should now be RemitParseError, not RuntimeError.
+    assert "RemitParseError" in source, (
+        f"_live_fetch must raise RemitParseError for payload-shape errors (N2 fix). "
+        f"Source excerpt:\n{source[:400]}"
+    )
+    # The empty-records guard in _to_arrow legitimately stays as RuntimeError
+    # (it's a fetch-result sanity, not a parse error); the targeted N2 fix is
+    # in _live_fetch only. Confirm _live_fetch no longer raises bare RuntimeError
+    # for the two payload-shape paths.
+    assert 'raise RuntimeError(\n            f"REMIT stream' not in source, (
+        f"_live_fetch must not raise RuntimeError for payload-shape errors "
+        f"(N2 regression). Source excerpt:\n{source[:400]}"
     )
 
 

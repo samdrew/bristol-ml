@@ -202,31 +202,47 @@ def test_fetch_idempotent_against_cassette(tmp_path: Path) -> None:
 @pytest.mark.vcr
 @pytest.mark.usefixtures("_cassette_present_or_skip")
 def test_as_of_against_cassette_fixture_at_three_sample_times(tmp_path: Path) -> None:
-    """T4 / AC-1 / D18h: ``as_of`` respects its invariants at three sample times.
+    """T4 / AC-1 / D18h: ``as_of`` produces the exact expected state at three sample times.
 
     Sample times across the cassette window:
 
     - ``t_early``  — 06:00 on the cassette day; partial set of messages
-      have been published (sub-window of the ``t_late`` set).
+      have been published.
     - ``t_late``   — 23:30 on the cassette day; nearly all messages
       have been published.
     - ``t_after``  — 02:00 on the day after; every message in the
       cassette has been published.
 
-    The test asserts the structural invariants of ``as_of`` rather than
-    hand-computed mRID sets:
+    The test asserts both **structural invariants** (the algorithm's
+    contract) and **exact-count expectations** (deterministic numbers
+    derived from the committed cassette).  The exact counts pin
+    ``as_of`` against silent algorithmic regression — any change in
+    the transaction-time filter, the ``idxmax`` revision selection, or
+    the ``Withdrawn`` exclusion would shift at least one of the three
+    numbers.  A re-record of the cassette would also trigger this
+    test, forcing the implementer to re-derive and re-pin the counts
+    deliberately rather than weaken them silently.
 
-    1. The result has unique ``mrid`` (one row per mRID per the plan
-       §5 ``as_of`` contract).
-    2. No row carries ``message_status == "Withdrawn"`` (would have
-       been dropped per the algorithm).
-    3. Every returned row's ``published_at`` is ``<= t``
-       (transaction-time correctness).
-    4. The sample-time series is monotonically non-decreasing in row
-       count: ``len(early) <= len(late) <= len(after)`` — more
-       messages have been published as time advances.
-    5. ``t_after`` returns a non-trivially large set (>= 50 mRIDs at
-       the live record density observed for this window).
+    Counts derived against the committed cassette
+    ``remit_2024_01_01.yaml`` (125 records, 70 mRIDs, 31 in-window
+    revision chains):
+
+    - ``len(early) == 9``  — only the earliest-published 9 mRIDs are
+      visible at 06:00 UTC.
+    - ``len(late) == 64``  — most mRIDs published by end-of-day, six
+      remaining late-night disclosures arrive between 23:30 and EOD.
+    - ``len(after) == 70`` — the full mRID set, matching the cassette's
+      total ``df['mrid'].nunique()``.
+
+    Structural invariants asserted in addition to the exact counts:
+
+    1. The result has unique ``mrid`` per the plan §5 ``as_of`` contract.
+    2. No row carries ``message_status == "Withdrawn"``.
+    3. Every returned row's ``published_at`` is ``<= t``.
+    4. The mRID set at ``t_early`` is a strict subset of ``t_late``,
+       which is a strict subset of ``t_after``.
+    5. ``len(after)`` equals the cassette's total ``df['mrid'].nunique()``
+       — a "did we lose any mRID?" cross-check.
     """
     cfg = _build_config(tmp_path)
     path = remit.fetch(cfg, cache=remit.CachePolicy.REFRESH)
@@ -239,6 +255,12 @@ def test_as_of_against_cassette_fixture_at_three_sample_times(tmp_path: Path) ->
     early = remit.as_of(df, t_early)
     late = remit.as_of(df, t_late)
     after = remit.as_of(df, t_after)
+
+    # Exact-count expectations — pin the algorithm against silent regression.
+    # See docstring; counts derived from remit_2024_01_01.yaml.
+    assert len(early) == 9, f"as_of(t_early=06:00 UTC) must return 9 mRIDs; got {len(early)}."
+    assert len(late) == 64, f"as_of(t_late=23:30 UTC) must return 64 mRIDs; got {len(late)}."
+    assert len(after) == 70, f"as_of(t_after=02:00 UTC+1) must return 70 mRIDs; got {len(after)}."
 
     for label, frame, t in (
         ("early", early, t_early),
@@ -261,17 +283,26 @@ def test_as_of_against_cassette_fixture_at_three_sample_times(tmp_path: Path) ->
                 f"{(frame['published_at'] > t).sum()} row(s) violating it."
             )
 
-    # Invariant 4: monotonically non-decreasing as t advances.
-    assert len(early) <= len(late) <= len(after), (
-        f"as_of result size must be non-decreasing in t; "
-        f"got early={len(early)}, late={len(late)}, after={len(after)}."
+    # Invariant 4: strict subset chain — every mRID known at t_early is
+    # known at t_late, every mRID known at t_late is known at t_after.
+    early_mrids = set(early["mrid"])
+    late_mrids = set(late["mrid"])
+    after_mrids = set(after["mrid"])
+    assert early_mrids.issubset(late_mrids), (
+        f"mRID set at t_early must be a subset of t_late; orphans: {early_mrids - late_mrids}"
+    )
+    assert late_mrids.issubset(after_mrids), (
+        f"mRID set at t_late must be a subset of t_after; orphans: {late_mrids - after_mrids}"
     )
 
-    # Invariant 5: cassette-density sanity check — full-window result is
-    # non-trivial (cassette carries ~70 mRIDs; a strict ">= 50" tolerates
-    # any modest API drift on re-record without going trivially weak).
-    assert len(after) >= 50, (
-        f"Full-window as_of must return ≥ 50 mRIDs at live density; got {len(after)}."
+    # Invariant 5: t_after returns the cassette's full mRID set (no row
+    # silently dropped by the algorithm — the only Withdrawn-filtered
+    # mRIDs would surface here as missing-from-after, and the cassette
+    # carries no Withdrawn rows in the recorded window).
+    assert after_mrids == set(df["mrid"]), (
+        f"as_of(t_after) must return every mRID in the cassette; "
+        f"missing: {set(df['mrid']) - after_mrids}, "
+        f"extra: {after_mrids - set(df['mrid'])}."
     )
 
 

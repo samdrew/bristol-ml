@@ -50,7 +50,7 @@ import argparse
 import os
 import sys
 from collections.abc import Iterable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -86,10 +86,28 @@ __all__ = [
     "OUTPUT_SCHEMA",
     "CacheMissingError",
     "CachePolicy",
+    "RemitParseError",
     "as_of",
     "fetch",
     "load",
 ]
+
+
+class RemitParseError(ValueError):
+    """A REMIT record (or stream payload) could not be parsed.
+
+    Raised when the live Insights API returns a payload whose shape does
+    not match the documented schema — a missing required field on a
+    record, a non-array top-level payload, a record that is not a JSON
+    object.  Inherits from :class:`ValueError` so callers that already
+    catch ``ValueError`` for parse-level issues continue to work; the
+    typed subclass lets new callers distinguish parse errors from other
+    value errors (e.g. the naive-timestamp guard on :func:`as_of`).
+
+    Carries enough context in ``str(exc)`` to identify the offending
+    record without having to re-fetch — the field name, the available
+    keys, or the offending JSON shape, depending on the case.
+    """
 
 
 # Canonical Elexon REMIT message statuses (per domain research §R2).  An
@@ -254,6 +272,88 @@ def load(path: Path) -> pd.DataFrame:
     return table.to_pandas(types_mapper=None)
 
 
+def as_of(df: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
+    """Return the active-state frame as known to the market at time ``t``.
+
+    Implements the central question from ``docs/intent/13-remit-ingestion.md``:
+    "what REMIT events were known to the market at time T?".  This is a
+    **transaction-time** query: it filters by ``published_at`` (when the
+    participant disclosed the message), not by the event window.
+
+    Algorithm:
+
+    1. Filter ``df`` to rows with ``published_at <= t`` — only messages
+       the market had seen by time ``t``.
+    2. Within that filter, group by ``mrid``; keep the row with the
+       maximum ``revision_number`` — the latest revision known by ``t``.
+    3. Drop rows whose ``message_status == "Withdrawn"`` — withdrawn
+       messages were retracted by their publisher and should not appear
+       in the active state.
+
+    The ``effective_from`` / ``effective_to`` columns are *not* part of
+    this filter — that is a valid-time join, separate from the
+    transaction-time as-of.  Callers who want "active at ``t``"
+    (valid-time) chain a second filter::
+
+        df_known = as_of(df, t)
+        df_active = df_known[
+            (df_known.effective_from <= t)
+            & (df_known.effective_to.isna() | (df_known.effective_to > t))
+        ]
+
+    The two-step decomposition is the standard bi-temporal pattern (see
+    ``docs/lld/research/13-remit-ingestion-domain.md`` §R4) — keeping
+    ``as_of`` strictly transaction-time means the function has one job
+    and the caller composes for valid-time when wanted.
+
+    Args:
+        df: A REMIT frame matching :data:`OUTPUT_SCHEMA` (typically the
+            return value of :func:`load`).
+        t: A timezone-aware ``pd.Timestamp``.  A naive timestamp raises
+            ``ValueError`` — REMIT bi-temporal queries are nonsense
+            without a timezone reference.
+
+    Returns:
+        A new ``pd.DataFrame`` (a copy; ``df`` is not mutated) carrying
+        one row per ``mrid`` that was active at time ``t`` — i.e. its
+        latest pre-``t`` revision was not withdrawn.  Columns and dtypes
+        match :data:`OUTPUT_SCHEMA`; the row index is reset to a fresh
+        ``RangeIndex`` so callers do not inherit stale positional state.
+
+    Raises:
+        ValueError: if ``t`` is naive (i.e. ``t.tzinfo is None``).
+    """
+    if t.tzinfo is None:
+        raise ValueError(
+            f"as_of requires a timezone-aware timestamp; got naive {t!r}. "
+            "REMIT bi-temporal queries are nonsense without a timezone "
+            "reference — pass e.g. pd.Timestamp(..., tz='UTC')."
+        )
+
+    # Step 1: transaction-time filter.  Use a strictly-typed comparison
+    # so a frame with a tz-naive published_at column raises rather than
+    # silently producing wrong answers.
+    known = df[df["published_at"] <= t]
+
+    if known.empty:
+        # Preserve schema by returning an empty copy with reset index.
+        return known.reset_index(drop=True).copy()
+
+    # Step 2: keep the latest revision per mrid that was known by t.
+    # idxmax over revision_number returns the positional index of the
+    # winning row in each group; using .loc[...] preserves all columns.
+    latest_idx = known.groupby("mrid", sort=False)["revision_number"].idxmax()
+    latest = known.loc[latest_idx]
+
+    # Step 3: drop withdrawn rows.  The check is on the latest revision
+    # only — a previously-active mRID withdrawn before ``t`` is correctly
+    # excluded; a previously-withdrawn mRID re-issued before ``t`` (rare
+    # but possible) is correctly included via its newer revision_number.
+    active = latest[latest["message_status"] != "Withdrawn"]
+
+    return active.reset_index(drop=True).copy()
+
+
 # ---------------------------------------------------------------------------
 # Live fetch — Elexon Insights API ``/datasets/REMIT/stream``.  Single GET
 # (the stream endpoint returns the full window in one response, no
@@ -289,7 +389,21 @@ def _parse_message(record: dict[str, Any]) -> dict[str, Any]:
     omits the source field), so the downstream ``_to_arrow`` cast does
     not need to invent missing columns.  Field-name correspondences
     (Elexon → project) are recorded inline.
+
+    Required fields (``mrid``, ``revisionNumber``, ``publishTime``,
+    ``eventStartTime``) raise :class:`RemitParseError` when missing,
+    naming the offending field plus the available keys on the record so
+    the failure is debuggable from the message alone.  This is more
+    diagnostic than the bare ``KeyError`` Python's dict access raises by
+    default.
     """
+    required_fields = ("mrid", "revisionNumber", "publishTime", "eventStartTime")
+    missing = [name for name in required_fields if name not in record]
+    if missing:
+        raise RemitParseError(
+            f"REMIT record is missing required field(s) {missing!r}; "
+            f"available keys: {sorted(record.keys())!r}"
+        )
     return {
         # Identifier axis
         "mrid": record["mrid"],
@@ -354,7 +468,12 @@ def _live_fetch(
     :data:`MESSAGE_STATUSES` — the row is still persisted so a downstream
     consumer can investigate.
     """
-    window_end = config.window_end or date.today()
+    # ``datetime.now(UTC).date()`` (not ``date.today()``): the latter
+    # uses the *local* timezone, so a host clock crossing midnight UTC
+    # before the local date rolls would silently fetch the wrong
+    # cassette window.  Same UTC-discipline failure mode the NESO
+    # ingester patched after Stage 1.
+    window_end = config.window_end or datetime.now(UTC).date()
     window_start = config.window_start
     if window_end < window_start:
         # The Pydantic ``model_validator`` already catches this when the
@@ -364,7 +483,12 @@ def _live_fetch(
             f"REMIT fetch window_end ({window_end}) is before window_start ({window_start})."
         )
 
-    url = f"{config.base_url}{config.endpoint_path}"
+    # URL composition mirrors ``neso.py`` / ``neso_forecast.py``:
+    # rstrip a trailing slash from ``base_url`` and lstrip a leading
+    # slash from ``endpoint_path`` so a Hydra-overridden config that
+    # supplies either with or without slashes still produces a single
+    # well-formed URL (no missing or duplicated separator).
+    url = str(config.base_url).rstrip("/") + "/" + config.endpoint_path.lstrip("/")
     params: dict[str, object] = {
         "publishDateTimeFrom": f"{window_start.isoformat()}T00:00Z",
         "publishDateTimeTo": f"{window_end.isoformat()}T00:00Z",
@@ -379,7 +503,7 @@ def _live_fetch(
     response = _retrying_get(client, url, params, config)
     payload = response.json()
     if not isinstance(payload, list):
-        raise RuntimeError(
+        raise RemitParseError(
             f"REMIT stream at {url} returned non-array payload: type={type(payload).__name__}"
         )
 
@@ -387,7 +511,7 @@ def _live_fetch(
     unknown_statuses: set[str] = set()
     for raw in payload:
         if not isinstance(raw, dict):
-            raise RuntimeError(
+            raise RemitParseError(
                 f"REMIT stream record is not an object: {raw!r}; expected JSON object."
             )
         parsed = _parse_message(raw)
@@ -703,85 +827,3 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover — CLI wrapper
     raise SystemExit(_cli_main())
-
-
-def as_of(df: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
-    """Return the active-state frame as known to the market at time ``t``.
-
-    Implements the central question from ``docs/intent/13-remit-ingestion.md``:
-    "what REMIT events were known to the market at time T?".  This is a
-    **transaction-time** query: it filters by ``published_at`` (when the
-    participant disclosed the message), not by the event window.
-
-    Algorithm:
-
-    1. Filter ``df`` to rows with ``published_at <= t`` — only messages
-       the market had seen by time ``t``.
-    2. Within that filter, group by ``mrid``; keep the row with the
-       maximum ``revision_number`` — the latest revision known by ``t``.
-    3. Drop rows whose ``message_status == "Withdrawn"`` — withdrawn
-       messages were retracted by their publisher and should not appear
-       in the active state.
-
-    The ``effective_from`` / ``effective_to`` columns are *not* part of
-    this filter — that is a valid-time join, separate from the
-    transaction-time as-of.  Callers who want "active at ``t``"
-    (valid-time) chain a second filter::
-
-        df_known = as_of(df, t)
-        df_active = df_known[
-            (df_known.effective_from <= t)
-            & (df_known.effective_to.isna() | (df_known.effective_to > t))
-        ]
-
-    The two-step decomposition is the standard bi-temporal pattern (see
-    ``docs/lld/research/13-remit-ingestion-domain.md`` §R4) — keeping
-    ``as_of`` strictly transaction-time means the function has one job
-    and the caller composes for valid-time when wanted.
-
-    Args:
-        df: A REMIT frame matching :data:`OUTPUT_SCHEMA` (typically the
-            return value of :func:`load`).
-        t: A timezone-aware ``pd.Timestamp``.  A naive timestamp raises
-            ``ValueError`` — REMIT bi-temporal queries are nonsense
-            without a timezone reference.
-
-    Returns:
-        A new ``pd.DataFrame`` (a copy; ``df`` is not mutated) carrying
-        one row per ``mrid`` that was active at time ``t`` — i.e. its
-        latest pre-``t`` revision was not withdrawn.  Columns and dtypes
-        match :data:`OUTPUT_SCHEMA`; the row index is reset to a fresh
-        ``RangeIndex`` so callers do not inherit stale positional state.
-
-    Raises:
-        ValueError: if ``t`` is naive (i.e. ``t.tzinfo is None``).
-    """
-    if t.tzinfo is None:
-        raise ValueError(
-            f"as_of requires a timezone-aware timestamp; got naive {t!r}. "
-            "REMIT bi-temporal queries are nonsense without a timezone "
-            "reference — pass e.g. pd.Timestamp(..., tz='UTC')."
-        )
-
-    # Step 1: transaction-time filter.  Use a strictly-typed comparison
-    # so a frame with a tz-naive published_at column raises rather than
-    # silently producing wrong answers.
-    known = df[df["published_at"] <= t]
-
-    if known.empty:
-        # Preserve schema by returning an empty copy with reset index.
-        return known.reset_index(drop=True).copy()
-
-    # Step 2: keep the latest revision per mrid that was known by t.
-    # idxmax over revision_number returns the positional index of the
-    # winning row in each group; using .loc[...] preserves all columns.
-    latest_idx = known.groupby("mrid", sort=False)["revision_number"].idxmax()
-    latest = known.loc[latest_idx]
-
-    # Step 3: drop withdrawn rows.  The check is on the latest revision
-    # only — a previously-active mRID withdrawn before ``t`` is correctly
-    # excluded; a previously-withdrawn mRID re-issued before ``t`` (rare
-    # but possible) is correctly included via its newer revision_number.
-    active = latest[latest["message_status"] != "Withdrawn"]
-
-    return active.reset_index(drop=True).copy()
