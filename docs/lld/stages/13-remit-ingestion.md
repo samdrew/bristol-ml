@@ -223,6 +223,40 @@ produces a far denser chart over the same code path.
 - **31 in-window revision chains in a single day.** Higher than
   expected — the cassette therefore exercises `as_of` against real
   revision behaviour, not just degenerate single-revision rows.
+- **`cache_dir` default deviates from the plan, in line with the
+  layer convention.** Plan §NFR-5 wrote
+  `${oc.env:BRISTOL_ML_CACHE_DIR,~/.cache/bristol_ml}`; the shipped
+  `conf/ingestion/remit.yaml` writes
+  `${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/remit}`, matching the
+  pattern every other ingester (NESO, weather, holidays,
+  neso_forecast) already uses.  The plan clause was a one-off
+  carry-over from a generic codebase-map example, not a deliberate
+  choice to break the layer convention; the implementation honours
+  the convention so cassette-vs-fresh-fetch behaviour is uniform
+  across ingesters and the developer cache stays project-scoped
+  (alongside `data/raw/neso/`, etc.).  `data/` is already gitignored
+  with a pinned `.gitkeep`, so NFR-5 ("cache outside the repo's
+  tracked files") is preserved.  The Phase 3 `arch-reviewer` flagged
+  the divergence as M-3; on inspection it is a deliberate
+  good-deviation and the plan's clause is what should have read
+  `data/raw/remit`.  No code change required.
+- **Phase 3 review fixes landed in-branch.**  `arch-reviewer` and
+  `code-reviewer` together raised 13 items; on a fix-or-reject
+  triage (no silent deferral), the three Blocking items (B-1
+  data-shape ADR, B-2 offline-cache test, B-3 plan-mismatch parse
+  count) and four Major code defects (R1 `date.today()`-vs-UTC
+  default, R2 missing-required-field `KeyError` regression, R3
+  unsafe URL string concatenation, N2 `RuntimeError`-vs-typed
+  payload error) were fixed against tightened structural guards.
+  M-1 was strengthened to assert exact `(9, 64, 70)` mRID counts
+  with a strict-subset chain across the three sample times.  M-2
+  was the missing-from-`load`-section `as_of` definition, fixed by
+  reordering its source-file position so the algorithm sits next
+  to its consumer.  N1 was a notebook-test cleanup hygiene gap —
+  fixed via a `try/finally`-guarded executed-copy with a
+  session-scoped sweeper for orphaned artefacts.  Items rejected
+  with reasoning rather than fixed are recorded in the PR
+  description.
 
 ## Deferred
 
