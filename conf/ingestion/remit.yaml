@@ -1,0 +1,33 @@
+# @package ingestion.remit
+#
+# Elexon REMIT ingester (Stage 13).
+#
+# Source: ``https://data.elexon.co.uk/bmrs/api/v1/`` — the public,
+# unauthenticated Elexon Insights API.  Stage 13 reads the bulk-streaming
+# endpoint ``GET /datasets/REMIT/stream`` (no observed window cap, unlike
+# ``GET /datasets/REMIT`` which the API caps at 24 hours per call).
+#
+# Default ingestion window matches the demand-model training window
+# referenced in ``docs/intent/13-remit-ingestion.md`` §Points; deeper
+# backfills are an opt-in via Hydra CLI override
+# (``+ingestion.remit.window_start=2014-01-01``).  ``window_end: null``
+# means "today at fetch time".
+#
+# Retry / rate-limit / cache knobs mirror ``conf/ingestion/holidays.yaml``
+# structurally so the shared helpers in ``bristol_ml.ingestion._common``
+# accept this config via their ``Protocol`` types.  ``min_inter_request_seconds``
+# defaults to 0.5 — polite for the public Insights API; raise on slow networks.
+
+base_url: https://data.elexon.co.uk/bmrs/api/v1/
+endpoint_path: datasets/REMIT/stream
+window_start: 2018-01-01
+window_end: null
+# Defaults to ``data/raw/remit`` relative to the current working directory;
+# override with ``BRISTOL_ML_CACHE_DIR`` for portable caches.
+cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/raw/remit}
+cache_filename: remit.parquet
+request_timeout_seconds: 30.0
+max_attempts: 5
+backoff_base_seconds: 1.0
+backoff_cap_seconds: 30.0
+min_inter_request_seconds: 0.5
