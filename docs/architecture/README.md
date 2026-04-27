@@ -42,6 +42,7 @@ exists, not what's planned.
 | Models — NN sub-layer | [`layers/models-nn.md`](./layers/models-nn.md) |
 | Registry | [`layers/registry.md`](./layers/registry.md) |
 | Serving | [`layers/serving.md`](./layers/serving.md) |
+| LLM | [`layers/llm.md`](./layers/llm.md) |
 
 ## Cross-cutting concerns
 

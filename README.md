@@ -12,6 +12,49 @@ uv run python -m bristol_ml --help
 uv run pytest
 ```
 
+## API keys and offline-by-default
+
+`bristol_ml` is **offline-by-default** (DESIGN §2.1.3). Every CI run, every notebook, and every test in this repository runs without a network connection or any API credentials. External-API integrations are stub-first: each module that calls a network API ships with a hand-labelled stub backed by an environment-variable discriminator, and the stub path is the runtime default. You only need an API key when you opt into the live path.
+
+The only stage with an authenticated outbound dependency is **Stage 14 (LLM feature extractor)**, which calls the OpenAI API to extract structured features from REMIT free-text messages.
+
+### Configuring an OpenAI API key
+
+1. Create or sign in to a key at [platform.openai.com](https://platform.openai.com/).
+2. Export the key into your shell — never commit it:
+
+   ```bash
+   export BRISTOL_ML_LLM_API_KEY=sk-...
+   ```
+
+3. Switch the LLM extractor to the live path via Hydra override:
+
+   ```bash
+   uv run python -m bristol_ml.llm.extractor llm.type=openai
+   uv run python -m bristol_ml.llm.evaluate  llm.type=openai
+   ```
+
+   Without the override, both entry points run against the in-repo hand-labelled stub.
+
+To force the stub regardless of config (CI default; useful when iterating without spending tokens):
+
+```bash
+export BRISTOL_ML_LLM_STUB=1
+```
+
+The stub path makes zero network calls and requires no API key. CI sets `BRISTOL_ML_LLM_STUB=1` automatically.
+
+### Environment variables
+
+| Variable | Purpose | CI default |
+|----------|---------|------------|
+| `BRISTOL_ML_LLM_API_KEY` | OpenAI API key for Stage 14 live extraction | unset |
+| `BRISTOL_ML_LLM_STUB` | Force the LLM stub regardless of config | `1` |
+| `BRISTOL_ML_REMIT_STUB` | Force the REMIT-ingestion stub regardless of config | `1` |
+| `BRISTOL_ML_CACHE_DIR` | Override the default cache root (`~/.cache/bristol_ml`) | unset (uses default) |
+
+Pre-commit hooks and `.gitignore` keep secrets out of the repository; VCR cassette fixtures filter `authorization` and `x-api-key` headers automatically when re-recorded. Never commit a key.
+
 ## What is this?
 
 - A pedagogical reference repo for a generic ML / data-science architecture.
@@ -95,6 +138,10 @@ All six model families (`naive`, `linear`, `sarimax`, `scipy_parametric`, `nn_ml
 **Breaking change — skops migration.** Stage 12 migrated all six model families' save / load paths from `joblib` to `skops.io` for security (the serving layer is a network-facing deserialiser; `joblib.load` on an attacker-controlled artefact is RCE). **Any existing `data/registry/` directory containing `model.joblib` artefacts must be rebuilt by retraining.** `registry.load` rejects pre-Stage-12 artefacts with a clear error naming the path and the required migration action.
 
 See [`src/bristol_ml/serving/CLAUDE.md`](src/bristol_ml/serving/CLAUDE.md), [`docs/architecture/layers/serving.md`](docs/architecture/layers/serving.md), and the [Stage 12 retrospective](docs/lld/stages/12-serving.md).
+
+## Worked example: LLM feature extractor (Stage 14)
+
+`notebooks/14_llm_extractor.ipynb` is the demo surface for the project's first authenticated outbound dependency: an LLM that reads REMIT free-text messages and returns a structured feature row. The architectural lesson is **stub-first discipline** — every CI run, every notebook bootstrap, and every test runs an offline `StubExtractor` backed by a 76-record hand-labelled gold set; no API key, no network call. The pedagogical lesson is the **side-by-side accuracy report**: `python -m bristol_ml.llm.evaluate` runs both implementations over the gold set and prints a per-field exact-match column next to a tolerance column (±5 MW capacity, ±1 h timestamps), showing where the LLM gets it wrong and *how the metric choice itself changes the answer* (intent line 41 — "the metric choice is a lesson itself"). Switching to the live OpenAI path is one Hydra override (`llm.type=openai`) plus an `BRISTOL_ML_LLM_API_KEY` export (see [API keys](#api-keys-and-offline-by-default) above). The integration test against the live path replays a recorded VCR cassette so CI never spends tokens. Public surface: a two-method `Extractor` Protocol (`extract` + `extract_batch`), a Pydantic `ExtractionResult` carrying provenance (`prompt_hash` + `model_id` — first 12 hex chars of SHA-256 of the prompt-file bytes), and a `build_extractor(config)` factory that triple-gates the live path (config discriminator + env-var override + API-key gate). Entry points: `python -m bristol_ml.llm.extractor --help`, `python -m bristol_ml.llm.evaluate --help`. See [`src/bristol_ml/llm/CLAUDE.md`](src/bristol_ml/llm/CLAUDE.md), [`docs/architecture/layers/llm.md`](docs/architecture/layers/llm.md), and the [Stage 14 retrospective](docs/lld/stages/14-llm-extractor.md).
 
 ## Worked example: REMIT bi-temporal ingestion (Stage 13)
 

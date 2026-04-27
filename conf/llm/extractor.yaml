@@ -1,0 +1,32 @@
+# @package llm
+#
+# Default configuration for the Stage 14 LLM feature extractor.
+#
+# The default ``type`` is ``stub`` — every CI run, every notebook
+# bootstrap, and every test that does not explicitly opt in resolves
+# this configuration. AC-2 (intent line 34): "running anything that
+# consumes the extractor works offline with no API key" is enforced
+# both here (default discriminator) and by the env-var double-gate at
+# ``LlmExtractor.__init__`` (plan §1 D4).
+#
+# To switch to the live OpenAI path:
+#
+#   uv run python -m bristol_ml.llm.extractor llm.type=openai
+#
+# Plan §1 D6 (Ctrl+G 2026-04-27 OQ-A → OpenAI): the live path uses
+# the OpenAI Chat Completions API with strict JSON-schema response
+# format (constrained generation via CFG token masking; GA since
+# August 2024 per researcher R1.2).
+#
+# This group is *not* in ``conf/config.yaml``'s defaults list — entry
+# points compose it explicitly via ``+llm=extractor`` (mirroring the
+# Stage 12 ``serving`` precedent).
+#
+# Round-trip is asserted by
+# ``tests/unit/test_config.py::test_llm_extractor_config_round_trips_through_hydra``.
+
+type: stub
+model_name: gpt-4o-mini
+api_key_env_var: BRISTOL_ML_LLM_API_KEY
+prompt_file: conf/llm/prompts/extract_v1.txt
+request_timeout_seconds: 30.0
