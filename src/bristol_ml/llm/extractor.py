@@ -44,12 +44,14 @@ import sys
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from bristol_ml.config import load_config
 from bristol_ml.llm import ExtractionResult, Extractor, RemitEvent
+from bristol_ml.llm._prompts import load_prompt
 from conf._schemas import LlmExtractorConfig
 
 __all__ = [
@@ -258,24 +260,116 @@ class StubExtractor:
 # ---------------------------------------------------------------------
 
 
-class LlmExtractor:
-    """Live OpenAI Chat Completions extractor (T4 placeholder at T3).
+# ---------------------------------------------------------------------
+# Strict-mode JSON schema (plan §1 D6 — OpenAI ``json_schema`` response_format)
+# ---------------------------------------------------------------------
 
-    T3 ships the construction-time guard rails (env-var check, config
-    validation, the structural Protocol satisfaction); the actual
-    OpenAI call lives at T4 along with the prompt-loading helper and
-    the VCR cassette.
+
+# OpenAI strict mode requires every object to declare
+# ``additionalProperties: false`` and to list every property in
+# ``required`` (no implicit-optional via ``default``). Pydantic's
+# ``model_json_schema()`` emits ``additionalProperties: false`` for
+# ``extra="forbid"`` models but it also emits ``default: null`` on
+# ``Optional[...]`` fields and omits them from ``required`` — both
+# would be rejected by the OpenAI API at first call.
+#
+# We therefore hand-author the schema for the LLM-populated subset.
+# The provenance fields (``prompt_hash`` + ``model_id``) are stamped
+# by the extractor *after* the LLM returns and so are not part of
+# what the model populates.
+#
+# Reference: https://platform.openai.com/docs/guides/structured-outputs
+# (Strict mode, "additionalProperties:false on every object" + "all
+# properties in required").
+_OPENAI_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "event_type",
+        "fuel_type",
+        "affected_capacity_mw",
+        "effective_from",
+        "effective_to",
+        "confidence",
+    ],
+    "properties": {
+        "event_type": {
+            "type": "string",
+            "description": (
+                "One of 'Outage', 'Restriction', 'Withdrawn', 'Other'. "
+                "Prefer the input's structured event_type when present."
+            ),
+        },
+        "fuel_type": {
+            "type": "string",
+            "description": (
+                "Canonical Elexon fuel-type vocabulary "
+                "('Coal', 'Gas', 'Nuclear', 'Oil', 'Wind', 'Solar', "
+                "'Hydro', 'Pumped Storage', 'Biomass', 'Other', "
+                "'Interconnector', 'Battery'). Match the input's "
+                "fuel_type when present; otherwise infer from "
+                "the unit name or description."
+            ),
+        },
+        "affected_capacity_mw": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "description": (
+                "Unavailable capacity in megawatts; null if no number "
+                "is recoverable from the input."
+            ),
+        },
+        "effective_from": {
+            "type": "string",
+            "description": "UTC ISO-8601 timestamp marking the event start.",
+        },
+        "effective_to": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": (
+                "UTC ISO-8601 timestamp marking the event end; null for open-ended events."
+            ),
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": (
+                "1.0 when every output field is grounded in an explicit "
+                "input field; 0.0 when no field could be recovered."
+            ),
+        },
+    },
+}
+
+
+class LlmExtractor:
+    """Live OpenAI Chat Completions extractor (plan §1 D6).
+
+    Calls ``openai.chat.completions.create`` with a strict
+    ``response_format`` of type ``"json_schema"`` so the model is
+    constrained at decode time to emit valid JSON conforming to the
+    schema (CFG token masking; OpenAI strict mode, GA since
+    August 2024).
 
     Plan §1 D5: ``__init__`` reads the API key from the configured env
     var. If absent and ``BRISTOL_ML_LLM_STUB`` is not set, raise
     :class:`RuntimeError` at init time with a message naming both
     env-vars (so the operator sees the offline escape hatch).
 
+    Plan §1 D14 + D16: a parse / validation failure logs WARNING with
+    the event id and returns an :class:`ExtractionResult` populated
+    with the documented default (``confidence=0.0``, structural fields
+    mirrored from the input, capacity ``None``, provenance recorded).
+    ``extract`` never raises an unhandled exception (NFR-6).
+
     The triple-gating is enforced by :func:`build_extractor`, not by
     the class itself — a caller can construct ``LlmExtractor`` directly
     in a test, but the factory is the production path and short-circuits
     to the stub when the env var or API key is missing.
     """
+
+    # Class-level reference to the strict schema so tests can assert
+    # its shape without importing the module-private constant.
+    RESPONSE_SCHEMA = _OPENAI_RESPONSE_SCHEMA
 
     def __init__(self, config: LlmExtractorConfig) -> None:
         if config.type != "openai":
@@ -288,6 +382,11 @@ class LlmExtractor:
                 "LlmExtractorConfig.model_name must be set when type='openai' "
                 "(e.g. 'gpt-4o-mini'); got None."
             )
+        if config.prompt_file is None:
+            raise ValueError(
+                "LlmExtractorConfig.prompt_file must be set when type='openai' "
+                "(e.g. conf/llm/prompts/extract_v1.txt); got None."
+            )
         api_key = os.environ.get(config.api_key_env_var, "").strip()
         if not api_key:
             raise RuntimeError(
@@ -296,27 +395,149 @@ class LlmExtractor:
                 f"or set {STUB_ENV_VAR}=1 to force the offline stub path "
                 "(plan §1 D4 — triple-gated for CI safety)."
             )
+        # Plan §1 D7 / NFR-5: load prompt + compute hash at init
+        # so every call shares the same prompt-bytes-derived identity
+        # and a deploy-time stale prompt fails loudly here rather than
+        # at the first call.
+        prompt_text, prompt_hash = load_prompt(config.prompt_file)
+        # Defer the openai import so a stub-only test environment
+        # (or a CI run without the SDK) still imports this module.
+        from openai import OpenAI
+
         self._config = config
-        self._api_key = api_key
-        # T4: instantiate the OpenAI client + load prompt here.
+        self._prompt_text = prompt_text
+        self._prompt_hash = prompt_hash
+        self._client = OpenAI(api_key=api_key, timeout=config.request_timeout_seconds)
         logger.info(
-            "LlmExtractor initialised (model={}); live OpenAI call wiring lands at T4",
+            "LlmExtractor initialised (model={}, prompt_hash={})",
             config.model_name,
+            prompt_hash,
         )
+
+    @property
+    def prompt_hash(self) -> str:
+        """The 12-char SHA-256 prefix of the active prompt (read-only)."""
+        return self._prompt_hash
+
+    @property
+    def model_id(self) -> str:
+        """The configured OpenAI model id (read-only)."""
+        # ``__init__`` validates ``model_name is not None``.
+        assert self._config.model_name is not None
+        return self._config.model_name
 
     def extract(self, event: RemitEvent) -> ExtractionResult:
-        """Extract a single event — T4 wires the OpenAI call."""
-        raise NotImplementedError(
-            "LlmExtractor.extract is wired at Stage 14 T4; T3 ships the "
-            "construction-time guard rails only. Use the StubExtractor "
-            "via BRISTOL_ML_LLM_STUB=1 in the meantime."
-        )
+        """Extract structured features via one OpenAI call.
+
+        Plan §1 D6 + D14 + D16: builds a user message with the event
+        rendered as JSON (per the prompt's ``{event_json}`` placeholder),
+        calls ``chat.completions.create`` with strict
+        ``response_format``, parses the JSON, and constructs an
+        :class:`ExtractionResult` stamped with ``prompt_hash`` and
+        ``model_id`` provenance. On any failure (network, parse,
+        Pydantic validation), logs WARNING and returns the documented
+        default.
+        """
+        try:
+            user_message = self._render_user_message(event)
+            response = self._client.chat.completions.create(
+                model=self.model_id,
+                messages=[
+                    {"role": "system", "content": self._prompt_text},
+                    {"role": "user", "content": user_message},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "extraction_result",
+                        "strict": True,
+                        "schema": self.RESPONSE_SCHEMA,
+                    },
+                },
+            )
+            content = response.choices[0].message.content
+            if content is None:
+                raise ValueError(
+                    f"OpenAI returned empty content for mrid={event.mrid!r} "
+                    f"rev={event.revision_number!r}; expected JSON string."
+                )
+            payload = json.loads(content)
+            return self._build_extraction_result(payload)
+        except Exception as exc:  # NFR-6: never raise from extract.
+            logger.warning(
+                "LlmExtractor.extract failed for mrid={} rev={}: {}; "
+                "returning documented default (confidence=0.0).",
+                event.mrid,
+                event.revision_number,
+                exc,
+            )
+            logger.debug("Failure traceback (mrid={}): {!r}", event.mrid, exc)
+            return self._fallback_result(event)
 
     def extract_batch(self, events: list[RemitEvent]) -> list[ExtractionResult]:
-        """Extract a batch — T4 wires the OpenAI call."""
-        raise NotImplementedError(
-            "LlmExtractor.extract_batch is wired at Stage 14 T4; T3 ships "
-            "the construction-time guard rails only."
+        """Extract a batch — one call per event, order preserved.
+
+        Stage 14 ships a sequential implementation; the OpenAI Chat
+        Completions API does not have a free batch primitive (the
+        ``/v1/batches`` endpoint is async and adds operational
+        complexity that is not justified at the demo scale). The
+        Protocol is shaped so a future stage can swap in a parallel
+        implementation without changing callers.
+        """
+        return [self.extract(event) for event in events]
+
+    # ------------------------------------------------------------------
+    # Internal helpers — kept module-private; tests use them via the
+    # public extract() path.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_user_message(event: RemitEvent) -> str:
+        """Render the RemitEvent as a JSON object for the prompt's user message.
+
+        The prompt body refers to ``{event_json}`` — the user message
+        substitutes that placeholder by being the JSON object directly.
+        ``mode='json'`` ensures datetimes are serialised as ISO strings.
+        """
+        return event.model_dump_json(indent=2)
+
+    def _build_extraction_result(self, payload: dict[str, Any]) -> ExtractionResult:
+        """Construct an ExtractionResult from an OpenAI strict-mode payload.
+
+        Strict mode guarantees every required field is present with the
+        right type, but Pydantic still validates because the schema's
+        ``confidence`` constraint (``[0, 1]``) and the datetime-aware
+        validators (UTC required) are stricter than what the LLM
+        contract enforces.
+        """
+        return ExtractionResult(
+            event_type=payload["event_type"],
+            fuel_type=payload["fuel_type"],
+            affected_capacity_mw=payload.get("affected_capacity_mw"),
+            effective_from=payload["effective_from"],
+            effective_to=payload.get("effective_to"),
+            confidence=payload["confidence"],
+            prompt_hash=self._prompt_hash,
+            model_id=self.model_id,
+        )
+
+    def _fallback_result(self, event: RemitEvent) -> ExtractionResult:
+        """Documented default per plan §1 D16 — provenance recorded.
+
+        Mirrors the StubExtractor's miss-path defaults for parity, plus
+        the live extractor's ``prompt_hash`` and ``model_id`` so a
+        downstream consumer can still see "this came from prompt X
+        on model Y" even on a fallback row.
+        """
+        return ExtractionResult(
+            event_type=event.event_type if event.event_type is not None else "Other",
+            fuel_type=event.fuel_type if event.fuel_type is not None else "Other",
+            affected_capacity_mw=None,
+            effective_from=event.effective_from,
+            effective_to=event.effective_to,
+            confidence=0.0,
+            prompt_hash=self._prompt_hash,
+            model_id=self.model_id,
         )
 
 

@@ -59,6 +59,19 @@ dependencies = [
     # ``DeprecationWarning`` so any external scripts can complete a
     # one-off migration before Stage 13.
     "skops>=0.10,<1",
+    # Stage 14 (D6 — Ctrl+G 2026-04-27 OQ-A): the OpenAI Python SDK is
+    # the live LLM extractor's only network dependency.  ``response_format``
+    # with ``type='json_schema'`` (strict-mode CFG token masking, GA since
+    # August 2024) requires SDK ``>=1.40``; the upper bound holds the
+    # major-version pin convention.  The dep is *runtime*, not dev,
+    # because plan §1 D4's triple-gating means the SDK is imported only
+    # when ``type='openai'`` *and* the API-key env-var is populated *and*
+    # ``BRISTOL_ML_LLM_STUB`` is unset — in which case the operator has
+    # explicitly opted into the live path and a missing ``openai`` module
+    # would surface as a deferred ImportError rather than at config time.
+    # Keeping it in runtime deps means ``uv sync`` produces a working
+    # install for the demo without needing the dev group.
+    "openai>=1.40,<2",
 ]
 
 [dependency-groups]
