@@ -137,7 +137,7 @@ Why a hash, not a filename or an embedded version field?
 - An embedded version field would solve that, but adds a parsing contract on top of "the file is plain text".
 - A bytes hash is the cheapest content-derived identity that survives edits *and* renames; collisions over the project lifetime are vanishing (12 hex chars = 48 bits = 1 in 281 trillion).
 
-The truncation is a readability choice — the hash appears inline in stdout output and parquet preview frames. The full digest is available via `bristol_ml.llm._prompts.prompt_sha256_full` if a future stage needs to join onto an external prompt registry.
+The truncation is a readability choice — the hash appears inline in stdout output and parquet preview frames. If a future stage needs the full SHA-256 digest (e.g. to join onto an external prompt registry) it can be reconstructed from the same input bytes via `hashlib.sha256(prompt_bytes).hexdigest()`.
 
 The hash is computed once at `LlmExtractor.__init__` so a deploy-time stale prompt fails loudly at construction (`FileNotFoundError`) rather than at the first call, and every call shares the same prompt-bytes-derived identity.
 

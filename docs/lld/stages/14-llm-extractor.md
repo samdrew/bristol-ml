@@ -293,6 +293,101 @@ metric-choice lesson.
   hand-rolled discipline; not enforced by a structural test today
   because the OpenAI SDK is a runtime dependency in this project.
 
+## Phase-3 review fixes
+
+The three reviewers (`arch-reviewer`, `code-reviewer`, `docs-writer`)
+ran in parallel after T8 closed; the synthesis surfaced one Blocking,
+two Major, and four Minor items. All Blocking + Major + actionable
+Minor items were fixed in-branch before PR; the four remaining items
+(documented below as "Surfaced for follow-up") are non-actionable in
+this branch.
+
+- **Blocking — API-key partial leak in failure logs.** OpenAI's
+  `AuthenticationError` echoes a partial key (`"Incorrect API key
+  provided: sk-real*****CDEF"`) in its server-supplied message; the
+  WARNING and DEBUG lines in `LlmExtractor.extract` previously logged
+  `exc` and `{!r}`, landing that fragment in operator logs. Fixed by
+  logging only `type(exc).__name__` and the event identifying
+  metadata (mrid + revision_number). New regression test
+  `test_failure_log_does_not_leak_exception_message_or_repr` injects
+  a mock exception whose `str` contains an API-key fragment and
+  asserts the fragment is absent from every captured record.
+- **Major — Double extraction of the first gold-set record.** The
+  harness's main loop extracted every record once; a redundant
+  second `extractor.extract()` call after the loop read provenance
+  for the report header, costing one extra OpenAI request per harness
+  run on the live path. Fixed by capturing the first iteration's
+  result inline and reusing it. New regression test
+  `test_evaluate_calls_extract_exactly_once_per_record` counts
+  invocations against an N-record fixture.
+- **Major — Stale Anthropic references in the completed plan.** OQ-A
+  bound the live provider to OpenAI at Ctrl+G, but five lines in
+  `docs/plans/completed/14-llm-extractor.md` still read as if
+  Anthropic shipped (D18 cassette endpoint, line 78 "ships only stub
+  and anthropic", line 109 scope statement, line 350 example
+  override, OQ-5 reading-order note, D14 schema sketch model id).
+  All five updated to reflect what shipped. Historical references
+  (D3 future-slot example, OQ-A drafted-default note, R1.1
+  researcher-doc reference) preserved as accurate context.
+- **Minor — `"...and N more"` count understated.** Each record can
+  contribute up to five disagreement items; the captured-list cap
+  permitted overshoot but the formatter's `remaining` formula counted
+  only captured items, not total observed. With 10 disagreements
+  observed and `max_disagreements=1`, output read `... and 4 more`
+  instead of `... and 9 more`. Fixed by adding
+  `EvaluationReport.total_disagreements` populated from a per-row
+  `observed: int` return on `_accumulate_per_field`. New regression
+  test `test_total_disagreements_count_is_accurate_when_capture_overflows`.
+- **Minor — `DEFAULT_GOLD_SET_PATH` and `prompt_file` were
+  cwd-relative.** Previous values resolved against the process cwd,
+  breaking notebook callers (cwd = `notebooks/`) and Stage 15/16
+  importers from elsewhere. Both now anchor on
+  `Path(__file__).resolve().parents[3]` (repo root). New regression
+  test `test_stub_loads_canonical_gold_set_from_alternate_cwd`
+  `chdir`s to a temp directory and constructs `StubExtractor()`
+  without a path override.
+- **Minor — `prompt_sha256_full` exported but unused.** Plan-polish
+  surface; cut from `_prompts.__all__`. The 12-char prefix remains
+  the public path; the layer doc and module guide note that the full
+  digest is reconstructible from input bytes via
+  `hashlib.sha256(prompt_bytes).hexdigest()` if a future stage needs
+  it.
+- **Housekeeping — stale `docs/plans/active/` link in source-file
+  docstrings.** Six docstrings updated to point at
+  `docs/plans/completed/14-llm-extractor.md`.
+
+### Surfaced for follow-up
+
+These items were flagged by the reviewers but are non-actionable in
+this branch; they appear on the PR description for future work:
+
+- **DESIGN.md §9 stage map drift (deny-tier).** Lines 452-454 of
+  `docs/intent/DESIGN.md` describe Stage 14 as `llm/extractor.py`
+  interface + `llm/extractor_stub.py` + `llm/extractor_claude.py`
+  with the Anthropic SDK. What shipped is `llm/__init__.py`
+  (Protocol + models) + `llm/extractor.py` (both `StubExtractor` and
+  `LlmExtractor` in one file) + `llm/evaluate.py` + `llm/_prompts.py`,
+  with the OpenAI SDK. Three-point drift: (i) stub split into a
+  separate file, (ii) provider name, (iii) provider class file name.
+  Deny-tier path; the human resolves in the main session.
+- **`evaluate.py` imports private symbols from `extractor.py`**
+  (`_GoldSetExpected`, `_GoldSetRecord`, `_load_gold_set`).
+  Intentional sibling-package coupling, but undocumented as such.
+  Either promote to a non-private surface or factor a shared
+  `_gold_set.py`. Cheap follow-up; not done in-branch because the
+  reviewer agreed the coupling is correct, only the documentation is
+  thin.
+- **`LlmExtractor.model_id` uses an `assert` for an `__init__`-time
+  invariant** (`extractor.py` line 426). The invariant is enforced
+  at construction; the `assert` papers over a type-checker want for
+  `Optional` narrowing. Could be a direct return + comment or a
+  type-system tweak; not load-bearing.
+- **Cassette test fixture-scope mismatch** (`test_llm_extractor_cassette.py`
+  lines 55, 103). Module-scoped skip fixture vs function-scoped
+  monkeypatch. Currently harmless because there is only one
+  `@pytest.mark.vcr` test in the module; would confuse anyone
+  extending the suite.
+
 ## Deferred
 
 - **VCR cassette recording.** Build-up phase decision; documented

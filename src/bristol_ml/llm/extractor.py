@@ -27,7 +27,7 @@ The factory honours ``BRISTOL_ML_LLM_STUB=1`` regardless of config
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/llm.md`` (lands at T7).
-- Stage 14 plan — ``docs/plans/active/14-llm-extractor.md`` §5, §6.
+- Stage 14 plan — ``docs/plans/completed/14-llm-extractor.md`` §5, §6.
 - Boundary types — :mod:`bristol_ml.llm` (`__init__.py`).
 
 Standalone CLI (``python -m bristol_ml.llm.extractor``) prints the
@@ -73,7 +73,15 @@ STUB_ENV_VAR = "BRISTOL_ML_LLM_STUB"
 # code; the ``schema_version`` field at the top of the file guards
 # additions. Callers can override via ``StubExtractor(gold_set_path=...)``
 # (e.g. for unit tests that point at a smaller fixture).
-DEFAULT_GOLD_SET_PATH = Path("tests/fixtures/llm/hand_labelled.json")
+#
+# Anchored on the source file so the constant resolves correctly
+# regardless of the process working directory — Phase-3 review fix:
+# notebook callers (cwd = ``notebooks/``) and downstream Stage 15/16
+# imports must not have to chdir to the repo root before loading.
+# The four ``parents`` walk is ``llm/`` → ``bristol_ml/`` → ``src/`` →
+# repo root. ``resolve()`` collapses any symlinks.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_GOLD_SET_PATH = _REPO_ROOT / "tests" / "fixtures" / "llm" / "hand_labelled.json"
 
 
 # ---------------------------------------------------------------------
@@ -399,7 +407,16 @@ class LlmExtractor:
         # so every call shares the same prompt-bytes-derived identity
         # and a deploy-time stale prompt fails loudly here rather than
         # at the first call.
-        prompt_text, prompt_hash = load_prompt(config.prompt_file)
+        #
+        # Anchor a relative ``prompt_file`` to the repo root (same
+        # rationale as ``DEFAULT_GOLD_SET_PATH``): the YAML default
+        # ``conf/llm/prompts/extract_v1.txt`` is repo-relative; a
+        # Stage 15/16 caller from a different cwd must not have to
+        # chdir before instantiating. Absolute paths are honoured as-is.
+        prompt_path = config.prompt_file
+        if not prompt_path.is_absolute():
+            prompt_path = _REPO_ROOT / prompt_path
+        prompt_text, prompt_hash = load_prompt(prompt_path)
         # Defer the openai import so a stub-only test environment
         # (or a CI run without the SDK) still imports this module.
         from openai import OpenAI
@@ -464,14 +481,24 @@ class LlmExtractor:
             payload = json.loads(content)
             return self._build_extraction_result(payload)
         except Exception as exc:  # NFR-6: never raise from extract.
+            # Log only the exception type, never its message or repr:
+            # OpenAI's ``AuthenticationError`` echoes a partial API key
+            # (e.g. ``sk-real*****CDEF``) in its server-supplied message,
+            # which would leak into log files / shared demo output.
+            # DESIGN §7: secrets must not appear in code, config, or logs.
             logger.warning(
-                "LlmExtractor.extract failed for mrid={} rev={}: {}; "
+                "LlmExtractor.extract failed for mrid={} rev={} ({}); "
                 "returning documented default (confidence=0.0).",
                 event.mrid,
                 event.revision_number,
-                exc,
+                type(exc).__name__,
             )
-            logger.debug("Failure traceback (mrid={}): {!r}", event.mrid, exc)
+            logger.debug(
+                "Failure exception class (mrid={} rev={}): {}",
+                event.mrid,
+                event.revision_number,
+                type(exc).__name__,
+            )
             return self._fallback_result(event)
 
     def extract_batch(self, events: list[RemitEvent]) -> list[ExtractionResult]:

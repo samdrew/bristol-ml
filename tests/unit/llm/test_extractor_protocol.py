@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/14-llm-extractor.md`` §6 T2 named tests:
+- ``docs/plans/completed/14-llm-extractor.md`` §6 T2 named tests:
   ``test_extractor_protocol_has_two_methods``,
   ``test_extraction_result_pydantic_validation_on_bad_types``,
   ``test_extraction_result_datetimes_are_utc_aware``,

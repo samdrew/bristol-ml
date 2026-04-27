@@ -1,7 +1,7 @@
 """Build notebooks/14_llm_extractor.ipynb programmatically.
 
 Stage 14 Task T6 notebook deliverable — follows the six-cell recipe in
-``docs/plans/active/14-llm-extractor.md`` §5 (Notebook structure) +
+``docs/plans/completed/14-llm-extractor.md`` §5 (Notebook structure) +
 §6 T6.
 
 Generating the notebook from a Python script keeps cell source under
@@ -88,7 +88,7 @@ discriminator:
   cassette so CI never touches the network.
 
 - **Intent:** `docs/intent/14-llm-extractor.md`.
-- **Plan:** `docs/plans/active/14-llm-extractor.md`.
+- **Plan:** `docs/plans/completed/14-llm-extractor.md`.
 - **Module:** `src/bristol_ml/llm/`.
 
 CI runs this notebook against the gold-set fixture

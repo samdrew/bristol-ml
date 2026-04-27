@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/14-llm-extractor.md`` §6 T4 named tests:
+- ``docs/plans/completed/14-llm-extractor.md`` §6 T4 named tests:
   ``test_stub_and_llm_extractors_satisfy_protocol_structurally``
   (LLM half), ``test_llm_extractor_config_discriminator_supports_third_literal_slot``,
   ``test_model_name_and_endpoint_are_in_yaml_not_code``,
@@ -421,7 +421,11 @@ def test_prompt_hash_is_recorded_in_extraction_result(
     assert result.prompt_hash is not None
     assert len(result.prompt_hash) == PROMPT_HASH_PREFIX_CHARS
     # And it matches the computed hash of the canonical prompt file.
-    canonical_bytes = Path("conf/llm/prompts/extract_v1.txt").read_bytes()
+    # Anchor on the source-tree root (same rationale as the
+    # source-side fix to ``DEFAULT_GOLD_SET_PATH``) so the test does
+    # not silently rely on the pytest cwd being the repo root.
+    repo_root = Path(__file__).resolve().parents[3]
+    canonical_bytes = (repo_root / "conf/llm/prompts/extract_v1.txt").read_bytes()
     assert result.prompt_hash == prompt_sha256_prefix(canonical_bytes)
 
 
@@ -524,6 +528,61 @@ def test_network_error_path_returns_default(
     result = extractor.extract(sample_event)
     assert isinstance(result, ExtractionResult)
     assert result.confidence == 0.0
+
+
+def test_failure_log_does_not_leak_exception_message_or_repr(
+    openai_config: LlmExtractorConfig,
+    sample_event: RemitEvent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Guards Phase-3 code-review finding: API-key partial leak in logs.
+
+    OpenAI's ``AuthenticationError`` echoes a partial key
+    (e.g. ``"Incorrect API key provided: sk-real*****CDEF"``) in the
+    server-supplied message; logging the exception's ``str`` or
+    ``repr`` would land that fragment in operator logs / shared demo
+    output. The fallback path must log only ``type(exc).__name__``
+    and identifying event metadata — never the exception itself.
+
+    DESIGN §7: secrets must not appear in code, config, or logs.
+    """
+    extractor = LlmExtractor(openai_config)
+    # Simulate the worst-case AuthenticationError-style message: an
+    # exception whose str / repr contains an API-key fragment.
+    leaky_secret = "sk-realk1234EXAMPLECDEF"
+    create_mock = MagicMock(
+        side_effect=RuntimeError(f"Incorrect API key provided: {leaky_secret}.")
+    )
+    extractor._client = MagicMock()  # type: ignore[attr-defined]
+    extractor._client.chat.completions.create = create_mock
+
+    # Bridge loguru → caplog so caplog.records sees both WARNING + DEBUG.
+    from loguru import logger
+
+    handler_id = logger.add(
+        lambda message: caplog.handler.handle(_loguru_to_logging(message)),
+        format="{message}",
+        level="DEBUG",
+    )
+    try:
+        result = extractor.extract(sample_event)
+    finally:
+        logger.remove(handler_id)
+
+    assert result.confidence == 0.0  # fallback path, as expected
+    # The leaky fragment must not appear in any captured log record.
+    rendered = "\n".join(r.getMessage() for r in caplog.records)
+    assert leaky_secret not in rendered, (
+        "API-key fragment leaked into log output; the failure-path "
+        f"logger must not include the exception message/repr. "
+        f"Records: {rendered!r}."
+    )
+    # And the fallback warning must still name the event so the
+    # operator can identify which call failed.
+    assert any("M-A" in r.getMessage() for r in caplog.records), (
+        "WARNING must still name the failing event mrid for operability; "
+        f"got {[r.getMessage() for r in caplog.records]!r}."
+    )
 
 
 # ---------------------------------------------------------------------

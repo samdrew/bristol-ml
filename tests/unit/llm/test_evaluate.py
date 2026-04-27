@@ -435,9 +435,123 @@ def test_max_disagreements_truncates_and_appends_count(tmp_path: Path) -> None:
     assert "... and 1 more" in text
 
 
-# --------------------------------------------------------------------------- #
-# CLI surface
-# --------------------------------------------------------------------------- #
+def test_evaluate_calls_extract_exactly_once_per_record(tmp_path: Path) -> None:
+    """Phase-3 review fix: provenance reuses the first iteration's result.
+
+    The previous implementation re-extracted the first record after the
+    main loop to read ``prompt_hash`` / ``model_id`` for the report
+    header, costing one redundant API call per harness run on the live
+    path. This test counts ``extract`` invocations against a fixture
+    of N records and asserts exactly N calls.
+    """
+    fixture_path = _make_minimal_gold_fixture(tmp_path)
+
+    class _CountingExtractor:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def extract(self, event: RemitEvent) -> ExtractionResult:
+            self.call_count += 1
+            return ExtractionResult(
+                event_type=event.event_type or "Other",
+                fuel_type=event.fuel_type or "Other",
+                affected_capacity_mw=event.affected_mw,
+                effective_from=event.effective_from,
+                effective_to=event.effective_to,
+                confidence=1.0,
+                prompt_hash="abcdef012345",
+                model_id="test-model",
+            )
+
+        def extract_batch(self, events: list[RemitEvent]) -> list[ExtractionResult]:
+            return [self.extract(e) for e in events]
+
+    counting = _CountingExtractor()
+    import bristol_ml.llm.evaluate as eval_mod
+
+    real_build = eval_mod.build_extractor
+    eval_mod.build_extractor = lambda cfg, gold_set_path=None: counting
+    try:
+        report = evaluate(
+            LlmExtractorConfig(type="openai", model_name="test"),
+            gold_set_path=fixture_path,
+        )
+    finally:
+        eval_mod.build_extractor = real_build
+
+    assert counting.call_count == report.gold_set_size, (
+        f"Phase-3 fix: harness must call extract() exactly once per "
+        f"record (no second call for provenance). Gold set size "
+        f"{report.gold_set_size}, but extract() was called "
+        f"{counting.call_count} times."
+    )
+    # And the header still reflects the live extractor's provenance.
+    assert report.prompt_hash == "abcdef012345"
+    assert report.model_id == "test-model"
+
+
+def test_total_disagreements_count_is_accurate_when_capture_overflows(
+    tmp_path: Path,
+) -> None:
+    """Phase-3 review fix: ``...and N more`` reports the *true* tail size.
+
+    Each record can disagree on up to five fields, so a single record
+    can append up to five items to the captured list. With
+    ``max_disagreements=1`` and an extractor that disagrees on every
+    field, the captured list grows to 5 items on the first record and
+    is then frozen. A naive ``remaining = len(captured) - shown``
+    would print ``... and 4 more`` regardless of how many records
+    follow; the correct answer (against a 2-record fixture, 5 fields
+    each, all wrong) is **9 more** (10 total disagreements minus the
+    1 shown). This test guards against a regression of the off-by-many
+    behaviour code-reviewer flagged in Phase 3.
+    """
+    fixture_path = _make_minimal_gold_fixture(tmp_path)
+
+    class _AllWrongExtractor:
+        """Disagrees on every field for every record — drives the cap."""
+
+        def extract(self, event: RemitEvent) -> ExtractionResult:
+            return ExtractionResult(
+                event_type="Other",  # wrong on both records
+                fuel_type="Other",  # wrong on both records
+                # Bigger drift than the ±5 MW tolerance.
+                affected_capacity_mw=(event.affected_mw or 0.0) + 100.0,
+                # Bigger drift than the ±1 h tolerance.
+                effective_from=event.effective_from + timedelta(hours=12),
+                # Flip None ↔ populated for effective_to to force a mismatch.
+                effective_to=(None if event.effective_to is not None else event.effective_from),
+                confidence=1.0,
+            )
+
+        def extract_batch(self, events: list[RemitEvent]) -> list[ExtractionResult]:
+            return [self.extract(e) for e in events]
+
+    import bristol_ml.llm.evaluate as eval_mod
+
+    real_build = eval_mod.build_extractor
+    eval_mod.build_extractor = lambda cfg, gold_set_path=None: _AllWrongExtractor()
+    try:
+        report = evaluate(
+            LlmExtractorConfig(type="openai", model_name="test"),
+            gold_set_path=fixture_path,
+            max_disagreements=1,
+        )
+    finally:
+        eval_mod.build_extractor = real_build
+
+    # 2 records x 5 fields wrong each = 10 disagreement items observed.
+    assert report.total_disagreements == 10, (
+        f"All five fields wrong on both records ⇒ 10 disagreements; "
+        f"got {report.total_disagreements}."
+    )
+    text = format_report(report, max_disagreements=1)
+    # 1 shown -> 9 more, NOT 4 (which is what the captured-list-only
+    # formula would produce: 5 captured - 1 shown).
+    assert "... and 9 more" in text, (
+        f"Tail count must reflect total observed minus shown, not "
+        f"captured minus shown. Got output:\n{text}"
+    )
 
 
 def test_evaluate_module_runs_standalone_help() -> None:

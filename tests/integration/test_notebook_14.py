@@ -16,7 +16,7 @@ the kernel cwd to the source notebook's parent and silently ignores
 the ``finally`` block. A session-scoped ``autouse`` fixture sweeps
 orphans from prior runs.
 
-Plan reference: ``docs/plans/active/14-llm-extractor.md`` §6 T6 named
+Plan reference: ``docs/plans/completed/14-llm-extractor.md`` §6 T6 named
 test ``test_notebook_14_llm_extractor_executes_top_to_bottom``.
 """
 

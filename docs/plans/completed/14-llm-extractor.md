@@ -52,7 +52,7 @@ The Evidence column cites the artefact that *resolved* each decision.
 | **D15** | Eval harness output | **Stdout primary**, with a deterministic format (sorted records, redacted timestamps in test mode). The same content is also emitted as a single structured `loguru` INFO record (`extra={"summary": {...}}`) so the non-notebook (CLI / orchestration) run path captures the report into the standard log stream — bound at Ctrl+G 2026-04-27 (OQ-D, "stdout, or captured in logging in the non-notebook case"). No file write. The harness prints: header (implementation name, prompt hash, model id, gold-set hash + size), per-field summary table (exact match, tolerance match), then a side-by-side disagreement listing limited to the first 10 disagreements. | Implements AC-4. Stdout-primary is simpler to test for reproducibility (capture stdout, compare with timestamps redacted) than file-byte equality. The notebook displays the same table inline; the loguru capture means a CLI run leaves a structured trace without a markdown destination. | Intent line 28; researcher R5 (no registry dep needed); Scope Diff D15 (PLAN POLISH → softened); Ctrl+G 2026-04-27 (OQ-D). |
 | **D16** | Graceful degradation | **On any LLM parse / validation failure:** log the raw response at DEBUG, log a WARNING with the event id and failure reason, return an `ExtractionResult` populated with the documented default (event_type/fuel_type from the structured fields if non-NULL, capacity = `None`, times mirrored from input, `confidence = 0.0`, `prompt_hash` and `model_id` recorded). **Never raise an unhandled exception from `extract`.** | Implements NFR-6 + intent line 47. Constrained decoding (D6) makes parse failures rare but not impossible (network truncation, schema-validator edge cases). | Intent line 47; NFR-6. |
 | ~~**D17**~~ | ~~Restate "out of scope" list (prompt engineering, fine-tuning, ensembles, streaming)~~ | **CUT** per Scope Diff. The intent §"Out of scope, explicitly deferred" already names these. Plan restating the list defends a decision not under threat. | Scope Diff D17 (PLAN POLISH → cut). |
-| **D18** | Real-LLM integration test via VCR | **One VCR cassette** recorded against Anthropic's `messages.create` endpoint at `api.anthropic.com/v1/messages`. The cassette covers ~5 representative gold-set events. `vcr_config` filters `authorization`, `cookie`, `set-cookie`, `x-api-key` headers (already in the project's standard fixture). Cassette refresh is documented in the module's `CLAUDE.md` as a manual ritual. | Implements R-1 mitigation. Without this, the real path is never CI-tested and accumulates silent regressions. The cassette is the cheapest mechanism that runs in CI. | Researcher R1.1; codebase map §7; risk R-1. |
+| **D18** | Real-LLM integration test via VCR | **One VCR cassette** recorded against OpenAI's Chat Completions endpoint at `api.openai.com/v1/chat/completions` (per OQ-A binding D6 to OpenAI). The cassette covers ~5 representative gold-set events. `vcr_config` filters `authorization`, `cookie`, `set-cookie`, `x-api-key` headers (already in the project's standard fixture). Cassette refresh is documented in the module's `CLAUDE.md` as a manual ritual. | Implements R-1 mitigation. Without this, the real path is never CI-tested and accumulates silent regressions. The cassette is the cheapest mechanism that runs in CI. | Researcher R1.1; codebase map §7; risk R-1. |
 | **D19** | Notebook | **`notebooks/14_llm_extractor.ipynb`** — six cells: (i) bootstrap + load config; (ii) load gold set; (iii) run stub on the gold set; (iv) run the real LLM via VCR cassette (or skip with a printed banner if the cassette is absent); (v) print the side-by-side comparison; (vi) markdown discussion of metric choice. Reuses module logic; reimplements nothing (§2.1.8). | Implements intent §"Demo moment" line 28. Six cells is the minimum to surface the side-by-side comparison; the metric-choice cell is the pedagogical pause. | Intent line 28; codebase map §6; Scope Diff cell tags. |
 | ~~**D20**~~ | ~~Plan negative-list ("we will NOT add `instructor`/`langchain`")~~ | **CUT** per Scope Diff. Researcher R2 already endorses this. Restating defends a decision not under threat. | Researcher R2; Scope Diff D20 (PLAN POLISH → cut). |
 
@@ -75,7 +75,7 @@ The Evidence column cites the artefact that *resolved* each decision.
 - **D13 / NFR-4** — Cost guardrail. Cut as the single highest-leverage cut.
 - **D17, D20** — Plan-level restatements of the intent's own out-of-scope list and the researcher's framework recommendations. Cut as plan polish.
 - **`message_description` hydration** via `GET /remit/{messageId}` — D6 chooses NULL-tolerant strategy. Hydration deferred to Stage 16 if its feature-join needs richer text.
-- **An open-weights / local-server backend.** D3 leaves the `Literal["...", "anthropic"]` slot extensible but Stage 14 ships only `stub` and `anthropic`.
+- **An open-weights / local-server backend.** D3 leaves the `type` discriminator extensible but Stage 14 ships only `stub` and `openai`.
 - **Embedding or semantic search** — Stage 15.
 - **Use of extracted features in a model** — Stage 16.
 - **Prompt engineering as an ongoing activity** — intent §"Out of scope".
@@ -106,7 +106,7 @@ Transcribed from `docs/intent/14-llm-extractor.md §Scope`:
 
 - **An interface that takes a REMIT event (or a batch) and returns structured features.** `Extractor` Protocol with `extract` / `extract_batch` (D2) returning `ExtractionResult` (D14).
 - **A stub implementation backed by a small hand-labelled set.** `StubExtractor` reading `tests/fixtures/llm/hand_labelled.json` (D9), returning the labelled features for known events and a documented default (D16) for unknown events.
-- **A real implementation that calls an LLM.** `LlmExtractor` calling Anthropic Claude Haiku 4.5 via `output_config` constrained decoding (D6); guarded by env var (D5) and config switch (D3/D4).
+- **A real implementation that calls an LLM.** `LlmExtractor` calling OpenAI GPT-4o-mini via Chat Completions strict-mode `response_format={"type": "json_schema", ...}` (D6 — bound to OpenAI at OQ-A); guarded by env var (D5) and config switch (D3/D4).
 - **An evaluation harness** that runs both implementations over the gold set and reports agreement: `python -m bristol_ml.llm.evaluate` printing the side-by-side comparison to stdout (D11/D15).
 - **Configuration selecting the active implementation:** discriminated-union `LlmExtractorConfig` (D3) in `conf/llm/extractor.yaml`.
 
@@ -128,7 +128,7 @@ Additionally in scope as direct consequences of the above:
 Self-contained context for Phase 2 — read top-to-bottom before opening any file.
 
 1. [`docs/intent/14-llm-extractor.md`](../../intent/14-llm-extractor.md) — the contract; 5 ACs and 7 "Points for consideration".
-2. [`docs/lld/research/14-llm-extractor-requirements.md`](../../lld/research/14-llm-extractor-requirements.md) — US-1..US-5, AC-1..AC-5, NFR-1..NFR-9, OQ-1..OQ-8. The OQ-1..OQ-8 defaults are bound by §1's decisions (OQ-1 = D8; OQ-2 = D9; OQ-3 = D11; OQ-4 = D6 structured-output mode; OQ-5 = D6 Anthropic Claude Haiku 4.5; OQ-6 = D2 batch is `list[RemitEvent]`; OQ-7 = D15 stdout-only; OQ-8 = D7 prompt file).
+2. [`docs/lld/research/14-llm-extractor-requirements.md`](../../lld/research/14-llm-extractor-requirements.md) — US-1..US-5, AC-1..AC-5, NFR-1..NFR-9, OQ-1..OQ-8. The OQ-1..OQ-8 defaults are bound by §1's decisions (OQ-1 = D8; OQ-2 = D9; OQ-3 = D11; OQ-4 = D6 structured-output mode; OQ-5 = D6 OpenAI GPT-4o-mini per OQ-A binding; OQ-6 = D2 batch is `list[RemitEvent]`; OQ-7 = D15 stdout-only; OQ-8 = D7 prompt file).
 3. [`docs/lld/research/14-llm-extractor-codebase.md`](../../lld/research/14-llm-extractor-codebase.md) — Stage 13 `OUTPUT_SCHEMA` (§1), env-var discriminator pattern (§2), discriminated-union pattern (§2), no existing API-key precedent (§3), `LlmExtractorConfig` placement (§4), notebook bootstrap (§6), VCR cassette fixture (§7), hazards (§9 — particularly the `message_description` NULL constraint).
 4. [`docs/lld/research/14-llm-extractor-domain.md`](../../lld/research/14-llm-extractor-domain.md) — §R1.1 (Anthropic `output_config` mechanics, supported keywords, Haiku 4.5 pricing), §R2 (constrained decoding vs `instructor` — and why we don't add `instructor`), §R3 (gold-set sizing rationale), §R4 (agreement metrics), §R5 (prompt versioning — SHA-hash-in-output is minimum-viable), §R7 (cost — confirms D13 is `PREMATURE OPTIMISATION`).
 5. [`docs/lld/research/14-llm-extractor-scope-diff.md`](../../lld/research/14-llm-extractor-scope-diff.md) — `@minimalist` critique; every cut and retention is listed there.
@@ -136,7 +136,7 @@ Self-contained context for Phase 2 — read top-to-bottom before opening any fil
 7. `docs/architecture/layers/ingestion.md` — Stage 13's bi-temporal storage shape; Stage 14 reads `OUTPUT_SCHEMA` rows, does not write back to the REMIT parquet.
 8. `src/bristol_ml/ingestion/remit.py` — concrete upstream source. Read `OUTPUT_SCHEMA`, `MESSAGE_STATUSES`, `FUEL_TYPES`, `_stub_records`, `_parse_message`, `as_of`.
 9. `conf/_schemas.py` — sibling schema patterns: `ServingConfig` (lines 988–1022) for "self-contained block, `None` in default config" precedent; `ModelConfig` (lines 931–941) for the discriminated-union pattern.
-10. `tests/integration/ingestion/test_remit_cassettes.py` — the VCR cassette fixture pattern Stage 14 will replicate against the Anthropic API endpoint.
+10. `tests/integration/ingestion/test_remit_cassettes.py` — the VCR cassette fixture pattern Stage 14 will replicate against the OpenAI Chat Completions endpoint (per OQ-A).
 11. `tests/conftest.py` — the `loguru_caplog` fixture for asserting on log records (NFR-6, NFR-9).
 12. `notebooks/13_remit_ingestion.ipynb` — the bootstrap-cell pattern + the `# T5 Cell N —` comment convention for notebooks.
 
@@ -255,7 +255,7 @@ class ExtractionResult(BaseModel):
     effective_to: datetime | None
     confidence: float          # in [0.0, 1.0]
     prompt_hash: str | None    # 12-char SHA-256 hex prefix; None for stub
-    model_id: str | None       # e.g. "claude-haiku-4-5"; None for stub
+    model_id: str | None       # e.g. "gpt-4o-mini"; None for stub
 ```
 
 ### Protocol (in `__init__.py`)
@@ -347,7 +347,7 @@ usage: evaluate [-h] [overrides ...]
 Run the extractor over the hand-labelled set; print side-by-side report.
 ```
 
-Both CLIs use the `bristol_ml.config.load_config()` boundary; Hydra-style overrides supported (e.g. `llm.type=anthropic`).
+Both CLIs use the `bristol_ml.config.load_config()` boundary; Hydra-style overrides supported (e.g. `llm.type=openai`).
 
 ### Notebook structure (`notebooks/14_llm_extractor.ipynb`)
 

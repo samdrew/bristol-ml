@@ -17,9 +17,10 @@ Why a hash and not the filename or a version field?
   edits and renames; collisions over the project lifetime are
   vanishing (12 hex chars = 48 bits = 1 in 281 trillion).
 
-The 12-char prefix is plan-§5 prescribed; the full hash is available
-via :func:`prompt_sha256_full` if a future stage needs the longer
-form (e.g. for joining onto an external prompt registry).
+The 12-char prefix is plan-§5 prescribed; if a future stage needs
+the full SHA-256 digest (e.g. for joining onto an external prompt
+registry) it can be reconstructed from the same input bytes via
+``hashlib.sha256(prompt_bytes).hexdigest()``.
 
 Usage:
 
@@ -40,7 +41,6 @@ from pathlib import Path
 __all__ = [
     "PROMPT_HASH_PREFIX_CHARS",
     "load_prompt",
-    "prompt_sha256_full",
     "prompt_sha256_prefix",
 ]
 
@@ -52,15 +52,6 @@ __all__ = [
 PROMPT_HASH_PREFIX_CHARS = 12
 
 
-def prompt_sha256_full(prompt_bytes: bytes) -> str:
-    """Return the full SHA-256 hex digest of ``prompt_bytes``.
-
-    The full digest is the canonical identity; :func:`prompt_sha256_prefix`
-    truncates this for the ``ExtractionResult.prompt_hash`` field.
-    """
-    return hashlib.sha256(prompt_bytes).hexdigest()
-
-
 def prompt_sha256_prefix(prompt_bytes: bytes) -> str:
     """Return the first :data:`PROMPT_HASH_PREFIX_CHARS` chars of the SHA-256.
 
@@ -68,7 +59,7 @@ def prompt_sha256_prefix(prompt_bytes: bytes) -> str:
     form so the field is short enough to read inline in stdout output
     and parquet preview frames.
     """
-    return prompt_sha256_full(prompt_bytes)[:PROMPT_HASH_PREFIX_CHARS]
+    return hashlib.sha256(prompt_bytes).hexdigest()[:PROMPT_HASH_PREFIX_CHARS]
 
 
 def load_prompt(path: Path) -> tuple[str, str]:

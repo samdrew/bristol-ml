@@ -24,7 +24,7 @@ implementation slots in without changes here (plan D3).
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/llm.md`` (Stage 14 T7).
-- Stage 14 plan — ``docs/plans/active/14-llm-extractor.md``.
+- Stage 14 plan — ``docs/plans/completed/14-llm-extractor.md``.
 - Intent — ``docs/intent/14-llm-extractor.md``.
 """
 

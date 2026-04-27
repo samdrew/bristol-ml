@@ -177,6 +177,13 @@ class EvaluationReport:
     gold_set_size: int
     per_field: dict[str, FieldAgreement]
     disagreements: list[_Disagreement]
+    # Total disagreement *items* observed across the run, including
+    # any beyond ``max_disagreements`` that were not captured into the
+    # ``disagreements`` list. The "...and N more" tail line uses this
+    # rather than ``len(disagreements)`` so the count remains accurate
+    # when ``_accumulate_per_field`` overshoots the cap by up to one
+    # record's worth of fields (see :func:`_accumulate_per_field`).
+    total_disagreements: int
     generated_at: datetime
 
 
@@ -236,41 +243,53 @@ def _accumulate_per_field(
     disagreements: list[_Disagreement],
     *,
     capture_disagreements: bool,
-) -> None:
+) -> int:
     """Update per-field exact + tolerance counters for one (expected, actual) pair.
 
     The helper is the only place where the field list lives; the
     formatter reads :data:`_FIELDS` to keep the column order stable.
     Categorical fields treat exact == tolerance because there is no
     notion of "close enough" for strings.
+
+    Returns the number of *disagreement items* this pair contributed
+    (0-5), regardless of whether each item was appended to
+    ``disagreements`` (gated by ``capture_disagreements``). The caller
+    sums these so :class:`EvaluationReport` records the true total —
+    a single record can disagree on up to five fields, so the captured
+    list can lag the true count by up to one record.
     """
+    observed = 0
     # event_type — categorical
     exact = expected.event_type == actual.event_type
     counts["event_type"]["exact"] += int(exact)
     counts["event_type"]["tolerance"] += int(exact)
-    if not exact and capture_disagreements:
-        disagreements.append(
-            _Disagreement(
-                mrid=mrid,
-                field="event_type",
-                expected=_stringify(expected.event_type),
-                actual=_stringify(actual.event_type),
+    if not exact:
+        observed += 1
+        if capture_disagreements:
+            disagreements.append(
+                _Disagreement(
+                    mrid=mrid,
+                    field="event_type",
+                    expected=_stringify(expected.event_type),
+                    actual=_stringify(actual.event_type),
+                )
             )
-        )
 
     # fuel_type — categorical
     exact = expected.fuel_type == actual.fuel_type
     counts["fuel_type"]["exact"] += int(exact)
     counts["fuel_type"]["tolerance"] += int(exact)
-    if not exact and capture_disagreements:
-        disagreements.append(
-            _Disagreement(
-                mrid=mrid,
-                field="fuel_type",
-                expected=_stringify(expected.fuel_type),
-                actual=_stringify(actual.fuel_type),
+    if not exact:
+        observed += 1
+        if capture_disagreements:
+            disagreements.append(
+                _Disagreement(
+                    mrid=mrid,
+                    field="fuel_type",
+                    expected=_stringify(expected.fuel_type),
+                    actual=_stringify(actual.fuel_type),
+                )
             )
-        )
 
     # affected_capacity_mw — numeric, ±5 MW tolerance
     exact = expected.affected_capacity_mw == actual.affected_capacity_mw
@@ -279,45 +298,53 @@ def _accumulate_per_field(
     )
     counts["affected_capacity_mw"]["exact"] += int(exact)
     counts["affected_capacity_mw"]["tolerance"] += int(tolerant)
-    if not tolerant and capture_disagreements:
-        disagreements.append(
-            _Disagreement(
-                mrid=mrid,
-                field="affected_capacity_mw",
-                expected=_stringify(expected.affected_capacity_mw),
-                actual=_stringify(actual.affected_capacity_mw),
+    if not tolerant:
+        observed += 1
+        if capture_disagreements:
+            disagreements.append(
+                _Disagreement(
+                    mrid=mrid,
+                    field="affected_capacity_mw",
+                    expected=_stringify(expected.affected_capacity_mw),
+                    actual=_stringify(actual.affected_capacity_mw),
+                )
             )
-        )
 
     # effective_from — datetime, ±1 h tolerance
     exact = expected.effective_from == actual.effective_from
     tolerant = _datetime_within_tolerance(expected.effective_from, actual.effective_from)
     counts["effective_from"]["exact"] += int(exact)
     counts["effective_from"]["tolerance"] += int(tolerant)
-    if not tolerant and capture_disagreements:
-        disagreements.append(
-            _Disagreement(
-                mrid=mrid,
-                field="effective_from",
-                expected=_stringify(expected.effective_from),
-                actual=_stringify(actual.effective_from),
+    if not tolerant:
+        observed += 1
+        if capture_disagreements:
+            disagreements.append(
+                _Disagreement(
+                    mrid=mrid,
+                    field="effective_from",
+                    expected=_stringify(expected.effective_from),
+                    actual=_stringify(actual.effective_from),
+                )
             )
-        )
 
     # effective_to — datetime, ±1 h tolerance
     exact = expected.effective_to == actual.effective_to
     tolerant = _datetime_within_tolerance(expected.effective_to, actual.effective_to)
     counts["effective_to"]["exact"] += int(exact)
     counts["effective_to"]["tolerance"] += int(tolerant)
-    if not tolerant and capture_disagreements:
-        disagreements.append(
-            _Disagreement(
-                mrid=mrid,
-                field="effective_to",
-                expected=_stringify(expected.effective_to),
-                actual=_stringify(actual.effective_to),
+    if not tolerant:
+        observed += 1
+        if capture_disagreements:
+            disagreements.append(
+                _Disagreement(
+                    mrid=mrid,
+                    field="effective_to",
+                    expected=_stringify(expected.effective_to),
+                    actual=_stringify(actual.effective_to),
+                )
             )
-        )
+
+    return observed
 
 
 # Order of fields in the per-field summary table (plan §5 layout).
@@ -367,21 +394,32 @@ def evaluate(
         field: {"exact": 0, "tolerance": 0} for field, _ in _FIELDS
     }
     disagreements: list[_Disagreement] = []
+    total_disagreements = 0
+    # Capture the first extracted row's provenance inline rather than
+    # re-extracting after the loop — on the live path that would cost
+    # one extra OpenAI request per harness run.
+    first_result: ExtractionResult | None = None
 
     for key in keys:
         record: _GoldSetRecord = gold_set[key]
         actual = extractor.extract(record.event)
-        _accumulate_per_field(
+        if first_result is None:
+            first_result = actual
+        observed = _accumulate_per_field(
             expected=record.expected,
             actual=actual,
             mrid=record.event.mrid,
             counts=counts,
             disagreements=disagreements,
-            # Stop appending after we have ``max_disagreements + 1`` so
-            # we know whether to print "...and N more". A small overhead
-            # on a tiny list; not worth a counter.
-            capture_disagreements=len(disagreements) <= max_disagreements,
+            # Stop appending once the captured list has reached the
+            # cap; ``_accumulate_per_field`` returns the true number
+            # of disagreement items for this row, summed into
+            # ``total_disagreements`` so the "...and N more" tail
+            # remains accurate even when the captured list lags by up
+            # to one record's worth of fields.
+            capture_disagreements=len(disagreements) < max_disagreements,
         )
+        total_disagreements += observed
 
     per_field: dict[str, FieldAgreement] = {}
     n = len(keys)
@@ -395,15 +433,11 @@ def evaluate(
         )
 
     # Provenance: stub returns prompt_hash=None / model_id=None on every
-    # row by construction; live extractor stamps both. Read from the
-    # first extracted result for the live path so the report header
-    # matches what's on each row.
-    sample_result: ExtractionResult | None = None
-    if keys:
-        sample_record = gold_set[keys[0]]
-        sample_result = extractor.extract(sample_record.event)
-    prompt_hash = sample_result.prompt_hash if sample_result else None
-    model_id = sample_result.model_id if sample_result else None
+    # row by construction; live extractor stamps both. Reuse the first
+    # extracted row so the report header matches what's on each row
+    # without a redundant API call (Phase-3 review finding).
+    prompt_hash = first_result.prompt_hash if first_result is not None else None
+    model_id = first_result.model_id if first_result is not None else None
 
     return EvaluationReport(
         implementation=type(extractor).__name__,
@@ -414,6 +448,7 @@ def evaluate(
         gold_set_size=n,
         per_field=per_field,
         disagreements=disagreements,
+        total_disagreements=total_disagreements,
         generated_at=now if now is not None else datetime.now(UTC),
     )
 
@@ -487,13 +522,16 @@ def _format_disagreements(report: EvaluationReport, *, max_disagreements: int) -
     gold-set case so the absence of disagreements is explicit.
     """
     lines = ["", f"disagreements (first {max_disagreements}):"]
-    if not report.disagreements:
+    if report.total_disagreements == 0:
         lines.append("  (none — extractor agrees on every field)")
         return lines
     shown = report.disagreements[:max_disagreements]
     for d in shown:
         lines.append(f"  {d.mrid}.{d.field}: expected={d.expected!r} got={d.actual!r}")
-    remaining = len(report.disagreements) - len(shown)
+    # Use ``total_disagreements`` rather than ``len(report.disagreements)``
+    # — the captured list can lag the true count when the cap is
+    # reached mid-record (see _accumulate_per_field).
+    remaining = report.total_disagreements - len(shown)
     if remaining > 0:
         lines.append(f"  ... and {remaining} more")
     return lines

@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/14-llm-extractor.md`` §6 T3 named tests:
+- ``docs/plans/completed/14-llm-extractor.md`` §6 T3 named tests:
   ``test_stub_and_llm_extractors_satisfy_protocol_structurally`` (stub
   half), ``test_stub_active_when_env_var_set``,
   ``test_stub_default_in_yaml_config``, ``test_stub_makes_no_network_call``,
@@ -286,14 +286,47 @@ def test_stub_extract_batch_preserves_input_order() -> None:
 def test_stub_loads_canonical_gold_set_path() -> None:
     """Guards plan D9: the default gold-set path matches the documented location.
 
-    Plan §1 D9: ``tests/fixtures/llm/hand_labelled.json``. The test
-    asserts the path constant rather than hard-coded strings so a
-    refactor that updates the constant is detected.
+    Plan §1 D9: ``tests/fixtures/llm/hand_labelled.json``. The constant
+    is anchored on the source-file location (Phase-3 review fix) so
+    callers from any cwd can load it; the test asserts the path tail
+    rather than the absolute prefix so a repo move does not break it.
     """
-    assert Path("tests/fixtures/llm/hand_labelled.json") == DEFAULT_GOLD_SET_PATH
+    expected_tail = Path("tests") / "fixtures" / "llm" / "hand_labelled.json"
+    assert DEFAULT_GOLD_SET_PATH.is_absolute(), (
+        f"DEFAULT_GOLD_SET_PATH must be absolute (anchored on source "
+        f"location) so notebook / library callers from any cwd can "
+        f"load it; got {DEFAULT_GOLD_SET_PATH}."
+    )
+    assert DEFAULT_GOLD_SET_PATH.parts[-4:] == expected_tail.parts, (
+        f"DEFAULT_GOLD_SET_PATH tail must equal "
+        f"tests/fixtures/llm/hand_labelled.json; got "
+        f"{DEFAULT_GOLD_SET_PATH}."
+    )
     assert DEFAULT_GOLD_SET_PATH.exists(), (
         f"Canonical gold-set path {DEFAULT_GOLD_SET_PATH} is missing — "
         "T3 fixture or path constant has drifted."
+    )
+
+
+def test_stub_loads_canonical_gold_set_from_alternate_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase-3 review fix: the default path resolves regardless of cwd.
+
+    The previous ``Path("tests/fixtures/llm/hand_labelled.json")``
+    constant was cwd-relative — a notebook in ``notebooks/`` or any
+    Stage 15/16 caller from elsewhere on the filesystem hit
+    ``FileNotFoundError`` at the default-path resolve. Anchoring on
+    ``__file__`` fixes that; this test guards against a regression by
+    chdir-ing to a temp directory before constructing the stub.
+    """
+    monkeypatch.chdir(tmp_path)
+    # No gold_set_path override — must resolve via DEFAULT_GOLD_SET_PATH.
+    stub = StubExtractor()
+    assert stub.gold_set_size > 0, (
+        "StubExtractor must load the canonical gold set even when the "
+        "process working directory is not the repo root."
     )
 
 
