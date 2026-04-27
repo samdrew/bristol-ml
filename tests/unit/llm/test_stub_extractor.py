@@ -458,12 +458,16 @@ def test_extractor_module_runs_standalone(monkeypatch: pytest.MonkeyPatch) -> No
         "PATH": "/usr/bin:/bin",
         "HOME": "/tmp",
     }
+    # Anchor cwd against ``__file__`` so the test passes from any
+    # checkout location (dev containers use ``/workspace``; GitHub
+    # Actions uses ``/home/runner/work/<repo>/<repo>``).
+    repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [sys.executable, "-m", "bristol_ml.llm.extractor"],
         capture_output=True,
         text=True,
         env=env,
-        cwd="/workspace",
+        cwd=str(repo_root),
         check=False,
     )
     assert result.returncode == 0, (
