@@ -1021,6 +1021,75 @@ class ServingConfig(BaseModel):
     port: int = Field(default=8000, ge=1, le=65535)
 
 
+class LlmExtractorConfig(BaseModel):
+    """Configuration for the Stage 14 LLM feature extractor.
+
+    Plan §1 D3: ``type`` is a Pydantic discriminator selecting the
+    concrete extractor implementation. ``"stub"`` (the default) reads
+    ``tests/fixtures/llm/hand_labelled.json``; ``"openai"`` calls the
+    OpenAI Chat Completions API with strict JSON-schema response format
+    (plan §1 D6, bound at Ctrl+G 2026-04-27 — the human has an OpenAI
+    account already).
+
+    The discriminator literal is intentionally narrow at Stage 14; a
+    future open-weights / Anthropic / local-server slot can be added by
+    extending the union without breaking callers (plan §1 D3 evidence,
+    AC-1).
+
+    The ``"openai"`` path is double-gated: even when ``type == "openai"``,
+    ``BRISTOL_ML_LLM_STUB=1`` in the environment forces the stub path
+    (plan §1 D4). This keeps CI and offline runs safe regardless of
+    YAML configuration.
+
+    Field semantics:
+      - ``model_name``: provider-specific model id (e.g. ``"gpt-4o-mini"``).
+        Plan §1 D6 + NFR-7: must be a config value, never a string
+        literal in source.
+      - ``api_key_env_var``: environment-variable name from which the
+        API key is read at ``LlmExtractor.__init__`` (plan §1 D5).
+        Defaults to ``"BRISTOL_ML_LLM_API_KEY"``; configurable so a
+        future stage targeting a different provider can use a different
+        key without changing source.
+      - ``prompt_file``: path (relative to repo root) of the active
+        prompt template (plan §1 D7 / NFR-5). The SHA-256 digest of
+        this file's bytes becomes ``ExtractionResult.prompt_hash``.
+      - ``request_timeout_seconds``: request-level timeout passed to the
+        provider SDK; the LLM call is the only network I/O the live
+        path makes.
+
+    Like ``ServingConfig``, this is composed in only by entry points
+    that need it (the LLM CLIs and the evaluation harness); the default
+    ``conf/config.yaml`` does **not** include ``llm`` in its defaults
+    list, so ``cfg.llm`` resolves to ``None`` for the train pipeline.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator selecting the extractor implementation. See class
+    # docstring; widening this literal is the supported way to add a
+    # third backend (plan AC-1 sub-criterion).
+    type: Literal["stub", "openai"] = "stub"
+    # Provider-specific model id. ``None`` is acceptable for the stub
+    # path; ``LlmExtractor`` validates non-None at init when ``type !=
+    # "stub"``. Required-when-live is enforced at construction rather
+    # than via a Pydantic validator so the same schema can describe
+    # both implementations without a discriminator-keyed root model.
+    model_name: str | None = None
+    # Environment-variable name from which the API key is read. Plan
+    # §1 D5: the key itself is *never* a config value — only the var
+    # name is, so the YAML committed to git carries no secret material.
+    api_key_env_var: str = "BRISTOL_ML_LLM_API_KEY"
+    # Path to the active prompt template, relative to repo root. Plan
+    # §1 D7 / NFR-5: prompt versioning is filename-encoded (e.g.
+    # ``extract_v1.txt``); the SHA-256 of this file's bytes is recorded
+    # in every ``ExtractionResult.prompt_hash`` so "we swapped the
+    # prompt and everything changed" is diagnosable from the output.
+    prompt_file: Path | None = None
+    # Per-request timeout in seconds for the provider SDK call.
+    # Defaults to 30 s mirroring the ingestion-layer convention.
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1040,3 +1109,9 @@ class AppConfig(BaseModel):
     # include ``serving``, so ``cfg.serving`` resolves to ``None`` for
     # callers that do not need it.
     serving: ServingConfig | None = None
+    # Stage 14: ``None`` mirrors the ``serving`` precedent — only the
+    # LLM extractor / evaluation-harness CLIs (and the Stage 14
+    # notebook) ever require this group; the default ``conf/config.yaml``
+    # does not list it. Compose at the entry point with
+    # ``+llm=extractor``.
+    llm: LlmExtractorConfig | None = None

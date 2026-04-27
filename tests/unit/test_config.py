@@ -34,6 +34,7 @@ from conf._schemas import (
     HolidaysIngestionConfig,
     IngestionGroup,
     LinearConfig,
+    LlmExtractorConfig,
     MetricsConfig,
     ModelMetadata,
     NaiveConfig,
@@ -1699,3 +1700,114 @@ def test_app_config_serving_default_is_none_so_train_cli_unaffected() -> None:
         f"AppConfig(project=...) without a ``serving`` kwarg must default "
         f"serving to None; got {app.serving!r}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 14 T1 — LlmExtractorConfig + AppConfig.llm optionality
+# ---------------------------------------------------------------------------
+
+
+def test_llm_extractor_config_round_trips_through_hydra() -> None:
+    """Guards Stage 14 T1: ``conf/llm/extractor.yaml`` defaults match ``LlmExtractorConfig(...)``.
+
+    Plan §5: the extractor config carries five fields with defaults
+    (type=stub, model_name=gpt-4o-mini, api_key_env_var=BRISTOL_ML_LLM_API_KEY,
+    prompt_file=conf/llm/prompts/extract_v1.txt, request_timeout_seconds=30.0).
+    Composing the group via ``+llm=extractor`` must produce an instance
+    matching the YAML verbatim.
+
+    The ``+llm=extractor`` prefix is required because the train pipeline's
+    ``conf/config.yaml`` does *not* include ``llm`` in its defaults list
+    (plan §1 D3 + Stage 12 ``serving`` precedent).
+
+    Cited criterion: plan §6 T1 named test
+    ``test_llm_extractor_config_round_trips_through_hydra``.
+    """
+    cfg = load_config(overrides=["+llm=extractor"])
+
+    assert cfg.llm is not None, (
+        "cfg.llm must be populated when ``+llm=extractor`` is in the override list."
+    )
+    assert isinstance(cfg.llm, LlmExtractorConfig), (
+        f"expected LlmExtractorConfig; got {type(cfg.llm).__name__!r}."
+    )
+    # The YAML defaults must match the Python-side defaults exactly so
+    # the schema is the single source of truth — a mismatch here means
+    # someone edited the YAML or the schema without updating the other.
+    assert cfg.llm.type == "stub", (
+        f"plan §1 D4 / AC-2: default type must be 'stub' to keep CI offline; got {cfg.llm.type!r}."
+    )
+    assert cfg.llm.model_name == "gpt-4o-mini", (
+        f"plan §1 D6 (Ctrl+G OQ-A → OpenAI): default model_name must be "
+        f"'gpt-4o-mini'; got {cfg.llm.model_name!r}."
+    )
+    assert cfg.llm.api_key_env_var == "BRISTOL_ML_LLM_API_KEY", (
+        f"plan §1 D5: default api_key_env_var must be 'BRISTOL_ML_LLM_API_KEY'; "
+        f"got {cfg.llm.api_key_env_var!r}."
+    )
+    assert cfg.llm.prompt_file == Path("conf/llm/prompts/extract_v1.txt"), (
+        f"plan §1 D7: default prompt_file must point at the v1 prompt; got {cfg.llm.prompt_file!r}."
+    )
+    assert cfg.llm.request_timeout_seconds == 30.0, (
+        f"plan §5: default request_timeout_seconds must be 30.0; "
+        f"got {cfg.llm.request_timeout_seconds!r}."
+    )
+
+
+def test_app_config_llm_default_is_none_so_existing_callers_unaffected() -> None:
+    """Guards Stage 14 T1: ``AppConfig.llm`` defaults to ``None``.
+
+    Plan §5 / §1 D3: ``AppConfig.llm: LlmExtractorConfig | None = None``
+    keeps the train pipeline / Stage-0 config-smoke surface unchanged
+    (the load-bearing test that the new top-level field does not become
+    a soft requirement on every config consumer in the project — this
+    mirrors the Stage 12 ``serving`` precedent verbatim).
+
+    If a future stage adds ``llm`` to ``conf/config.yaml``'s default
+    composition, this test must be flipped deliberately rather than
+    quietly broken.
+
+    Cited criterion: plan §6 T1 named test
+    ``test_app_config_llm_default_is_none_so_existing_callers_unaffected``.
+    """
+    cfg = load_config()
+
+    assert cfg.llm is None, (
+        f"Stage 14 T1 contract: cfg.llm must default to None for every "
+        f"non-LLM CLI / config-smoke surface; got {cfg.llm!r}."
+    )
+
+    # Direct-construction path: AppConfig built from the minimum required
+    # fields (project) must accept the missing ``llm`` field and produce
+    # ``None`` — not a ValidationError.
+    app = AppConfig(project=ProjectConfig(name="bristol_ml", seed=0))
+    assert app.llm is None, (
+        f"AppConfig(project=...) without an ``llm`` kwarg must default "
+        f"llm to None; got {app.llm!r}."
+    )
+
+
+def test_llm_extractor_config_rejects_unknown_type_literal() -> None:
+    """Guards Stage 14 T1: the discriminator literal is closed at the schema level.
+
+    Plan §1 D3: ``type: Literal["stub", "openai"]`` — Pydantic must
+    reject any other value at validation time. This is the test that
+    fails first if someone widens the literal in code without updating
+    the Hydra group files (or vice versa); it also documents the
+    'extending the union' contract from AC-1.
+    """
+    with pytest.raises(ValidationError):
+        LlmExtractorConfig(type="anthropic")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        LlmExtractorConfig(type="bogus")  # type: ignore[arg-type]
+
+
+def test_llm_extractor_config_extra_keys_forbidden() -> None:
+    """Guards Stage 14 T1: ``extra="forbid"`` catches typos in YAML overrides.
+
+    A typo in a Hydra override (e.g. ``llm.modle_name=...``) must fail at
+    validation time, not silently shadow the typed field with a free
+    attribute.
+    """
+    with pytest.raises(ValidationError):
+        LlmExtractorConfig(modle_name="gpt-4o-mini")  # type: ignore[call-arg]
