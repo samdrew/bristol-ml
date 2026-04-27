@@ -226,9 +226,9 @@ if cassette_path.exists():
 else:
     print(
         "VCR cassette absent.  Record one once with:\\n"
-        f"  BRISTOL_ML_LLM_API_KEY=sk-... uv run pytest \\\\\\n"
-        f"    tests/integration/llm/test_llm_extractor_cassette.py \\\\\\n"
-        f"    --record-mode=once\\n"
+        "  BRISTOL_ML_LLM_API_KEY=sk-... uv run pytest \\\\\\n"
+        "    tests/integration/llm/test_llm_extractor_cassette.py \\\\\\n"
+        "    --record-mode=once\\n"
         "After recording, CI replays the cassette with --record-mode=none."
     )
 
@@ -271,7 +271,11 @@ if report.disagreements:
         ]
     )
     print("Disagreements (DataFrame view):")
-    disagreements_df
+    # ``.head(len(disagreements_df))`` keeps the standard Jupyter
+    # last-expression rendering of the frame while sidestepping
+    # ruff B018 ("bare name; useless expression") on the otherwise
+    # idiomatic notebook-trailing ``disagreements_df``.
+    disagreements_df.head(len(disagreements_df))
 else:
     print("No disagreements — stub on its own gold set always agrees.")
 """
