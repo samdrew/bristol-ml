@@ -72,6 +72,22 @@ dependencies = [
     # Keeping it in runtime deps means ``uv sync`` produces a working
     # install for the demo without needing the dev group.
     "openai>=1.40,<2",
+    # Stage 15 (D15 + A2 — Ctrl+G 2026-04-27): ``sentence-transformers`` is
+    # the Stage 15 live embedder backbone.  The plan-bound default checkpoint
+    # ``Alibaba-NLP/gte-modernbert-base`` (ModernBERT, December 2024) requires
+    # ``transformers >= 4.48.0`` which sentence-transformers ``>=3.3`` brings
+    # in; the upper bound holds the major-version pin convention.  Like
+    # ``openai`` above, the dep is *runtime* because plan §1 D8's triple-
+    # gating means the SDK is imported only when YAML ``type ==
+    # "sentence_transformers"`` *and* ``BRISTOL_ML_EMBEDDING_STUB`` is unset.
+    "sentence-transformers>=3.3,<5",
+    # Stage 15 (A3 — Ctrl+G flip from PCA to UMAP for projection quality on
+    # 768-dim embeddings).  ``umap-learn`` brings ``numba`` + ``llvmlite`` +
+    # ``pynndescent`` (~200 MB compiled stack); the cost is accepted because
+    # PCA's two principal components do not preserve neighbourhood structure
+    # in high-dim space (R-3 / R-6).  Used only by the Stage 15 notebook's
+    # 2D-projection cell via :func:`bristol_ml.embeddings._projection.project_to_2d`.
+    "umap-learn>=0.5,<1",
 ]
 
 [dependency-groups]
