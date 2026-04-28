@@ -40,14 +40,10 @@ Cross-references:
 from __future__ import annotations
 
 import hashlib
-import os
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import numpy as np
 from loguru import logger
-
-if TYPE_CHECKING:  # pragma: no cover — type-only imports
-    from conf._schemas import EmbeddingConfig
 
 __all__ = [
     "DEFAULT_STUB_DIM",
@@ -296,30 +292,3 @@ class SentenceTransformerEmbedder:
             show_progress_bar=False,
         )
         return np.asarray(vector[0], dtype=np.float32)
-
-
-def _stub_env_var_set() -> bool:
-    """Read the stub env-var. Centralised so tests can monkeypatch one place."""
-    from bristol_ml.embeddings._factory import STUB_ENV_VAR
-
-    return os.environ.get(STUB_ENV_VAR) == "1"
-
-
-def _build_live_embedder_or_stub(
-    config: EmbeddingConfig,
-) -> StubEmbedder | SentenceTransformerEmbedder:
-    """Internal helper used by :func:`build_embedder` for the live path.
-
-    Kept here (next to the live class) so the import-graph cost of
-    referencing ``SentenceTransformerEmbedder`` is paid only when the
-    factory actually wants the live path. A stub-only test never
-    triggers this code.
-    """
-    if _stub_env_var_set():
-        return StubEmbedder()
-    if config.model_id is None:
-        raise RuntimeError(
-            "EmbeddingConfig.model_id must be set when type='sentence_transformers' "
-            "(e.g. 'Alibaba-NLP/gte-modernbert-base'); got None."
-        )
-    return SentenceTransformerEmbedder(model_id=config.model_id, fp16=config.fp16)

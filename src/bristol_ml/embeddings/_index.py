@@ -155,7 +155,12 @@ class StubIndex:
         )
         np.savez_compressed(
             tmp,
-            ids=np.asarray(self._ids, dtype=object),
+            # ``dtype=str`` produces a fixed-width unicode array
+            # (``<U...``) — *not* an object array. The latter would
+            # force ``allow_pickle=True`` on load, which is a remote-
+            # code-execution surface for any caller that might load
+            # an attacker-influenced ``.npz`` (Phase-3 code review B3).
+            ids=np.asarray(self._ids, dtype=str),
             vectors=matrix,
             dim=np.asarray([self._dim], dtype=np.int32),
         )
@@ -169,9 +174,13 @@ class StubIndex:
     @classmethod
     def load(cls, path: Path) -> StubIndex:
         path = Path(path)
-        with np.load(path, allow_pickle=True) as npz:
+        # ``allow_pickle=False`` is load-bearing: a future regression
+        # that switches the save path back to ``dtype=object`` for ids
+        # will surface here as a load error instead of a silent RCE
+        # (Phase-3 code review B3).
+        with np.load(path, allow_pickle=False) as npz:
             dim = int(npz["dim"][0])
-            ids = list(npz["ids"].tolist())
+            ids = [str(s) for s in npz["ids"].tolist()]
             vectors = np.asarray(npz["vectors"], dtype=np.float32)
         index = cls(dim=dim)
         if ids:
@@ -260,6 +269,14 @@ class NumpyIndex:
         scores = self._matrix @ v
         n = scores.shape[0]
         clipped = min(k, n)
+        if clipped == 0:
+            # Explicit early-return: ``np.argpartition(-scores, -1)``
+            # silently works on current NumPy when k=0, but the
+            # intent is "return nothing", not "partition at the last
+            # element". Surfacing the intent guards against a future
+            # NumPy that tightens ``argpartition``'s kth contract
+            # (Phase-3 code review CR-4).
+            return []
         if clipped == n:
             order = np.argsort(-scores)
         else:
@@ -280,7 +297,10 @@ class NumpyIndex:
         tmp = path.with_suffix(path.suffix + ".tmp")
         np.savez_compressed(
             tmp,
-            ids=np.asarray(self._ids, dtype=object),
+            # ``dtype=str`` (fixed-width unicode) keeps ``allow_pickle
+            # =False`` viable on load — see ``StubIndex.save`` rationale
+            # (Phase-3 code review B3).
+            ids=np.asarray(self._ids, dtype=str),
             vectors=self._matrix,
             dim=np.asarray([self._dim], dtype=np.int32),
         )
@@ -301,9 +321,13 @@ class NumpyIndex:
     def load(cls, path: Path) -> NumpyIndex:
         """Reconstruct an index from a previous :meth:`save`."""
         path = Path(path)
-        with np.load(path, allow_pickle=True) as npz:
+        # ``allow_pickle=False`` mirrors :meth:`StubIndex.load` — pinned
+        # so a future regression that flips ids back to ``dtype=object``
+        # surfaces as a load error not a silent RCE on a tampered .npz
+        # (Phase-3 code review B3).
+        with np.load(path, allow_pickle=False) as npz:
             dim = int(npz["dim"][0])
-            ids = list(npz["ids"].tolist())
+            ids = [str(s) for s in npz["ids"].tolist()]
             vectors = np.asarray(npz["vectors"], dtype=np.float32)
         index = cls(dim=dim)
         if ids:

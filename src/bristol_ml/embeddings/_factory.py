@@ -159,8 +159,19 @@ _FILESYSTEM_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _sanitised_model_id(model_id: str) -> str:
-    """Return a filesystem-safe version of ``model_id`` for the cache path."""
-    return _FILESYSTEM_SAFE.sub("_", model_id).strip("_") or "unnamed_model"
+    """Return a filesystem-safe version of ``model_id`` for the cache path.
+
+    The replacement regex preserves ``.`` so version-like ids
+    (``"my-embedder.v2"``) round-trip cleanly. We then strip any leading
+    ``.`` so adversarial inputs like ``"../../etc/passwd"`` cannot
+    survive as a dotted prefix that ``Path`` would interpret as parent-
+    directory traversal once joined with the cache root (Phase-3 code
+    review B4). The post-sanitisation ``Path.resolve`` containment
+    check in :func:`_default_cache_path` is the load-bearing defence;
+    this strip is belt-and-braces.
+    """
+    sanitised = _FILESYSTEM_SAFE.sub("_", model_id).strip("_").lstrip(".")
+    return sanitised or "unnamed_model"
 
 
 def _default_cache_path(model_id: str) -> Path:
@@ -169,9 +180,24 @@ def _default_cache_path(model_id: str) -> Path:
     Anchored to the repo root via ``Path(__file__).resolve().parents[3]``
     (Stage 14 ``LlmExtractor`` precedent) so the path is the same
     regardless of the caller's CWD.
+
+    The resolved path is asserted to live under the resolved
+    ``data/embeddings/`` directory (Phase-3 code review B4): a
+    ``model_id`` that survived the sanitiser yet still resolves outside
+    the cache root raises rather than writing to an unintended
+    location. Today's regex permits no path-separator characters
+    through, so this check guards against a future regex regression.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "data" / "embeddings" / f"{_sanitised_model_id(model_id)}.parquet"
+    cache_root = (repo_root / "data" / "embeddings").resolve()
+    candidate = (cache_root / f"{_sanitised_model_id(model_id)}.parquet").resolve()
+    if cache_root not in candidate.parents:
+        raise ValueError(
+            f"Sanitised cache path {candidate} escapes cache root {cache_root}; "
+            f"refusing to write outside the configured cache directory. "
+            f"(model_id={model_id!r} sanitises to {_sanitised_model_id(model_id)!r}.)"
+        )
+    return candidate
 
 
 def embed_corpus(

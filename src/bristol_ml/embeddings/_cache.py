@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -449,9 +449,3 @@ def build_cache(
         embedder=embedder,
         force_rebuild=force_rebuild,
     )
-
-
-# Re-export to keep the helper visible at the cache module surface
-# without forcing callers to remember the underscore-prefixed
-# implementation function name.
-_ = Callable  # silence "imported but unused" for the type-hint helper

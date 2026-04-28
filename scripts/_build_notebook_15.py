@@ -195,7 +195,13 @@ from bristol_ml.embeddings._factory import build_embedder, embed_corpus  # noqa:
 # laptop session does not silently survive into the new run.  In
 # production callers (Stage 16 / RAG) the cache_path comes from the
 # YAML and persists across runs as designed.
-cache_dir = Path(tempfile.mkdtemp(prefix="stage15_embedding_cache_"))
+#
+# ``TemporaryDirectory`` (over ``mkdtemp``) registers a finalizer so
+# the directory is removed when the kernel shuts down — repeated
+# notebook runs do not accumulate ``stage15_embedding_cache_*`` dirs
+# under ``/tmp`` (Phase-3 code review CR-7).
+_cache_tempdir = tempfile.TemporaryDirectory(prefix="stage15_embedding_cache_")
+cache_dir = Path(_cache_tempdir.name)
 embed_cfg = cfg.embedding.model_copy(update={"cache_path": cache_dir / "cache.parquet"})
 
 # embed_corpus returns (VectorIndex, EmbeddingCache).  The cache
