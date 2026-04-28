@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T5 named tests:
+- ``docs/plans/completed/15-embedding-index.md`` §6 T5 named tests:
   ``test_cache_hit_no_rebuild``,
   ``test_corpus_change_invalidates``,
   ``test_model_change_invalidates``.

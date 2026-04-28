@@ -21,7 +21,7 @@ standalone CLI caller need only pass an
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md``.
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md`` §6 T7.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md`` §6 T7.
 - Stage 14 prior art — :func:`bristol_ml.llm.extractor.build_extractor`.
 """
 

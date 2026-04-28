@@ -26,7 +26,7 @@ discriminator is hit.
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md`` (Stage 15 T10).
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md``.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md``.
 - Intent — ``docs/intent/15-embedding-index.md``.
 - ADR-0008 — Embedder + VectorIndex Protocols (Stage 15 T10).
 """

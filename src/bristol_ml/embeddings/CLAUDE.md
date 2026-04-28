@@ -110,9 +110,9 @@ duplicate ids is the caller's responsibility to police.
 class EmbeddingCacheMetadata:
     embedded_at_utc: datetime
     corpus_sha256: str            # full 64-char hex
-    corpus_sha256_prefix: str     # 12-char prefix (log-line ergonomics)
     model_id: str
     dim: int
+    # corpus_sha256_prefix is a @property (12-char prefix for log-line ergonomics)
 
 @dataclass(frozen=True)
 class EmbeddingCache:
@@ -123,6 +123,7 @@ class EmbeddingCache:
     @classmethod
     def load_or_build(
         cls,
+        *,
         path: Path,
         ids: list[str],
         texts: list[str],
@@ -166,10 +167,10 @@ A single Parquet file per `(model_id_sanitised)` at
 
 The sanitiser replaces non-`[A-Za-z0-9._-]` with `_`; e.g.
 `Alibaba-NLP/gte-modernbert-base` becomes
-`Alibaba-NLP_gte-modernbert-base.parquet`. The cache file is written
-via `np.savez_compressed` to a `.tmp` sibling then `os.replace`-d
-into place — a crash mid-write leaves the previous-good cache
-intact.
+`Alibaba-NLP_gte-modernbert-base.parquet`. The cache file is written via `pyarrow.parquet.write_table` to a
+`.tmp` sibling then `os.replace`-d into place — a crash mid-write
+leaves the previous-good cache intact. (`np.savez_compressed` is
+used by `NumpyIndex.save`, not by the cache layer.)
 
 ## Quick recipes
 
@@ -339,8 +340,9 @@ Located alongside the production code:
   change → rebuild + WARNING; model-id change → rebuild + WARNING;
   fresh cache → no rebuild.
 - `tests/unit/embeddings/test_text_synthesis.py` — NULL
-  `message_description` falls back to structured fields; the
-  documented sentinel fires when every field is also NULL.
+  `message_description` falls back to structured fields; an
+  all-NULL row returns the empty string `""`
+  (`test_fully_null_row_returns_empty_string`).
 - `tests/unit/embeddings/test_module_runs_standalone.py` —
   `python -m bristol_ml.embeddings` exits 0 under stub mode +
   prints expected lines.

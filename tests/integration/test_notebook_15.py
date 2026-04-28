@@ -18,7 +18,7 @@ the kernel cwd to the source notebook's parent and silently ignores
 the ``finally`` block. A session-scoped ``autouse`` fixture sweeps
 orphans from prior runs.
 
-Plan reference: ``docs/plans/active/15-embedding-index.md`` §6 T9 named
+Plan reference: ``docs/plans/completed/15-embedding-index.md`` §6 T9 named
 test ``test_notebook_15_executes_top_to_bottom``.
 """
 

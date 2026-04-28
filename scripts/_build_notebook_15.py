@@ -1,7 +1,7 @@
 """Build notebooks/15_embedding_index.ipynb programmatically.
 
 Stage 15 Task T9 notebook deliverable — follows the six-cell recipe in
-``docs/plans/active/15-embedding-index.md`` §5 (Notebook structure) +
+``docs/plans/completed/15-embedding-index.md`` §5 (Notebook structure) +
 §6 T9.
 
 Generating the notebook from a Python script keeps cell source under
@@ -99,7 +99,7 @@ content-hash cache:
   cleanly.
 
 - **Intent:** `docs/intent/15-embedding-index.md`.
-- **Plan:** `docs/plans/active/15-embedding-index.md`.
+- **Plan:** `docs/plans/completed/15-embedding-index.md`.
 - **Module:** `src/bristol_ml/embeddings/`.
 
 CI runs this notebook against an 8-row REMIT fixture under

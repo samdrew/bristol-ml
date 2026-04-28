@@ -20,7 +20,7 @@ function. A stub-only or factory-only caller never pays the cost.
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md``.
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md`` §1 A3, §6 T9.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md`` §1 A3, §6 T9.
 - R-6 — UMAP install footprint mitigation.
 """
 

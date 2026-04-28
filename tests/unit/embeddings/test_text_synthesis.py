@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T6 named test
+- ``docs/plans/completed/15-embedding-index.md`` §6 T6 named test
   ``test_null_message_uses_structured_fallback``.
 - Plan §1 D9: ``message_description`` is frequently NULL on the live
   Elexon stream endpoint; the embedder must accept NULL and synthesise

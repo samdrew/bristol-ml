@@ -23,7 +23,7 @@ write idiom (``.tmp`` sibling + :func:`os.replace`).
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md``.
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md`` §6 T2 + T3.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md`` §6 T2 + T3.
 - Atomic-write prior art — :func:`bristol_ml.ingestion._common._atomic_write`.
 """
 

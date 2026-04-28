@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T1 named test
+- ``docs/plans/completed/15-embedding-index.md`` §6 T1 named test
   ``test_embedder_and_index_satisfy_protocol_structurally`` plus
   AC-5 (intent line 34): "the index's interface is small enough that
   swapping the vector store implementation later is a mechanical

@@ -178,7 +178,7 @@ Plus implicit ACs from the requirements artefact §3:
 5. **2D projection.** UMAP on the corpus matrix (`random_state=42`, `n_components=2`, `n_jobs=1`); matplotlib scatter coloured by event type or fuel. Marker: `T5 Cell 5`.
 6. **Optional cross-stage join (per A5).** If the Stage 14 extracted-features parquet is present at the documented path, join structured features (`fuel_type`, `event_type` from extraction) onto the nearest-neighbour result and re-print the top-k with the structured columns alongside cosine score. If absent, print a single-line banner ("Stage 14 output not found at <path> — skipping cross-stage join.") and continue. Cell must execute cleanly under both branches in CI. Marker: `T5 Cell 6`.
 
-Total: 7 cells (1 markdown + 6 code), mirroring Stage 14's 7-cell layout exactly.
+Total: 8 cells (1 title-markdown + 6 code + 1 closing-discussion markdown), one cell richer than Stage 14's 7-cell layout — the trailing discussion cell narrates the cross-stage join's optionality so a facilitator presenting from the notebook does not need to ad-lib.
 
 ---
 

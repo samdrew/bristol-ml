@@ -2,7 +2,7 @@
 
 - **Status:** Accepted — 2026-04-27.
 - **Deciders:** Project author; Stage 15 lead agent.
-- **Related:** [`layers/embeddings.md`](../layers/embeddings.md), [`src/bristol_ml/embeddings/_protocols.py`](../../../src/bristol_ml/embeddings/_protocols.py), [`docs/plans/active/15-embedding-index.md`](../../plans/active/15-embedding-index.md) §1 D2 + D3 + D16, ADR-0003 (`Model` Protocol precedent).
+- **Related:** [`layers/embeddings.md`](../layers/embeddings.md), [`src/bristol_ml/embeddings/_protocols.py`](../../../src/bristol_ml/embeddings/_protocols.py), [`docs/plans/completed/15-embedding-index.md`](../../plans/completed/15-embedding-index.md) §1 D2 + D3 + D16, ADR-0003 (`Model` Protocol precedent).
 
 ## Context
 
@@ -91,7 +91,7 @@ If a third swappable interface arrives without using `runtime_checkable` Protoco
 
 ## References
 
-- [`docs/plans/active/15-embedding-index.md`](../../plans/active/15-embedding-index.md) §1 D2 (Embedder Protocol shape), §1 D3 (VectorIndex Protocol shape), §1 D16 (empty-index returns `[]`).
+- [`docs/plans/completed/15-embedding-index.md`](../../plans/completed/15-embedding-index.md) §1 D2 (Embedder Protocol shape), §1 D3 (VectorIndex Protocol shape), §1 D16 (empty-index returns `[]`).
 - [`docs/lld/research/15-embedding-index-scope-diff.md`](../../lld/research/15-embedding-index-scope-diff.md) — `@minimalist` Phase-1 critique; the Protocol method-counts were a `RESTATES INTENT` row (kept).
 - [`docs/architecture/layers/embeddings.md`](../layers/embeddings.md) §"Public interface" + §"Why two Protocols, not one".
 - [`src/bristol_ml/embeddings/_protocols.py`](../../../src/bristol_ml/embeddings/_protocols.py) — implementation.

@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T3 named test
+- ``docs/plans/completed/15-embedding-index.md`` §6 T3 named test
   ``test_query_returns_sorted_top_k`` plus
 - AC-2 (intent line 35): "nearest-neighbour queries return in well
   under a second".

@@ -27,7 +27,7 @@ downstream of any ingested corpus.
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md``.
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md`` §6 T5.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md`` §6 T5.
 - Atomic-write prior art — :func:`bristol_ml.ingestion._common._atomic_write`.
 - DESIGN.md §2.1.6 (provenance discipline).
 """

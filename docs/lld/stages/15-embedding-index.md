@@ -62,10 +62,11 @@ over the Stage 13 REMIT corpus. Three targets, in priority order:
   text-synthesis + cache + factory + index hydration into one
   call site that the notebook and the standalone CLI both use.
 - `src/bristol_ml/embeddings/_text.py` — `synthesise_embeddable_text`
-  for NULL `message_description` rows. Falls back to
-  `"<event_type> <cause> <fuel_type> <affected_unit>"` joined; the
-  documented sentinel `"REMIT event (details unavailable)"` fires
-  when every structured field is also NULL. Mechanical reuse of
+  for NULL `message_description` rows. Falls back to a single-space
+  join of the non-NULL subset of `event_type`, `cause`, `fuel_type`,
+  and `affected_unit`; returns the empty string `""` when every
+  structural field is also NULL (pinned by
+  `test_fully_null_row_returns_empty_string`). Mechanical reuse of
   Stage 14's OQ-B resolution.
 - `src/bristol_ml/embeddings/_projection.py` — `project_to_2d`
   UMAP wrapper (`random_state=42`, `n_jobs=1`, `metric="cosine"`,
@@ -124,9 +125,9 @@ over the Stage 13 REMIT corpus. Three targets, in priority order:
     overrides; atomic-write leaves no `.tmp` artefacts on success.
   - `tests/unit/embeddings/test_text_synthesis.py` — non-NULL
     message passes through; NULL message falls back to structured
-    fields; every-field-NULL row hits the documented sentinel;
-    pandas NULL flavours (`pd.NA`, `np.nan`, `None`) all coerce
-    correctly.
+    fields; every-field-NULL row returns the empty string `""`
+    (`test_fully_null_row_returns_empty_string`); pandas NULL
+    flavours (`pd.NA`, `np.nan`, `None`) all coerce correctly.
   - `tests/unit/embeddings/test_module_runs_standalone.py` —
     `python -m bristol_ml.embeddings` exits 0 under stub mode +
     prints expected config / neighbour lines.
@@ -353,8 +354,68 @@ optional cross-stage join is the bridge to Stage 16: when Stage
 
 ## Phase-3 review fixes
 
-*To be filled in after the three reviewers (`arch-reviewer`,
-`code-reviewer`, `docs-writer`) run.*
+The Phase 3 reviewers (`arch-reviewer`, `code-reviewer`,
+`docs-writer`) ran in parallel on the implemented branch. Verdicts:
+arch-reviewer flagged two blockers (B1 sentinel doc drift, B2 plan
+not yet archived) on otherwise-clean architectural conformance;
+code-reviewer flagged two blockers (B3 `np.load(allow_pickle=True)`
+RCE surface, B4 sanitiser leaves `..` traversal-shaped) plus six
+non-blocking polish items; docs-writer surfaced three module-guide
+drift points (already corrected in the same review pass) plus one
+README size-figure inconsistency. All blockers were addressed
+in-branch under the standing user directive ("Phases 2 & 3 together
+with any review feedback"); the consolidated fix set:
+
+- **B3 — `np.load(allow_pickle=True)` is RCE surface.** `StubIndex`
+  and `NumpyIndex` `save` / `load` rewritten to persist `ids` as
+  fixed-width unicode (`np.asarray(ids, dtype=str)`) and load with
+  `allow_pickle=False`. A malicious cache file can no longer execute
+  arbitrary code on `index.load()`; the round-trip test pins
+  byte-equality of `ids` after the swap.
+- **B4 — cache-path sanitiser leaves `..` traversal-shaped.** The
+  `_FILESYSTEM_SAFE` regex permitted `.` (and therefore `..`) through
+  with no follow-up containment check. Two-layer defence added:
+  (1) `_sanitised_model_id` now `lstrip(".")`s the regex output, so
+  a leading-dot adversarial input cannot pass through; (2)
+  `_default_cache_path` resolves the candidate path and asserts the
+  cache root is one of its parents — a future regex regression
+  surfaces as `ValueError` before any I/O. Pinned by 10 new
+  adversarial tests at
+  `tests/unit/embeddings/test_cache_path_security.py` (`TestSanitiser`
+  + `TestDefaultCachePathContainment`).
+- **B1 — sentinel doc drift.** The layer doc and CHANGELOG
+  documented a `"REMIT event (details unavailable)"` sentinel for
+  all-NULL rows; the actual code returns the empty string `""`,
+  pinned by `test_fully_null_row_returns_empty_string`. The doc
+  drift was the bug — the empty-string path is simpler and the test
+  documents the rationale (callers who want to drop empty rows can
+  filter on `synthesise_embeddable_text(row) == ""`). Layer doc,
+  CHANGELOG, module guide, and this retro all corrected to match
+  the code.
+- **B2 — plan not yet archived.** `docs/plans/active/15-embedding-index.md`
+  moved to `docs/plans/completed/15-embedding-index.md`; production
+  code, tests, ADR-0008, and the build-script docstrings updated to
+  point at the archived path. (CHANGELOG, scope-diff, and the plan
+  itself preserve the `active/` references in their historical
+  context — Stage 14's archival convention.)
+- **Non-blocking polish swept up alongside the blockers.** Dead code
+  removed (`_stub_env_var_set` and `_build_live_embedder_or_stub` in
+  `_embedder.py`; the unused `Callable` import in `_cache.py`); the
+  notebook builder's cache `tempfile.mkdtemp(...)` swapped for a
+  `tempfile.TemporaryDirectory()` finalizer so notebook re-runs
+  don't leave orphan cache directories; `NumpyIndex.query` gained
+  an explicit `if clipped == 0: return []` early-return for `k=0`.
+  Module-guide drift on `corpus_sha256_prefix` (`@property`, not a
+  field), the atomic-write claim (`pyarrow.parquet.write_table`, not
+  `np.savez_compressed`), and the `load_or_build` keyword-only
+  separator were corrected by the docs-writer pass. The README's
+  pre-warm size note ("~570 MB") was harmonised to "~298 MB
+  safetensors at fp32; ~149 MB resident in RAM at fp16" — the
+  canonical figures used in 5+ other Stage 15 docs.
+
+After the fixes the embeddings unit suite was 902 passed, 2 skipped
+(both live-path xfails when the local HF model cache is absent).
+Ruff clean.
 
 ## Deferred
 

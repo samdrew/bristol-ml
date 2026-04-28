@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T2 named tests:
+- ``docs/plans/completed/15-embedding-index.md`` §6 T2 named tests:
   ``test_stub_default_when_env_var_set``,
   ``test_stub_returns_same_vector_per_text``.
 - AC-4 (intent line 33): "the embedding model has no external API

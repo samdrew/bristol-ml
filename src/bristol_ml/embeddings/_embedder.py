@@ -33,7 +33,7 @@ CI safety (plan §1 D8).
 Cross-references:
 
 - Layer contract — ``docs/architecture/layers/embeddings.md``.
-- Stage 15 plan — ``docs/plans/active/15-embedding-index.md`` §6 T2 + T4.
+- Stage 15 plan — ``docs/plans/completed/15-embedding-index.md`` §6 T2 + T4.
 - Boundary types — :mod:`bristol_ml.embeddings` (``__init__.py``).
 """
 

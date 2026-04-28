@@ -59,7 +59,7 @@ Pre-commit hooks and `.gitignore` keep secrets out of the repository; VCR casset
 
 ### Before the meetup
 
-The Stage 15 live embedder downloads `Alibaba-NLP/gte-modernbert-base` (~570 MB) from the Hugging Face Hub on first use. Pre-warm the cache once so the meetup demo does not stall on a cold network:
+The Stage 15 live embedder downloads `Alibaba-NLP/gte-modernbert-base` (~298 MB safetensors at fp32; ~149 MB resident in RAM at fp16) from the Hugging Face Hub on first use. Pre-warm the cache once so the meetup demo does not stall on a cold network:
 
 ```bash
 python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Alibaba-NLP/gte-modernbert-base')"

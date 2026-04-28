@@ -203,9 +203,9 @@ size (no exception, no zero-padding).
 class EmbeddingCacheMetadata:
     embedded_at_utc: datetime         # UTC-aware
     corpus_sha256: str                # full 64-char hex
-    corpus_sha256_prefix: str         # 12-char prefix for log lines
     model_id: str
     dim: int
+    # corpus_sha256_prefix is a @property returning the first 12 chars
 
 @dataclass(frozen=True)
 class EmbeddingCache:
@@ -216,6 +216,7 @@ class EmbeddingCache:
     @classmethod
     def load_or_build(
         cls,
+        *,
         path: Path,
         ids: list[str],
         texts: list[str],
@@ -271,11 +272,13 @@ project lifetime are vanishing (12 hex chars = 48 bits = 1 in 281
 trillion).
 
 **Atomic-write idiom.** The cache file is written via
-`np.savez_compressed` to a `.tmp` sibling then `os.replace`-d into
-place — the parquet atomic-write idiom from
+`pyarrow.parquet.write_table` to a `.tmp` sibling then `os.replace`-d
+into place — the parquet atomic-write idiom from
 `bristol_ml.ingestion._common._atomic_write`. A crash mid-write
 leaves the previous-good cache intact; a successful write is
-visible atomically.
+visible atomically. (The `np.savez_compressed` idiom is used by
+`NumpyIndex.save`, which persists the in-memory index, not the
+embedding cache.)
 
 ---
 
@@ -288,12 +291,15 @@ mechanically. `synthesise_embeddable_text(row)` returns:
 
 - `row.message_description` if it is non-NULL and non-empty after
   strip; or
-- a synthesised string from `event_type`, `cause`, `fuel_type`, and
-  `affected_unit` joined as `"<event_type> <cause> <fuel_type>
-  <affected_unit>"`; or
-- a documented sentinel (`"REMIT event (details unavailable)"`) when
-  every structured field is also NULL — extreme case the live data
-  occasionally produces.
+- a synthesised string from the non-NULL subset of `event_type`,
+  `cause`, `fuel_type`, and `affected_unit` joined with a single
+  space; or
+- the empty string `""` when every structured field is also NULL —
+  extreme case the live data occasionally produces. The downstream
+  `Embedder` then yields a deterministic null-vector for that row;
+  callers wanting to drop empty rows pre-embed can filter on
+  `synthesise_embeddable_text(row) == ""`. Pinned by
+  `tests/unit/embeddings/test_text_synthesis.py::test_fully_null_row_returns_empty_string`.
 
 This is **mechanical reuse of Stage 14's OQ-B resolution**, not a
 new decision. A row that the extractor handled by structural-field

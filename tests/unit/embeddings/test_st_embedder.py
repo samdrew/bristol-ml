@@ -2,7 +2,7 @@
 
 Every test here is derived from:
 
-- ``docs/plans/active/15-embedding-index.md`` §6 T4 named test
+- ``docs/plans/completed/15-embedding-index.md`` §6 T4 named test
   ``test_st_embedder_loads_offline``.
 - Plan §1 D4 / A2 (Ctrl+G 2026-04-27): the live default checkpoint is
   ``Alibaba-NLP/gte-modernbert-base``.
