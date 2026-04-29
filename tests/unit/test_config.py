@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from bristol_ml import load_config
 from conf._schemas import (
     AppConfig,
+    EmbeddingConfig,
     EvaluationGroup,
     FeatureSetConfig,
     FeaturesGroup,
@@ -1811,3 +1812,113 @@ def test_llm_extractor_config_extra_keys_forbidden() -> None:
     """
     with pytest.raises(ValidationError):
         LlmExtractorConfig(modle_name="gpt-4o-mini")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Stage 15 T7 — EmbeddingConfig + AppConfig.embedding optionality
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_config_round_trips_through_hydra() -> None:
+    """Guards Stage 15 T7: ``conf/embedding/default.yaml`` defaults match ``EmbeddingConfig(...)``.
+
+    Plan §1 D2 + D4 + D5 + D6 + D8 + D17: the YAML defaults must
+    match the Python-side schema defaults exactly so the schema is
+    the single source of truth — a mismatch here means someone
+    edited the YAML or the schema without updating the other.
+
+    The ``+embedding=default`` prefix is required because the train
+    pipeline's ``conf/config.yaml`` does *not* include ``embedding``
+    in its defaults list (mirrors Stage 12 ``serving`` and Stage 14
+    ``llm`` precedents).
+    """
+    cfg = load_config(overrides=["+embedding=default"])
+
+    assert cfg.embedding is not None, (
+        "cfg.embedding must be populated when ``+embedding=default`` is in the override list."
+    )
+    assert isinstance(cfg.embedding, EmbeddingConfig), (
+        f"expected EmbeddingConfig; got {type(cfg.embedding).__name__!r}."
+    )
+    # The YAML defaults must match the Python-side defaults.
+    assert cfg.embedding.type == "stub", (
+        f"plan §1 D8 / AC-4: default type must be 'stub' to keep CI offline; "
+        f"got {cfg.embedding.type!r}."
+    )
+    assert cfg.embedding.model_id == "Alibaba-NLP/gte-modernbert-base", (
+        f"plan §1 A2: live default model_id is 'Alibaba-NLP/gte-modernbert-base'; "
+        f"got {cfg.embedding.model_id!r}."
+    )
+    assert cfg.embedding.cache_path is None, (
+        f"plan §1 D14: default cache_path is None (derived from model_id); "
+        f"got {cfg.embedding.cache_path!r}."
+    )
+    assert cfg.embedding.vector_backend == "numpy", (
+        f"plan §1 D5: default vector_backend is 'numpy'; got {cfg.embedding.vector_backend!r}."
+    )
+    assert cfg.embedding.default_top_k == 10, (
+        f"plan §6 T8: default top_k is 10; got {cfg.embedding.default_top_k!r}."
+    )
+    assert cfg.embedding.projection_type == "umap", (
+        f"plan §1 D6 / A3: default projection is 'umap'; got {cfg.embedding.projection_type!r}."
+    )
+    assert cfg.embedding.force_rebuild is False, (
+        f"plan §1 D17: default force_rebuild is False; got {cfg.embedding.force_rebuild!r}."
+    )
+    assert cfg.embedding.fp16 is True, (
+        f"plan §1 D4: default fp16 is True (halves live RAM footprint); got {cfg.embedding.fp16!r}."
+    )
+
+
+def test_app_config_embedding_default_is_none_so_existing_callers_unaffected() -> None:
+    """Guards Stage 15 T7: ``AppConfig.embedding`` defaults to ``None``.
+
+    Plan §1 D8 + AppConfig docstring: the train pipeline / Stage-0
+    config-smoke surface must remain unaffected by Stage 15 — the
+    new top-level field defaults to ``None`` in the absence of
+    ``+embedding=default`` (mirrors Stage 12 ``serving`` and Stage
+    14 ``llm`` precedents).
+    """
+    cfg = load_config()
+    assert cfg.embedding is None, (
+        f"Stage 15 T7 contract: cfg.embedding must default to None for every "
+        f"non-embedding CLI / config-smoke surface; got {cfg.embedding!r}."
+    )
+
+    app = AppConfig(project=ProjectConfig(name="bristol_ml", seed=0))
+    assert app.embedding is None, (
+        f"AppConfig(project=...) without an ``embedding`` kwarg must default "
+        f"embedding to None; got {app.embedding!r}."
+    )
+
+
+def test_embedding_config_rejects_unknown_type_literal() -> None:
+    """Guards Stage 15 T7: the ``type`` discriminator literal is closed.
+
+    Plan §1 D2: ``type: Literal["stub", "sentence_transformers"]`` —
+    Pydantic must reject any other value. Widening the literal is the
+    supported way to add a third backend (plan AC-1 sub-criterion);
+    quietly accepting a typo is the regression this test guards.
+    """
+    with pytest.raises(ValidationError):
+        EmbeddingConfig(type="cohere")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        EmbeddingConfig(type="bogus")  # type: ignore[arg-type]
+
+
+def test_embedding_config_rejects_unknown_vector_backend_literal() -> None:
+    """Guards Stage 15 T7: the ``vector_backend`` discriminator literal is closed.
+
+    Plan §1 D5: ``vector_backend: Literal["numpy", "stub"]`` — adding
+    FAISS or hnswlib is a plan-edit conversation that updates the
+    literal here and adds a dispatch branch in
+    :func:`bristol_ml.embeddings.build_index`.
+    """
+    with pytest.raises(ValidationError):
+        EmbeddingConfig(vector_backend="faiss")  # type: ignore[arg-type]
+
+
+def test_embedding_config_extra_keys_forbidden() -> None:
+    """Guards Stage 15 T7: ``extra="forbid"`` catches typos in YAML overrides."""
+    with pytest.raises(ValidationError):
+        EmbeddingConfig(modle_id="gpt-4o-mini")  # type: ignore[call-arg]

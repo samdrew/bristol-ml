@@ -1090,6 +1090,84 @@ class LlmExtractorConfig(BaseModel):
     request_timeout_seconds: float = Field(default=30.0, gt=0)
 
 
+class EmbeddingConfig(BaseModel):
+    """Configuration for the Stage 15 embedding index.
+
+    Plan §1 D2 + D3 + D8: ``type`` is the embedder discriminator
+    (``"stub"`` | ``"sentence_transformers"``); ``vector_backend`` is
+    the index discriminator (``"numpy"`` | ``"stub"``). ``"stub"`` is
+    the default everywhere — AC-4 (offline-by-default) requires no
+    HTTP at init or inference.
+
+    The ``"sentence_transformers"`` path is double-gated: even when
+    ``type == "sentence_transformers"``, ``BRISTOL_ML_EMBEDDING_STUB=1``
+    in the environment forces the stub path (plan §1 D8 — triple-gated
+    stub-first). This keeps CI and offline runs safe regardless of
+    YAML configuration.
+
+    Field semantics:
+      - ``model_id``: provider-specific model name (e.g.
+        ``"Alibaba-NLP/gte-modernbert-base"``). Plan §1 D4 / A2 — the
+        live default. Required when ``type == "sentence_transformers"``.
+      - ``cache_path``: where the embedding cache parquet is written.
+        Defaults to ``data/embeddings/<model_id_sanitised>.parquet``;
+        the resolution happens in ``embed_corpus`` because the
+        ``model_id`` is needed to compute the sanitised filename and
+        Pydantic models are frozen.
+      - ``vector_backend``: ``"numpy"`` for production,
+        ``"stub"`` for unit tests. Plan §1 D5.
+      - ``default_top_k``: the notebook + standalone-module entry's
+        default ``k`` for nearest-neighbour queries. Plan §6 T8.
+      - ``projection_type``: the 2D-projection backend name
+        (``"umap"`` only at Stage 15 per A3). Plan §1 D6.
+      - ``force_rebuild``: skip the cache freshness check and rebuild
+        unconditionally. Plan §1 D17.
+      - ``fp16``: load the live model with
+        ``model_kwargs={"torch_dtype": torch.float16}``. Plan §1 D4.
+
+    Like ``ServingConfig`` and ``LlmExtractorConfig``, this is composed
+    in only by entry points that need it (the embeddings CLI and the
+    Stage 15 notebook); the default ``conf/config.yaml`` does **not**
+    include ``embedding`` in its defaults list, so ``cfg.embedding``
+    resolves to ``None`` for the train pipeline.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Discriminator selecting the embedder implementation. Widening
+    # this literal is the supported way to add a third backend
+    # (e.g. ``"openai_ada"``, ``"cohere"``); see plan §1 D2 evidence.
+    type: Literal["stub", "sentence_transformers"] = "stub"
+    # Provider-specific model id. ``None`` is acceptable for the stub
+    # path; the factory validates non-None at init when ``type ==
+    # "sentence_transformers"``. Required-when-live is enforced at
+    # construction rather than via a Pydantic validator so the same
+    # schema can describe both implementations without a discriminator-
+    # keyed root model.
+    model_id: str | None = None
+    # Cache file path (plan §1 D14). ``None`` means "derive from
+    # ``model_id`` at ``embed_corpus`` call time"; an explicit path
+    # overrides the derivation (test fixtures, demos pinning a
+    # specific file).
+    cache_path: Path | None = None
+    # Vector-store discriminator. ``"numpy"`` is the production binding
+    # (plan §1 D5); ``"stub"`` is the unit-test default.
+    vector_backend: Literal["numpy", "stub"] = "numpy"
+    # Default ``k`` for nearest-neighbour queries surfaced through the
+    # notebook and the standalone-module entry. Plan §6 T8.
+    default_top_k: int = Field(default=10, ge=1, le=1000)
+    # 2D projection backend (plan §1 D6 / A3). UMAP is the bound
+    # default; PCA was the Scope-Diff cut that was overturned.
+    projection_type: Literal["umap"] = "umap"
+    # Plan §1 D17 escape hatch — surfaced as a YAML field rather than
+    # a CLI flag (per A4 narrowing).
+    force_rebuild: bool = False
+    # Plan §1 D4: half-precision model load halves the live RAM
+    # footprint to ~149 MB. The cache vector matrix stays float32 for
+    # query stability (R-3).
+    fp16: bool = True
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1115,3 +1193,7 @@ class AppConfig(BaseModel):
     # does not list it. Compose at the entry point with
     # ``+llm=extractor``.
     llm: LlmExtractorConfig | None = None
+    # Stage 15: ``None`` mirrors the ``llm`` precedent — only the
+    # embedding CLI and the Stage 15 notebook compose this group via
+    # ``+embedding=default``.
+    embedding: EmbeddingConfig | None = None

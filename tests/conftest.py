@@ -7,10 +7,19 @@ file, not here.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import pytest
 from loguru import logger
+
+# Stage 15 D12 / NFR-1: set ``HF_HUB_OFFLINE=1`` at module-import time so
+# any sentence-transformers / huggingface_hub import in the test process
+# refuses to fetch over the network. This is belt-and-braces with the
+# project's stub-first triple gate (``BRISTOL_ML_EMBEDDING_STUB``); a
+# regression that re-introduces a network call surfaces here as an
+# OSError rather than a silent download.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 @pytest.fixture()

@@ -43,6 +43,7 @@ exists, not what's planned.
 | Registry | [`layers/registry.md`](./layers/registry.md) |
 | Serving | [`layers/serving.md`](./layers/serving.md) |
 | LLM | [`layers/llm.md`](./layers/llm.md) |
+| Embeddings | [`layers/embeddings.md`](./layers/embeddings.md) |
 
 ## Cross-cutting concerns
 
@@ -71,6 +72,7 @@ Append-only by convention — supersede older ADRs rather than editing.
 - [`0005-skops-for-model-serialisation.md`](./decisions/0005-skops-for-model-serialisation.md) — Stage 12 joblib → `skops.io` migration; envelope-of-primitives invariant; trust-list contract for future model families.
 - [`0006-serving-lazy-load-cache.md`](./decisions/0006-serving-lazy-load-cache.md) — Stage 12 lifespan loads only the default model; non-default `run_id`s lazy-load and cache (single highest-leverage cut).
 - [`0007-ingestion-public-contract-bifurcates-by-data-shape.md`](./decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md) — ingestion-layer public contract is two-tier (level data: `fetch`+`load`; event log: `fetch`+`load`+temporal-query primitive).
+- [`0008-embedding-index-protocol.md`](./decisions/0008-embedding-index-protocol.md) — `Embedder` and `VectorIndex` are `runtime_checkable` `typing.Protocol` types, not ABCs; concrete implementations satisfy them structurally (Stage 15).
 
 ## Changing the architecture
 

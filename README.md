@@ -51,9 +51,21 @@ The stub path makes zero network calls and requires no API key. CI sets `BRISTOL
 | `BRISTOL_ML_LLM_API_KEY` | OpenAI API key for Stage 14 live extraction | unset |
 | `BRISTOL_ML_LLM_STUB` | Force the LLM stub regardless of config | `1` |
 | `BRISTOL_ML_REMIT_STUB` | Force the REMIT-ingestion stub regardless of config | `1` |
+| `BRISTOL_ML_EMBEDDING_STUB` | Force the embedding stub regardless of config (Stage 15) | `1` |
+| `BRISTOL_ML_EMBEDDING_MODEL_PATH` | Override the live embedder model path or HF id (Stage 15) | unset |
 | `BRISTOL_ML_CACHE_DIR` | Override the default cache root (`~/.cache/bristol_ml`) | unset (uses default) |
 
 Pre-commit hooks and `.gitignore` keep secrets out of the repository; VCR cassette fixtures filter `authorization` and `x-api-key` headers automatically when re-recorded. Never commit a key.
+
+### Before the meetup
+
+The Stage 15 live embedder downloads `Alibaba-NLP/gte-modernbert-base` (~298 MB safetensors at fp32; ~149 MB resident in RAM at fp16) from the Hugging Face Hub on first use. Pre-warm the cache once so the meetup demo does not stall on a cold network:
+
+```bash
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Alibaba-NLP/gte-modernbert-base')"
+```
+
+The download lands in `~/.cache/huggingface/`. Subsequent runs (and CI) honour `HF_HUB_OFFLINE=1` and never touch the network. To force the offline stub regardless of cache state, export `BRISTOL_ML_EMBEDDING_STUB=1`.
 
 ## What is this?
 
@@ -142,6 +154,22 @@ See [`src/bristol_ml/serving/CLAUDE.md`](src/bristol_ml/serving/CLAUDE.md), [`do
 ## Worked example: LLM feature extractor (Stage 14)
 
 `notebooks/14_llm_extractor.ipynb` is the demo surface for the project's first authenticated outbound dependency: an LLM that reads REMIT free-text messages and returns a structured feature row. The architectural lesson is **stub-first discipline** — every CI run, every notebook bootstrap, and every test runs an offline `StubExtractor` backed by a 76-record hand-labelled gold set; no API key, no network call. The pedagogical lesson is the **side-by-side accuracy report**: `python -m bristol_ml.llm.evaluate` runs both implementations over the gold set and prints a per-field exact-match column next to a tolerance column (±5 MW capacity, ±1 h timestamps), showing where the LLM gets it wrong and *how the metric choice itself changes the answer* (intent line 41 — "the metric choice is a lesson itself"). Switching to the live OpenAI path is one Hydra override (`llm.type=openai`) plus an `BRISTOL_ML_LLM_API_KEY` export (see [API keys](#api-keys-and-offline-by-default) above). The integration test against the live path replays a recorded VCR cassette so CI never spends tokens. Public surface: a two-method `Extractor` Protocol (`extract` + `extract_batch`), a Pydantic `ExtractionResult` carrying provenance (`prompt_hash` + `model_id` — first 12 hex chars of SHA-256 of the prompt-file bytes), and a `build_extractor(config)` factory that triple-gates the live path (config discriminator + env-var override + API-key gate). Entry points: `python -m bristol_ml.llm.extractor --help`, `python -m bristol_ml.llm.evaluate --help`. See [`src/bristol_ml/llm/CLAUDE.md`](src/bristol_ml/llm/CLAUDE.md), [`docs/architecture/layers/llm.md`](docs/architecture/layers/llm.md), and the [Stage 14 retrospective](docs/lld/stages/14-llm-extractor.md).
+
+## Worked example: embedding index over REMIT (Stage 15)
+
+`notebooks/15_embedding_index.ipynb` is the demo surface for the project's first vector boundary. The eight-cell notebook synthesises an embeddable text per REMIT message (concatenating fuel type, capacity, valid-from / valid-to, and the optional free-text body — see [the layer doc](docs/architecture/layers/embeddings.md) §"NULL message_description synthesis"), embeds the corpus through `bristol_ml.embeddings.embed_corpus`, persists the result in a content-addressed Parquet cache, runs a top-k nearest-neighbour query, and projects the corpus into 2D via UMAP for a coloured scatter that lets a facilitator point at a cluster and say "that's planned nuclear maintenance." The architectural lesson is **two swappable Protocols** — `Embedder` and `VectorIndex` are independent `runtime_checkable` `typing.Protocol` types, so a future RAG stage can replace `NumpyIndex` with FAISS / Qdrant / a remote vector DB without touching the embedder, and a quantised-model experiment can swap the embedder without touching the index (see [ADR-0008](docs/architecture/decisions/0008-embedding-index-protocol.md)).
+
+The triple-gated stub-first dispatch is the same shape as Stage 14: config discriminator (`embedding.type=stub` is the YAML default), env-var override (`BRISTOL_ML_EMBEDDING_STUB=1`), and a model-availability check (`HF_HUB_OFFLINE=1` plus a missing local snapshot routes back to the stub with a `loguru` WARNING). Cache invalidation is content-addressed: a SHA-256 of the corpus bytes plus the embedder's `model_id` is stored in the cache Parquet's `custom_metadata`; mismatch on either field rebuilds.
+
+```bash
+# Standalone CLI — five-row synthetic corpus, top-3 query against "planned nuclear outage"
+uv run python -m bristol_ml.embeddings
+
+# Switch to the live ModernBERT path (requires the pre-warm above)
+uv run python -m bristol_ml.embeddings embedding.type=sentence_transformers
+```
+
+The notebook runs end-to-end in approximately 9 seconds under `BRISTOL_ML_EMBEDDING_STUB=1` and ~45 seconds the first time on the live path (CPU). Entry points: `python -m bristol_ml.embeddings --help`. See [`src/bristol_ml/embeddings/CLAUDE.md`](src/bristol_ml/embeddings/CLAUDE.md), [`docs/architecture/layers/embeddings.md`](docs/architecture/layers/embeddings.md), and the [Stage 15 retrospective](docs/lld/stages/15-embedding-index.md).
 
 ## Worked example: REMIT bi-temporal ingestion (Stage 13)
 
