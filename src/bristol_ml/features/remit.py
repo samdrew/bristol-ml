@@ -215,10 +215,13 @@ def derive_remit_features(
     revisions = _per_mrid_validity(remit_df, far_future=far_future)
 
     # --- Step 2: per-revision contribution windows ---------------------------
-    active_windows = _active_windows(revisions, far_future=far_future)
+    # Reviewer R1: ``_active_windows`` and ``_forward_windows`` consume
+    # the per-mrid table whose ``tx_valid_to`` and ``effective_to_filled``
+    # have already been clamped by ``_per_mrid_validity``; the
+    # ``far_future`` sentinel does not need to be threaded through them.
+    active_windows = _active_windows(revisions)
     forward_windows = _forward_windows(
         revisions,
-        far_future=far_future,
         lookahead_hours=forward_lookahead_hours,
     )
     # Unplanned count uses the *active* windows but with a +1 / -1 delta
@@ -317,11 +320,12 @@ def _validate_inputs(
             f"derive_remit_features: hourly_index must be tz-aware UTC; got "
             f"tz={hourly_index.tz!r}.  Convert via .tz_convert('UTC') first."
         )
-    if not hourly_index.is_monotonic_increasing:
+    if not hourly_index.is_monotonic_increasing or hourly_index.has_duplicates:
         raise ValueError(
             "derive_remit_features: hourly_index is not strictly monotonically "
-            "increasing.  The assembler's timestamp_utc is sorted ascending — "
-            "upstream layer has regressed."
+            "increasing (it carries duplicates or is unsorted).  The assembler's "
+            "timestamp_utc is sorted ascending and unique — upstream layer has "
+            "regressed."
         )
     if forward_lookahead_hours < 0:
         raise ValueError(
@@ -367,15 +371,19 @@ def _per_mrid_validity(
 
     The function also tags each revision with:
 
-    - ``affected_mw_safe`` — ``affected_mw`` with NaN replaced by 0.0
-      (NaN ``affected_mw`` rows do not contribute to any sum but still
-      occupy a transaction-time interval; the count column ignores them
-      via ``one``-column zeros).
+    - ``affected_mw_safe`` — ``affected_mw`` with NaN replaced by 0.0.
+      NaN ``affected_mw`` rows do not contribute to either MW sum but
+      **still increment** the unplanned count when their cause matches
+      ``"Unplanned"`` — counting an event with unknown capacity is the
+      correct domain interpretation (the LLM extractor may yet provide
+      a capacity through ``_override_affected_mw``).
     - ``cause_tag`` — case-folded ``cause`` (``""`` for NULL).
     - ``effective_to_filled`` — ``effective_to`` with NaT replaced by
       ``far_future`` so the active-window math is total.
-    - ``one`` — constant 1.0, used as the count delta for the unplanned
-      signal.
+    - ``one`` — constant ``1.0`` for every revision.  The count signal
+      reads this column rather than ``affected_mw_safe`` so that a row
+      with NaN MW still contributes to the count when its cause is
+      ``"Unplanned"`` (reviewer R2 — docstring corrected).
     """
     df = remit_df.copy()
     # Sort once — used by both the per-mrid groupby and the contribution
@@ -403,8 +411,6 @@ def _per_mrid_validity(
 
 def _active_windows(
     revisions: pd.DataFrame,
-    *,
-    far_future: pd.Timestamp,
 ) -> pd.DataFrame:
     """Compute the *active* contribution interval per revision.
 
@@ -429,7 +435,6 @@ def _active_windows(
 def _forward_windows(
     revisions: pd.DataFrame,
     *,
-    far_future: pd.Timestamp,
     lookahead_hours: int,
 ) -> pd.DataFrame:
     """Compute the *forward-looking* contribution interval per revision.

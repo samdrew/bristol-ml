@@ -4,13 +4,14 @@
 #
 # Composes the Stage 5 weather+calendar pipeline with the Stage 16 REMIT
 # feature derivation (``bristol_ml.features.remit.derive_remit_features``)
-# on top, producing a 58-column hourly feature table:
+# on top, producing a **59-column** hourly feature table.  The ground
+# truth is the ``WITH_REMIT_OUTPUT_SCHEMA`` constant in
+# ``features/assembler.py``; in summary:
 #
-#   - positions 0..53  -> ``CALENDAR_OUTPUT_SCHEMA`` minus the
-#     ``holidays_retrieved_at_utc`` provenance scalar (see
-#     ``WITH_REMIT_OUTPUT_SCHEMA`` in ``features/assembler.py`` for the
-#     exact projection).
-#   - positions 54..56 -> the three Stage 16 REMIT columns:
+#   - positions 0..54  -> ``CALENDAR_OUTPUT_SCHEMA.names`` (all 55 cols
+#     of the Stage 5 weather+calendar schema, including the
+#     ``holidays_retrieved_at_utc`` provenance scalar at position 54).
+#   - positions 55..57 -> the three Stage 16 REMIT columns:
 #       * ``remit_unavail_mw_total``       (float32; sum of ``affected_mw``
 #         across REMIT events active at t under bi-temporal as-of
 #         filtering)
@@ -19,7 +20,7 @@
 #       * ``remit_unavail_mw_next_24h``    (float32; sum of ``affected_mw``
 #         for events whose ``effective_from`` lies in [t, t+24h) as known
 #         at t).
-#   - position 57       -> ``remit_retrieved_at_utc`` (provenance scalar,
+#   - position 58       -> ``remit_retrieved_at_utc`` (provenance scalar,
 #     mirroring ``holidays_retrieved_at_utc`` from the calendar layer).
 #
 # The third REMIT column is the forward-looking "known future input"

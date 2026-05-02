@@ -993,14 +993,23 @@ def assemble_with_remit(cfg: AppConfig, *, cache: str | object = "offline") -> P
             len(extracted_df),
         )
     else:
+        # Reviewer B3: name the actual extractor that build_extractor will
+        # return rather than claiming "stub-mode default" — under
+        # ``llm.type=openai`` with a populated API key this fallback would
+        # silently dispatch the live extractor across the entire REMIT
+        # corpus, which the operator must consent to explicitly via the
+        # CLI.  The WARNING names the extractor type so the cost surprise
+        # is visible.
+        extractor = build_extractor(cfg.llm)
         logger.warning(
             "with_remit assembler: extracted-features parquet missing at {}; "
-            "running extractor inline (stub-mode default).  Run "
-            "`python -m bristol_ml.llm.persistence` first to use a different "
-            "extractor.",
+            "running {} inline.  For a controlled real-extractor pass run "
+            "`python -m bristol_ml.llm.persistence --cache auto` (with "
+            "explicit `--limit` / Hydra overrides) first, then re-run the "
+            "assembler against the warm cache.",
             extracted_path,
+            type(extractor).__name__,
         )
-        extractor = build_extractor(cfg.llm)
         extract_and_persist(extractor, remit_df, output_path=extracted_path)
         extracted_df = load_extracted(extracted_path)
 
@@ -1083,6 +1092,12 @@ def _override_affected_mw(remit_df: pd.DataFrame, extracted_df: pd.DataFrame) ->
         extracted_df[[*join_cols, "affected_capacity_mw"]],
         on=join_cols,
         how="left",
+        # Reviewer B2: refuse a corrupted extracted parquet that would fan
+        # out REMIT rows by duplicating join keys.  ``many_to_one`` asserts
+        # the right side is unique on ``(mrid, revision_number)`` — a
+        # property guaranteed by ``EXTRACTED_OUTPUT_SCHEMA``'s primary key
+        # but not enforced by parquet itself.
+        validate="many_to_one",
     )
     enriched["affected_mw"] = enriched["affected_capacity_mw"].combine_first(
         enriched["affected_mw"]

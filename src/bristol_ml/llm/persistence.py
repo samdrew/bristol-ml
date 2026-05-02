@@ -45,7 +45,7 @@ import sys
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pandas as pd
 import pyarrow as pa
@@ -54,9 +54,6 @@ from loguru import logger
 
 from bristol_ml.ingestion._common import _atomic_write
 from bristol_ml.llm import Extractor, RemitEvent
-
-if TYPE_CHECKING:  # pragma: no cover — typing-only imports
-    pass
 
 __all__ = [
     "DEFAULT_OUTPUT_PATH",

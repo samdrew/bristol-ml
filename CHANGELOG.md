@@ -52,6 +52,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Stage 16: `bristol_ml.features.remit` — new pure-derivation module producing the
+  three REMIT-derived hourly columns for the `with_remit` feature set. Public
+  surface: `REMIT_VARIABLE_COLUMNS` (typed column constant) and
+  `derive_remit_features(remit_df, hourly_index, *, forward_lookahead_hours=24) ->
+  pd.DataFrame`. Bi-temporal correctness is structurally enforced: each revision
+  contributes only over the half-interval in which it is both the latest visible
+  revision of its `mrid` **and** active per its event window; bypassing the
+  function exposes the caller to leakage (NFR-1 / AC-1). Columns:
+  `remit_unavail_mw_total` (float32 — MW sum of active events under the as-of
+  rule), `remit_active_unplanned_count` (int32 — count of active unplanned events),
+  `remit_unavail_mw_next_24h` (float32 — MW sum of events starting within the next
+  24 hours, i.e. the forward-looking "known future input" signal per plan A2). Zero-
+  event hours produce zeros; no NaN anywhere (AC-7). Algorithm uses delta-event
+  aggregation + `merge_asof` for O((n_revisions + n_hours) log) vectorised
+  evaluation instead of per-hour `as_of()` calls (plan D9). Standalone CLI
+  `python -m bristol_ml.features.remit`. Stage 16 plan — `docs/plans/active/16-model-with-remit.md`.
+- Stage 16: `bristol_ml.llm.persistence` — new module that adds the missing on-disk
+  persistence step for Stage 14's extractor output (codebase hazard H1 — the
+  `Extractor` Protocol returns `list[ExtractionResult]` in memory with no prior
+  parquet). Public surface: `EXTRACTED_OUTPUT_SCHEMA` (11-column `pa.Schema` keyed
+  on `(mrid, revision_number)`), `extract_and_persist(extractor, remit_df, *,
+  output_path) -> Path` (atomic write via `ingestion._common._atomic_write`),
+  `load_extracted(path) -> pd.DataFrame` (schema-exact read), and
+  `DEFAULT_OUTPUT_PATH` (`data/processed/remit_extracted.parquet`). Standalone CLI
+  `python -m bristol_ml.llm.persistence --cache {auto,refresh,offline} [--limit N]
+  [--output PATH] [overrides...]` with `+llm=extractor` composed automatically;
+  stub-default; live OpenAI path activated via `llm.type=openai` and
+  `BRISTOL_ML_LLM_API_KEY`. Schema columns: `mrid`, `revision_number`, `event_type`,
+  `fuel_type`, `affected_capacity_mw`, `effective_from`, `effective_to`,
+  `confidence`, `prompt_hash`, `model_id`, `extracted_at_utc`.
+- Stage 16: `with_remit` feature set — `WITH_REMIT_OUTPUT_SCHEMA` (59-column
+  `pa.Schema`; 55-column `CALENDAR_OUTPUT_SCHEMA` prefix + 3 REMIT columns + 1
+  `remit_retrieved_at_utc` provenance scalar), `assemble_with_remit(cfg, *, cache)
+  -> Path`, and `load_with_remit(path) -> pd.DataFrame` added to
+  `bristol_ml.features.assembler`. All three exported in `assembler.__all__`.
+  `assemble_with_remit` composes the Stage 5 weather+calendar pipeline with the
+  Stage 16 REMIT derivation; if the extracted-features parquet is absent it logs a
+  WARNING and runs `extract_and_persist` inline under stub mode (CI affordance —
+  see `features/CLAUDE.md` §"Stage 16 notes" for the explicit pre-population CLI).
+  New `WithRemitFeatureConfig` Pydantic schema in `conf/_schemas.py` (fields:
+  `forward_lookahead_hours: int = 24`, `include_forward_lookahead: bool = True`,
+  `extracted_parquet_filename: str | None = None`) and
+  `FeaturesGroup.with_remit: WithRemitFeatureConfig | None = None` slot. New
+  `conf/features/with_remit.yaml` Hydra group file; select with `features=with_remit`
+  at the CLI. New `with_remit` arm in `train._resolve_feature_set` (mutual-
+  exclusivity invariant extended to the third feature set). The
+  `include_forward_lookahead` flag determines which `feature_columns` the model
+  reads; the on-disk schema always carries `remit_unavail_mw_next_24h` for
+  contract stability (plan A2 / A4).
+- Stage 16: `notebooks/04_remit_ablation.ipynb` — five-cell ablation notebook (1
+  title-markdown + 3 executable code cells + 1 commentary markdown). Generated
+  from `scripts/_build_notebook_16.py`. Ships with a runbook banner cell that
+  detects absent `with_remit` registry runs (T6 deferred to the human's CUDA host)
+  and prints the host-side commands. When T6 runs are present, renders a four-row
+  metric table: best model without REMIT / best model with REMIT excluding
+  `next_24h` / best model with REMIT including `next_24h` / NESO benchmark —
+  rows 2-vs-1 isolate the marginal value of current-state REMIT signal; row 3-vs-2
+  isolates the forward-looking column (plan A2). Smoke test at
+  `tests/integration/test_notebook_04.py`.
+- Stage 16: retrospective at [`docs/lld/stages/16-model-with-remit.md`](docs/lld/stages/16-model-with-remit.md),
+  covering the Withdrawn-truncates-prior bug found during T2 stub-mode smoke,
+  the dtype-precision mismatch on `merge_asof`, the auto-run extractor choice in
+  `assemble_with_remit`, the T6 deferral, and the T6 host runbook.
+
 - Stage 15: `bristol_ml.embeddings` — first **content-addressed cache** behind a typed, swappable boundary, and the project's first semantic-search surface. Public boundary (`bristol_ml/embeddings/__init__.py`): `Embedder` `runtime_checkable` `Protocol` with two methods + two properties (`embed(text) -> np.ndarray`, `embed_batch(texts) -> np.ndarray`, `dim`, `model_id`); `VectorIndex` `runtime_checkable` `Protocol` with four methods + one property (`add(ids, vectors)`, `query(vec, k) -> list[NearestNeighbour]`, `save(path)`, `load(path)` classmethod, `dim`); `NearestNeighbour` `NamedTuple(id: str, score: float)` for tight-loop query returns; `EmbeddingCache` + `EmbeddingCacheMetadata` frozen dataclasses; `synthesise_embeddable_text` for NULL-`message_description` fallback; `STUB_ENV_VAR` (`"BRISTOL_ML_EMBEDDING_STUB"`) and `MODEL_PATH_ENV_VAR` (`"BRISTOL_ML_EMBEDDING_MODEL_PATH"`) constants. ADR-0008 records the Protocol-over-ABC choice; ADR-0003 set the precedent for `Model`, Stage 14 reused it for `Extractor`, Stage 15 establishes it as the project's house style for swappable interfaces. Two implementations of each Protocol (`bristol_ml/embeddings/_embedder.py` and `_index.py`): `StubEmbedder` (offline-by-default; deterministic 8-dim SHA-256-derived L2-normalised float32 vectors; mirrors the `"query: "` prefix asymmetry — query/document path divergence — so a regression where a downstream caller routes queries through `embed_batch` surfaces in unit tests rather than as silent retrieval-quality degradation; AC-4 / NFR-1) and `SentenceTransformerEmbedder` (live path; loads `Alibaba-NLP/gte-modernbert-base` 149 M params 768-dim with `model_kwargs={"torch_dtype": torch.float16}` halving the ~298 MB safetensors fp32 footprint to ~149 MB; deferred `from sentence_transformers import SentenceTransformer` so the boundary import stays light — Stage 16 callers holding the Protocol type pay no `sentence-transformers` import cost — pinned by `tests/unit/embeddings/test_protocol.py::test_boundary_import_does_not_pull_sentence_transformers`); `StubIndex` (in-memory list-of-pairs minimal conformance for unit tests) and `NumpyIndex` (production binding; pre-normalised float32 corpus matrix; cosine query is a single `corpus @ query.T` matmul; `np.savez_compressed` persistence with the `.tmp` sibling + `os.replace` atomic-write idiom borrowed from `bristol_ml.ingestion._common._atomic_write`).
 - Stage 15: `bristol_ml.embeddings._cache.EmbeddingCache` — content-addressed cache at `data/embeddings/<model_id_sanitised>.parquet` (gitignored). `load_or_build(path, ids, texts, embedder, force_rebuild=False)` is the cache's single public entry; tries to read the parquet, recomputes `corpus_sha256` from the supplied texts (full 64-char hex over the deterministic `"\n"`-joined serialisation), compares against the stored hash *and* the supplied `embedder.model_id`, rebuilds on either mismatch with a `loguru` WARNING naming the offending field. Three provenance fields stamped into Parquet `custom_metadata`: `embedded_at_utc` (UTC ISO-8601 string), `corpus_sha256` (stored full-length, exposed as a 12-char prefix on `EmbeddingCacheMetadata.corpus_sha256_prefix` for log-line ergonomics — collisions over the project lifetime are vanishing at 12 hex chars / 48 bits / 1 in 281 trillion), `model_id`. `git_sha` was the Scope-Diff cut (no AC; duplicates registry-layer convention for a cache file). The lessons generalise beyond embeddings: any cached derivation downstream of an ingested corpus copies the same shape — content-hash + backend-id as the invalidation key, Parquet `custom_metadata` as the provenance carrier, deterministic recompute on mismatch (NFR-2 / NFR-5 / AC-3 / AC-8). Cache vectors stay float32 even when inference is fp16 — fp16 inference can introduce minor numeric jitter that would surface as non-deterministic top-k ordering when ties are close (R-3).
 - Stage 15: `bristol_ml.embeddings._factory` — `build_embedder(config) -> Embedder`, `build_index(config, *, dim) -> VectorIndex`, and the high-level glue `embed_corpus(*, config, corpus, id_columns=("mrid", "revision_number")) -> tuple[VectorIndex, EmbeddingCache]`. **Triple-gated dispatch** (plan §1 D8) for the embedder factory: `BRISTOL_ML_EMBEDDING_STUB=1` env-var beats YAML discriminator (`type: stub` default in `conf/embedding/default.yaml`) beats explicit live config — load-bearing for CI safety, mirroring Stage 14's `BRISTOL_ML_LLM_STUB` discipline. The `BRISTOL_ML_EMBEDDING_MODEL_PATH` env-var optionally overrides `config.model_id` for the live path. `embed_corpus` ties text-synthesis (`synthesise_embeddable_text` over each row) + cache resolution (default path derived from `model_id` at call time via filesystem-safe sanitiser; `data/embeddings/<sanitised>.parquet`) + factory + `index.add(cache.ids, cache.vectors)` into one call site that the notebook and the standalone CLI both use. Index id grain is `"<mrid>::<revision_number>"` — Stage 13's `OUTPUT_SCHEMA` primary-key pair uniqueness guarantees no de-duplication is needed.

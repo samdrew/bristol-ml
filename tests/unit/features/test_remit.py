@@ -744,3 +744,65 @@ class TestValidationGuards:
         assert "mrid" in error_text, (
             f"ValueError for missing 'mrid' column must name the column; got: {error_text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — Unplanned-vs-Forced count discrimination (reviewer R3)
+#
+# The module docstring says "Forced" is a distinct category from "Unplanned"
+# and is NOT counted by remit_active_unplanned_count.  Pin the discrimination
+# at the value level: construct one Unplanned event and one Forced event with
+# the same active window and assert the count is 1 (Unplanned only), not 2.
+# ---------------------------------------------------------------------------
+
+
+def test_unplanned_count_excludes_forced_cause() -> None:
+    """``remit_active_unplanned_count`` counts Unplanned only; Forced is excluded.
+
+    Constructs two events whose active windows overlap exactly at the same
+    hours: one with cause='Unplanned', one with cause='Forced'.  At any hour
+    in the overlap, the count must be 1 (the Unplanned event), not 2.
+
+    Pins the load-bearing cause-vocabulary discrimination from the module's
+    ``_UNPLANNED_TAG`` constant + comment (Stage 16 plan; reviewer R3).
+    """
+    remit_df = _make_remit_df(
+        [
+            _make_row(
+                mrid="UNPLANNED-EVENT",
+                revision_number=0,
+                published_at=T - pd.Timedelta(hours=2),
+                effective_from=T,
+                effective_to=T + pd.Timedelta(hours=4),
+                affected_mw=200.0,
+                cause="Unplanned",
+            ),
+            _make_row(
+                mrid="FORCED-EVENT",
+                revision_number=0,
+                published_at=T - pd.Timedelta(hours=2),
+                effective_from=T,
+                effective_to=T + pd.Timedelta(hours=4),
+                affected_mw=300.0,
+                cause="Forced",
+            ),
+        ]
+    )
+    hourly_index = pd.date_range(start=T - pd.Timedelta(hours=1), periods=8, freq="h", tz="UTC")
+
+    derived = derive_remit_features(remit_df, hourly_index)
+    overlap = derived[
+        (derived["timestamp_utc"] >= T) & (derived["timestamp_utc"] < T + pd.Timedelta(hours=4))
+    ]
+
+    # Both events contribute to remit_unavail_mw_total during the overlap.
+    assert (overlap["remit_unavail_mw_total"] == 500.0).all(), (
+        "Both Unplanned and Forced events should contribute to the MW sum; "
+        f"got {overlap['remit_unavail_mw_total'].tolist()!r}"
+    )
+    # Only the Unplanned event contributes to the count signal — Forced is
+    # a distinct upstream category.
+    assert (overlap["remit_active_unplanned_count"] == 1).all(), (
+        "remit_active_unplanned_count must equal 1 during the overlap (Unplanned only, "
+        f"NOT Forced); got {overlap['remit_active_unplanned_count'].tolist()!r}"
+    )
