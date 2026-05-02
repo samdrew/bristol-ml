@@ -560,7 +560,7 @@ def test_resolve_feature_set_with_remit_excludes_forward(tmp_path: Path) -> None
         evaluation=EvaluationGroup(),
     )
 
-    fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
+    _fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
 
     assert load_fn is assembler.load_with_remit
     assert "remit_unavail_mw_next_24h" not in col_names, (
@@ -570,8 +570,7 @@ def test_resolve_feature_set_with_remit_excludes_forward(tmp_path: Path) -> None
     assert "remit_unavail_mw_total" in col_names
     assert "remit_active_unplanned_count" in col_names
     assert len(col_names) == 51, (
-        f"with_remit (forward disabled) must have 51 columns (52 - 1); "
-        f"got {len(col_names)}"
+        f"with_remit (forward disabled) must have 51 columns (52 - 1); got {len(col_names)}"
     )
 
 

@@ -58,9 +58,7 @@ def test_notebook_04_executes_top_to_bottom(tmp_path: Path) -> None:
     )
 
     suffix = tmp_path.name
-    executed_path = NOTEBOOK_PATH.with_name(
-        f"{NOTEBOOK_PATH.stem}.pytest-exec-{suffix}.ipynb"
-    )
+    executed_path = NOTEBOOK_PATH.with_name(f"{NOTEBOOK_PATH.stem}.pytest-exec-{suffix}.ipynb")
     executed_path.write_bytes(NOTEBOOK_PATH.read_bytes())
     try:
         _run_and_assert(executed_path, tmp_path)
@@ -73,9 +71,9 @@ def _run_and_assert(executed_path: Path, tmp_path: Path) -> None:
     env = dict(os.environ)
     repo_str = str(REPO_ROOT)
     src_str = str(REPO_ROOT / "src")
-    env["PYTHONPATH"] = os.pathsep.join(
-        [repo_str, src_str, env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([repo_str, src_str, env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
     # Plan AC-10: stub-mode forces the offline path so CI has no
     # network or API-key dependency.
     env["BRISTOL_ML_REMIT_STUB"] = "1"
@@ -115,9 +113,7 @@ def _run_and_assert(executed_path: Path, tmp_path: Path) -> None:
 
     expected_markers = ("T7 Cell 1", "T7 Cell 2", "T7 Cell 3")
     for marker in expected_markers:
-        matching = [
-            cell for cell in code_cells if marker in "".join(cell.get("source", []))
-        ]
+        matching = [cell for cell in code_cells if marker in "".join(cell.get("source", []))]
         assert matching, (
             f"Expected a code cell containing marker {marker!r} in the executed "
             f"notebook; found none.  Did the cell labelling change in "

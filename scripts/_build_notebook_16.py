@@ -130,7 +130,7 @@ plan A3 / A4), re-execute and the four-row table is complete.
 # ---------------------------------------------------------------------------
 
 cell_1 = code(
-    '''# T7 Cell 1 — Bootstrap, locate the repo root, set offline guards.
+    """# T7 Cell 1 — Bootstrap, locate the repo root, set offline guards.
 import os
 import sys
 from pathlib import Path
@@ -165,7 +165,7 @@ runs_with_remit = list(registry.list_runs(feature_set="with_remit"))
 runs_baseline = list(registry.list_runs(feature_set="weather_calendar"))
 print(f"with_remit registered runs:        {len(runs_with_remit)}")
 print(f"weather_calendar registered runs:  {len(runs_baseline)}")
-'''
+"""
 )
 
 

@@ -158,9 +158,7 @@ def _resolve_feature_set(
     if getattr(with_remit, "include_forward_lookahead", True):
         remit_names = remit_names_all
     else:
-        remit_names = tuple(
-            n for n in remit_names_all if n != "remit_unavail_mw_next_24h"
-        )
+        remit_names = tuple(n for n in remit_names_all if n != "remit_unavail_mw_next_24h")
     return (
         with_remit,
         assembler.load_with_remit,

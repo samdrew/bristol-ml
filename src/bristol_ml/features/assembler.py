@@ -898,11 +898,14 @@ def assemble_with_remit(cfg: AppConfig, *, cache: str | object = "offline") -> P
     from bristol_ml.features.remit import derive_remit_features
     from bristol_ml.features.weather import national_aggregate
     from bristol_ml.ingestion import holidays as _holidays_ing
-    from bristol_ml.ingestion import neso, remit as _remit_ing, weather
+    from bristol_ml.ingestion import neso, weather
+    from bristol_ml.ingestion import remit as _remit_ing
     from bristol_ml.ingestion._common import CachePolicy, _atomic_write, _cache_path
     from bristol_ml.llm.extractor import build_extractor
     from bristol_ml.llm.persistence import (
         DEFAULT_OUTPUT_PATH as _EXTRACTED_DEFAULT_PATH,
+    )
+    from bristol_ml.llm.persistence import (
         extract_and_persist,
         load_extracted,
     )
@@ -920,8 +923,7 @@ def assemble_with_remit(cfg: AppConfig, *, cache: str | object = "offline") -> P
         )
     if cfg.ingestion.holidays is None:
         raise ValueError(
-            "`ingestion.holidays` must be resolved before the with_remit "
-            "assembler runs."
+            "`ingestion.holidays` must be resolved before the with_remit assembler runs."
         )
     if cfg.ingestion.remit is None:
         raise ValueError(
@@ -1063,9 +1065,7 @@ def _resolve_extracted_path(fset: object, default_path: Path) -> Path:
     return default_path.resolve()
 
 
-def _override_affected_mw(
-    remit_df: pd.DataFrame, extracted_df: pd.DataFrame
-) -> pd.DataFrame:
+def _override_affected_mw(remit_df: pd.DataFrame, extracted_df: pd.DataFrame) -> pd.DataFrame:
     """Prefer the LLM-extracted ``affected_capacity_mw`` over raw ``affected_mw``.
 
     Joins ``remit_df`` with ``extracted_df`` on ``(mrid, revision_number)``

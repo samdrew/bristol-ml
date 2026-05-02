@@ -69,9 +69,7 @@ prints a small sample of the derived feature frame.
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Final
 
 import numpy as np
@@ -485,20 +483,12 @@ def _running_total(
     # front: the REMIT parquet round-trips at us precision and the
     # downstream merge_asof against the assembler's hourly index (ns
     # precision) is strict on dtype equality.
-    window_from = (
-        pd.DatetimeIndex(windows["window_from"]).tz_convert("UTC").as_unit("ns")
-    )
-    window_to = (
-        pd.DatetimeIndex(windows["window_to"]).tz_convert("UTC").as_unit("ns")
-    )
+    window_from = pd.DatetimeIndex(windows["window_from"]).tz_convert("UTC").as_unit("ns")
+    window_to = pd.DatetimeIndex(windows["window_to"]).tz_convert("UTC").as_unit("ns")
     deltas = pd.concat(
         [
-            pd.DataFrame(
-                {"t": window_from, "delta": windows[value_column].astype(float).values}
-            ),
-            pd.DataFrame(
-                {"t": window_to, "delta": -windows[value_column].astype(float).values}
-            ),
+            pd.DataFrame({"t": window_from, "delta": windows[value_column].astype(float).values}),
+            pd.DataFrame({"t": window_to, "delta": -windows[value_column].astype(float).values}),
         ],
         ignore_index=True,
         copy=False,

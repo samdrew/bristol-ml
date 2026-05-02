@@ -218,22 +218,12 @@ def extract_and_persist(
             "affected_capacity_mw": pd.Series(
                 [r.affected_capacity_mw for r in results], dtype="float64"
             ),
-            "effective_from": pd.to_datetime(
-                [r.effective_from for r in results], utc=True
-            ),
-            "effective_to": pd.to_datetime(
-                [r.effective_to for r in results], utc=True
-            ),
-            "confidence": pd.Series(
-                [r.confidence for r in results], dtype="float32"
-            ),
-            "prompt_hash": pd.Series(
-                [r.prompt_hash for r in results], dtype="string"
-            ),
+            "effective_from": pd.to_datetime([r.effective_from for r in results], utc=True),
+            "effective_to": pd.to_datetime([r.effective_to for r in results], utc=True),
+            "confidence": pd.Series([r.confidence for r in results], dtype="float32"),
+            "prompt_hash": pd.Series([r.prompt_hash for r in results], dtype="string"),
             "model_id": pd.Series([r.model_id for r in results], dtype="string"),
-            "extracted_at_utc": pd.to_datetime(
-                [extracted_at] * len(results), utc=True
-            ),
+            "extracted_at_utc": pd.to_datetime([extracted_at] * len(results), utc=True),
         }
     )
 
@@ -266,8 +256,7 @@ def load_extracted(path: Path) -> pd.DataFrame:
     for field in EXTRACTED_OUTPUT_SCHEMA:
         if field.name not in actual.names:
             raise ValueError(
-                f"Extracted-features parquet at {path} is missing required column "
-                f"{field.name!r}"
+                f"Extracted-features parquet at {path} is missing required column {field.name!r}"
             )
         actual_field = actual.field(field.name)
         if actual_field.type != field.type:
@@ -303,23 +292,13 @@ def _row_to_event(row: pd.Series) -> RemitEvent:
         message_status=str(row["message_status"]),
         published_at=row["published_at"],
         effective_from=row["effective_from"],
-        effective_to=(
-            row["effective_to"] if pd.notna(row["effective_to"]) else None
-        ),
-        fuel_type=(
-            str(row["fuel_type"]) if pd.notna(row["fuel_type"]) else None
-        ),
-        affected_mw=(
-            float(row["affected_mw"]) if pd.notna(row["affected_mw"]) else None
-        ),
-        event_type=(
-            str(row["event_type"]) if pd.notna(row["event_type"]) else None
-        ),
+        effective_to=(row["effective_to"] if pd.notna(row["effective_to"]) else None),
+        fuel_type=(str(row["fuel_type"]) if pd.notna(row["fuel_type"]) else None),
+        affected_mw=(float(row["affected_mw"]) if pd.notna(row["affected_mw"]) else None),
+        event_type=(str(row["event_type"]) if pd.notna(row["event_type"]) else None),
         cause=str(row["cause"]) if pd.notna(row["cause"]) else None,
         message_description=(
-            str(row["message_description"])
-            if pd.notna(row["message_description"])
-            else None
+            str(row["message_description"]) if pd.notna(row["message_description"]) else None
         ),
     )
 
@@ -368,7 +347,10 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Hydra overrides (e.g. llm.type=openai llm.model_name=gpt-4o-mini).",
+        help=(
+            "Hydra overrides applied on top of conf/config.yaml + +llm=extractor "
+            "(e.g. llm.type=openai or llm.model_name=<provider-model-id>)."
+        ),
     )
     return parser
 

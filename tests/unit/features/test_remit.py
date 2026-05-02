@@ -33,10 +33,8 @@ grids use ``pd.date_range(... tz='UTC')``.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
@@ -343,7 +341,11 @@ def test_zero_event_hour_handling() -> None:
         f"Empty-REMIT derived frame must have shape (48, 4); got {result.shape}."
     )
 
-    remit_cols = ["remit_unavail_mw_total", "remit_active_unplanned_count", "remit_unavail_mw_next_24h"]
+    remit_cols = [
+        "remit_unavail_mw_total",
+        "remit_active_unplanned_count",
+        "remit_unavail_mw_next_24h",
+    ]
     for col in remit_cols:
         nan_count = result[col].isna().sum()
         assert nan_count == 0, (
@@ -424,8 +426,7 @@ def test_forward_looking_column_semantics() -> None:
     t_25h_before = pd.Timestamp("2024-01-14 11:00", tz="UTC")
     fwd_25h, _ = _lookup(t_25h_before)
     assert fwd_25h == pytest.approx(0.0), (
-        f"At {t_25h_before} (25h before start), remit_unavail_mw_next_24h must be 0; "
-        f"got {fwd_25h}."
+        f"At {t_25h_before} (25h before start), remit_unavail_mw_next_24h must be 0; got {fwd_25h}."
     )
 
     # 2024-01-14 12:00 UTC: exactly 24h before start → boundary, within [t, t+24h) → 200
@@ -467,9 +468,7 @@ def test_forward_looking_column_semantics() -> None:
     # With forward_lookahead_hours=0 the column is always zero
     result_zero_lookahead = derive_remit_features(remit_df, hourly_index, forward_lookahead_hours=0)
     all_zero = (result_zero_lookahead["remit_unavail_mw_next_24h"] == 0).all()
-    assert all_zero, (
-        "With forward_lookahead_hours=0, remit_unavail_mw_next_24h must be all-zero."
-    )
+    assert all_zero, "With forward_lookahead_hours=0, remit_unavail_mw_next_24h must be all-zero."
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +481,7 @@ def test_forward_looking_column_semantics() -> None:
 
 
 def test_no_nan_in_remit_columns_with_mixed_nulls(
-    tmp_path: "pytest.Path",
+    tmp_path: pytest.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pins AC-7: no NaN in any REMIT column even with open-ended / null rows.
@@ -612,7 +611,7 @@ def test_withdrawn_revision_truncates_prior_active_revision() -> None:
 def test_cli_main_standalone_exits_zero_and_prints_columns(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
-    tmp_path: "pytest.Path",
+    tmp_path: pytest.Path,
 ) -> None:
     """Pins AC-8: ``_cli_main([])`` exits 0 and prints the three REMIT column names.
 
@@ -620,8 +619,8 @@ def test_cli_main_standalone_exits_zero_and_prints_columns(
     REMIT cache without touching the network.  The warm REMIT cache is pre-built
     via the ingestion stub, so _cli_main can load it and emit the sample table.
     """
-    from bristol_ml.ingestion import remit as remit_ingest
     from bristol_ml.features.remit import _cli_main
+    from bristol_ml.ingestion import remit as remit_ingest
     from conf._schemas import RemitIngestionConfig
 
     # Prime the stub cache in tmp_path so the CLI finds it
@@ -640,8 +639,7 @@ def test_cli_main_standalone_exits_zero_and_prints_columns(
     # All three column names must appear in the printed output
     for col_name, _ in REMIT_VARIABLE_COLUMNS:
         assert col_name in stdout, (
-            f"Column name {col_name!r} must appear in _cli_main output; "
-            f"got stdout:\n{stdout!r}"
+            f"Column name {col_name!r} must appear in _cli_main output; got stdout:\n{stdout!r}"
         )
 
 
@@ -662,8 +660,7 @@ def test_public_surface_importable() -> None:
         "REMIT_VARIABLE_COLUMNS must be importable from bristol_ml.features.remit."
     )
     assert callable(derive_remit_features), (
-        "derive_remit_features must be callable; got "
-        f"{type(derive_remit_features).__name__}."
+        f"derive_remit_features must be callable; got {type(derive_remit_features).__name__}."
     )
     # Verify via __all__
     import bristol_ml.features.remit as remit_mod
@@ -745,6 +742,5 @@ class TestValidationGuards:
 
         error_text = str(exc_info.value)
         assert "mrid" in error_text, (
-            f"ValueError for missing 'mrid' column must name the column; "
-            f"got: {error_text!r}"
+            f"ValueError for missing 'mrid' column must name the column; got: {error_text!r}"
         )
