@@ -1,0 +1,75 @@
+# @package features
+#
+# Weather + calendar + REMIT feature set (Stage 16).
+#
+# Composes the Stage 5 weather+calendar pipeline with the Stage 16 REMIT
+# feature derivation (``bristol_ml.features.remit.derive_remit_features``)
+# on top, producing a 58-column hourly feature table:
+#
+#   - positions 0..53  -> ``CALENDAR_OUTPUT_SCHEMA`` minus the
+#     ``holidays_retrieved_at_utc`` provenance scalar (see
+#     ``WITH_REMIT_OUTPUT_SCHEMA`` in ``features/assembler.py`` for the
+#     exact projection).
+#   - positions 54..56 -> the three Stage 16 REMIT columns:
+#       * ``remit_unavail_mw_total``       (float32; sum of ``affected_mw``
+#         across REMIT events active at t under bi-temporal as-of
+#         filtering)
+#       * ``remit_active_unplanned_count`` (int32; count of active events
+#         whose ``cause == "Unplanned"`` at t)
+#       * ``remit_unavail_mw_next_24h``    (float32; sum of ``affected_mw``
+#         for events whose ``effective_from`` lies in [t, t+24h) as known
+#         at t).
+#   - position 57       -> ``remit_retrieved_at_utc`` (provenance scalar,
+#     mirroring ``holidays_retrieved_at_utc`` from the calendar layer).
+#
+# The third REMIT column is the forward-looking "known future input"
+# Stage 16 plan A2 binds.  Disabling it via
+# ``features.with_remit.include_forward_lookahead=false`` ships a 57-
+# column variant used by the with/without registered run pair (plan
+# A4 / T6).  The schema constant in ``features/assembler.py``
+# (``WITH_REMIT_OUTPUT_SCHEMA``) is the canonical column list; the
+# notebook reads from that constant rather than re-listing it here.
+#
+# Bi-temporal correctness (AC-1) is enforced inside
+# ``derive_remit_features``: the REMIT event log is filtered through
+# ``ingestion.remit.as_of`` per query timestamp before any aggregation,
+# so each row's REMIT columns reflect only revisions published by
+# that row's ``timestamp_utc``.
+#
+# This file is a member of the ``features`` Hydra group.  Select it
+# with ``features=with_remit`` at the CLI; the default (no override)
+# loads ``conf/features/weather_only.yaml`` instead.  Exactly one of
+# ``cfg.features.weather_only`` / ``cfg.features.weather_calendar`` /
+# ``cfg.features.with_remit`` is populated per run;
+# ``bristol_ml.train._resolve_feature_set`` raises on any other case.
+
+with_remit:
+  name: with_remit
+  # Inherits the Stage 3 D1 default: ``mean`` of the two half-hourly
+  # NESO rows per UTC hour.
+  demand_aggregation: mean
+  # Derived artefact alongside the calendar / weather-only frames
+  # under the same raw-vs-derived convention.
+  cache_dir: ${oc.env:BRISTOL_ML_CACHE_DIR,data/features}
+  cache_filename: with_remit.parquet
+  # Inherits Stage 3 D5 forward-fill cap.
+  forward_fill_hours: 3
+
+  # Stage 16 plan A2: forward-looking window width.  24 h matches the
+  # day-ahead forecasting horizon (intent §"Forward-looking features";
+  # domain research §2 -- TFT/AutoGluon "known covariates").
+  forward_lookahead_hours: 24
+  # Stage 16 plan A2 / A4: True ships the three-column schema
+  # (current-state plus the forward-looking column); set False at the
+  # CLI to ship the two-column current-state-only variant for the
+  # with/without registered-run comparison
+  # (``features.with_remit.include_forward_lookahead=false``).  Both
+  # runs use the same parquet schema (the column is always present for
+  # contract stability); the difference lives in the model's
+  # ``feature_columns`` field, not in the assembler.
+  include_forward_lookahead: true
+  # Stage 16 plan A5 / T3: explicit filename override for the persisted
+  # ExtractionResult parquet within ``data/processed/``.  ``null`` (the
+  # default) defers to the orchestrator's project default
+  # (``remit_extracted.parquet``).
+  extracted_parquet_filename: null
