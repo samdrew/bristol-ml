@@ -471,6 +471,155 @@ def test_resolve_feature_set_neither_populated_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stage 16 T5 — with_remit arm of _resolve_feature_set
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_feature_set_with_remit_includes_forward(tmp_path: Path) -> None:
+    """Stage 16 T5: features=with_remit + include_forward_lookahead=True.
+
+    Asserts:
+    - Returned config is the WithRemitFeatureConfig object.
+    - Returned loader is assembler.load_with_remit (identity check).
+    - Returned column names tuple == weather_names + calendar_names +
+      all three REMIT names (including remit_unavail_mw_next_24h).
+    """
+    from bristol_ml.features import assembler
+    from bristol_ml.features.remit import REMIT_VARIABLE_COLUMNS
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+        WithRemitFeatureConfig,
+    )
+
+    cfg = AppConfig(
+        project=ProjectConfig(name="test_with_remit", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            with_remit=WithRemitFeatureConfig(
+                name="with_remit",
+                cache_dir=tmp_path,
+                cache_filename="with_remit.parquet",
+                forward_lookahead_hours=24,
+                include_forward_lookahead=True,
+            ),
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+    fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
+
+    assert fset_cfg is cfg.features.with_remit
+    assert load_fn is assembler.load_with_remit
+    weather_names = tuple(name for name, _ in WEATHER_VARIABLE_COLUMNS)
+    calendar_names = tuple(name for name, _ in CALENDAR_VARIABLE_COLUMNS)
+    remit_names = tuple(name for name, _ in REMIT_VARIABLE_COLUMNS)
+    expected = weather_names + calendar_names + remit_names
+    assert col_names == expected, (
+        "with_remit (forward enabled) column names must be weather + calendar + "
+        f"all REMIT cols; got {col_names!r}"
+    )
+    assert "remit_unavail_mw_next_24h" in col_names
+    assert len(col_names) == 52, (
+        f"with_remit (forward enabled) must have 52 columns; got {len(col_names)}"
+    )
+
+
+def test_resolve_feature_set_with_remit_excludes_forward(tmp_path: Path) -> None:
+    """Stage 16 plan A2/A4: include_forward_lookahead=False omits the forward column.
+
+    The parquet schema always carries the column for contract stability,
+    but the model's feature_columns reads only the enabled subset — this
+    is how the with/without-next_24h registered runs in T6 differ.
+    """
+    from bristol_ml.features import assembler
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+        WithRemitFeatureConfig,
+    )
+
+    cfg = AppConfig(
+        project=ProjectConfig(name="test_with_remit_no_fwd", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            with_remit=WithRemitFeatureConfig(
+                name="with_remit",
+                cache_dir=tmp_path,
+                cache_filename="with_remit.parquet",
+                forward_lookahead_hours=24,
+                include_forward_lookahead=False,
+            ),
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+    fset_cfg, load_fn, col_names = _resolve_feature_set(cfg)
+
+    assert load_fn is assembler.load_with_remit
+    assert "remit_unavail_mw_next_24h" not in col_names, (
+        "include_forward_lookahead=False must drop remit_unavail_mw_next_24h "
+        f"from the column tuple; got {col_names!r}"
+    )
+    assert "remit_unavail_mw_total" in col_names
+    assert "remit_active_unplanned_count" in col_names
+    assert len(col_names) == 51, (
+        f"with_remit (forward disabled) must have 51 columns (52 - 1); "
+        f"got {len(col_names)}"
+    )
+
+
+def test_resolve_feature_set_three_populated_raises(tmp_path: Path) -> None:
+    """Stage 16 T5: all three feature sets populated raises ValueError.
+
+    Mutual-exclusivity invariant extends to the with_remit field.  The
+    error message names every populated set so a misconfigured Hydra
+    override is diagnosable from one log line.
+    """
+    from conf._schemas import (
+        AppConfig,
+        EvaluationGroup,
+        FeatureSetConfig,
+        FeaturesGroup,
+        IngestionGroup,
+        ProjectConfig,
+        WithRemitFeatureConfig,
+    )
+
+    cfg = AppConfig(
+        project=ProjectConfig(name="test_three", seed=0),
+        ingestion=IngestionGroup(),
+        features=FeaturesGroup(
+            weather_only=FeatureSetConfig(
+                name="weather_only", cache_dir=tmp_path, cache_filename="wo.parquet"
+            ),
+            weather_calendar=FeatureSetConfig(
+                name="weather_calendar", cache_dir=tmp_path, cache_filename="wc.parquet"
+            ),
+            with_remit=WithRemitFeatureConfig(
+                name="with_remit", cache_dir=tmp_path, cache_filename="wr.parquet"
+            ),
+        ),
+        evaluation=EvaluationGroup(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _resolve_feature_set(cfg)
+
+    msg = str(exc_info.value)
+    assert "Exactly one of" in msg
+    # The three names should appear in the diagnostic so the human knows
+    # which sets are populated without re-reading the YAML.
+    assert "weather_only" in msg and "weather_calendar" in msg and "with_remit" in msg
+
+
+# ---------------------------------------------------------------------------
 # Stage 5 T5 — calendar-cache helper and fixtures
 # ---------------------------------------------------------------------------
 

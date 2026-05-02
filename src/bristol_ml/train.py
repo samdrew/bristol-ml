@@ -89,46 +89,82 @@ def _resolve_feature_set(
 ) -> tuple[FeatureSetConfig, _LoadFn, tuple[str, ...]]:
     """Pick the populated feature-set config and its loader + column list.
 
-    Plan T5 contract: exactly one of ``cfg.features.weather_only`` /
-    ``cfg.features.weather_calendar`` must be populated per run — the
-    Hydra group-swap refactor (Stage 5 T1) arranges this at config-
-    resolution time.  This function enforces the mutual-exclusivity
-    invariant at runtime and returns a tuple of:
+    Plan T5 contract (Stage 5; extended in Stage 16 T5): exactly one of
+    ``cfg.features.weather_only`` / ``cfg.features.weather_calendar`` /
+    ``cfg.features.with_remit`` must be populated per run — the Hydra
+    group-swap refactor arranges this at config-resolution time.  This
+    function enforces the mutual-exclusivity invariant at runtime and
+    returns a tuple of:
 
     1. The populated :class:`FeatureSetConfig`.
     2. The matching loader — :func:`assembler.load` for the weather-only
        schema, :func:`assembler.load_calendar` for the 55-column
-       calendar schema.
+       calendar schema, :func:`assembler.load_with_remit` for the
+       59-column Stage 16 schema.
     3. The ordered tuple of feature-column names for the set — the five
-       Stage 3 weather columns, or the ten-prefix weather columns
-       excluding the three provenance scalars and the two
-       demand columns, plus the 44 calendar columns.
+       Stage 3 weather columns, plus optionally the 44 calendar columns
+       (Stage 5) and the three Stage 16 REMIT columns.  Stage 16 plan A2:
+       the forward-looking ``remit_unavail_mw_next_24h`` column is
+       included in the tuple iff
+       ``with_remit.include_forward_lookahead`` is ``True`` — the
+       parquet schema always carries the column for contract
+       stability, but the model's ``feature_columns`` reads only the
+       enabled subset (this is how the with/without-next_24h
+       comparison registered runs differ; plan A4 / T6).
 
     Raises
     ------
     ValueError
-        If both or neither feature set is populated (the two degenerate
-        cases).  The message names the Hydra override the user should
-        use to recover.
+        If more than one or no feature set is populated.  The message
+        names the Hydra override the user should use to recover.
     """
     from bristol_ml.features import assembler
     from bristol_ml.features.calendar import CALENDAR_VARIABLE_COLUMNS
+    from bristol_ml.features.remit import REMIT_VARIABLE_COLUMNS
 
     weather_only = cfg.features.weather_only
     weather_calendar = cfg.features.weather_calendar
+    with_remit = cfg.features.with_remit
 
     weather_names = tuple(name for name, _ in assembler.WEATHER_VARIABLE_COLUMNS)
     calendar_names = tuple(name for name, _ in CALENDAR_VARIABLE_COLUMNS)
+    remit_names_all = tuple(name for name, _ in REMIT_VARIABLE_COLUMNS)
 
-    if weather_only is not None and weather_calendar is None:
+    populated = [
+        name
+        for name, value in (
+            ("weather_only", weather_only),
+            ("weather_calendar", weather_calendar),
+            ("with_remit", with_remit),
+        )
+        if value is not None
+    ]
+    if len(populated) != 1:
+        raise ValueError(
+            "Exactly one of features.weather_only / features.weather_calendar / "
+            "features.with_remit must be set; use 'features=<name>' CLI override "
+            "(e.g. features=weather_calendar or features=with_remit). "
+            f"Got populated set(s): {populated or 'none'}."
+        )
+
+    if weather_only is not None:
         return (weather_only, assembler.load, weather_names)
-    if weather_calendar is not None and weather_only is None:
+    if weather_calendar is not None:
         return (weather_calendar, assembler.load_calendar, weather_names + calendar_names)
-    raise ValueError(
-        "Exactly one of features.weather_only or features.weather_calendar must be set; "
-        "use 'features=<name>' CLI override (e.g. features=weather_calendar). "
-        f"Got: weather_only={'set' if weather_only is not None else 'None'}, "
-        f"weather_calendar={'set' if weather_calendar is not None else 'None'}."
+    # weather + calendar + REMIT (Stage 16).  The forward-looking column
+    # is included iff the config's include_forward_lookahead flag is
+    # True (plan A2 / A4).
+    assert with_remit is not None  # guarded by the populated-count check above
+    if getattr(with_remit, "include_forward_lookahead", True):
+        remit_names = remit_names_all
+    else:
+        remit_names = tuple(
+            n for n in remit_names_all if n != "remit_unavail_mw_next_24h"
+        )
+    return (
+        with_remit,
+        assembler.load_with_remit,
+        weather_names + calendar_names + remit_names,
     )
 
 
