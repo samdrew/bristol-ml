@@ -98,10 +98,22 @@ class WeatherIngestionConfig(BaseModel):
     cache_dir: Path
     cache_filename: str = "weather.parquet"
     request_timeout_seconds: float = Field(default=30.0, gt=0)
-    max_attempts: int = Field(default=3, ge=1, le=10)
+    # Open-Meteo's free archive endpoint rate-limits by data volume rather
+    # than request count; a multi-year per-station fetch (the Stage 1
+    # default of ``start_date=2018-01-01`` produces ~70k hourly rows per
+    # call) exhausts a per-IP token bucket before the original 3-attempt
+    # budget recovers it.  Five attempts with the 60-second cap below
+    # absorbs a typical 30-to-60-second cooldown advertised via ``Retry-After``.
+    max_attempts: int = Field(default=5, ge=1, le=10)
     backoff_base_seconds: float = Field(default=1.0, gt=0)
-    backoff_cap_seconds: float = Field(default=10.0, gt=0)
-    min_inter_request_seconds: float = Field(default=0.25, ge=0)
+    # Bumped from 10s so the exponential-backoff ceiling matches Open-
+    # Meteo's typical Retry-After (30-60s) rather than capping below it.
+    backoff_cap_seconds: float = Field(default=60.0, gt=0)
+    # Bumped from 0.25s so multi-year per-station fetches stay under
+    # Open-Meteo's per-minute token bucket without hitting 429 on the
+    # 7th-to-10th station.  At 1.0s the 10-station refresh takes ~10s
+    # (negligible against any single fetch's wall time) but never bursts.
+    min_inter_request_seconds: float = Field(default=1.0, ge=0)
     timezone: str = Field(default="UTC")
 
     @model_validator(mode="after")
