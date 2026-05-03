@@ -36,8 +36,6 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -153,54 +151,7 @@ def _respect_rate_limit(last_request_at: float | None, min_gap_seconds: float) -
 
 
 class _RetryableStatusError(Exception):
-    """Internal signal that a 5xx or 429 response should be retried.
-
-    Carries an optional ``retry_after_seconds`` value extracted from the
-    ``Retry-After`` HTTP header (RFC 7231 §7.1.3).  When present and
-    positive, ``_retrying_get`` honours it as the next sleep duration in
-    preference to the configured exponential backoff — servers that
-    explicitly advertise a recovery interval should be respected over
-    our blind exponential.
-    """
-
-    def __init__(self, message: str, *, retry_after_seconds: float = 0.0) -> None:
-        super().__init__(message)
-        self.retry_after_seconds = retry_after_seconds
-
-
-def _parse_retry_after(value: str | None) -> float:
-    """Parse the ``Retry-After`` header value into a non-negative seconds delay.
-
-    RFC 7231 §7.1.3 allows two forms:
-
-    - **delta-seconds** — a non-negative decimal integer (e.g. ``"60"``).
-    - **HTTP-date** — an absolute timestamp (e.g.
-      ``"Wed, 21 Oct 2026 07:28:00 GMT"``).  The seconds returned is the
-      delta from "now" (UTC) to that timestamp.
-
-    Returns ``0.0`` when the header is missing, blank, or unparseable —
-    callers fall back to the configured exponential backoff in that case.
-    Negative deltas (an HTTP-date already in the past) clamp to ``0.0``.
-    """
-    if not value:
-        return 0.0
-    value = value.strip()
-    if not value:
-        return 0.0
-    # Form 1: integer seconds.
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    # Form 2: RFC 7231 HTTP-date.
-    try:
-        target = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if target.tzinfo is None:
-        target = target.replace(tzinfo=UTC)
-    delta = (target - datetime.now(tz=UTC)).total_seconds()
-    return max(0.0, delta)
+    """Internal signal that a 5xx or 429 response should be retried."""
 
 
 def _retrying_get(
@@ -214,43 +165,14 @@ def _retrying_get(
     Retries on ``httpx.ConnectError``, ``httpx.ReadTimeout``, and HTTP 5xx/429.
     Never retries non-429 4xx — those are caller errors and should fail loudly.
     On final failure the raised error names the URL and attempt count.
-
-    The wait between retries is ``max(server-advertised Retry-After,
-    exponential-backoff)``: a server that responds 429 with a
-    ``Retry-After`` header gets its requested cooldown honoured rather
-    than overridden by our blind exponential.  This is the documented
-    Open-Meteo recovery contract and the expected RFC 7231 behaviour for
-    polite clients.
     """
-    base_wait = wait_exponential(
-        multiplier=config.backoff_base_seconds,
-        max=config.backoff_cap_seconds,
-    )
-
-    def _wait_with_retry_after(retry_state):  # type: ignore[no-untyped-def]
-        # tenacity passes a ``RetryCallState``; the failed attempt's
-        # exception lives on ``outcome``.  When the failure carries a
-        # positive ``retry_after_seconds`` we honour it (clamped to the
-        # configured cap so a misbehaving server cannot lock us up
-        # indefinitely); otherwise we fall back to exponential backoff.
-        exc = retry_state.outcome.exception() if retry_state.outcome else None
-        backoff = base_wait(retry_state)
-        if isinstance(exc, _RetryableStatusError) and exc.retry_after_seconds > 0:
-            advertised = min(exc.retry_after_seconds, config.backoff_cap_seconds)
-            chosen = max(advertised, backoff)
-            logger.info(
-                "Honouring Retry-After: server requested {:.1f}s; sleeping {:.1f}s "
-                "before retry attempt {}.",
-                exc.retry_after_seconds,
-                chosen,
-                retry_state.attempt_number + 1,
-            )
-            return chosen
-        return backoff
 
     @retry(
         stop=stop_after_attempt(config.max_attempts),
-        wait=_wait_with_retry_after,
+        wait=wait_exponential(
+            multiplier=config.backoff_base_seconds,
+            max=config.backoff_cap_seconds,
+        ),
         retry=retry_if_exception_type(
             (httpx.ConnectError, httpx.ReadTimeout, _RetryableStatusError)
         ),
@@ -259,10 +181,8 @@ def _retrying_get(
     def _do_get() -> httpx.Response:
         response = client.get(url, params=params)
         if response.status_code >= 500 or response.status_code == 429:
-            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             raise _RetryableStatusError(
-                f"Upstream returned {response.status_code} for {response.request.url}",
-                retry_after_seconds=retry_after,
+                f"Upstream returned {response.status_code} for {response.request.url}"
             )
         response.raise_for_status()
         return response
