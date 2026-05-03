@@ -33,11 +33,22 @@ variables:
   - cloud_cover
   - shortwave_radiation
 request_timeout_seconds: 30.0
-max_attempts: 3
+# The published rate limits (10 000/day, 5 000/hour, 600/minute) are
+# call-count limits, but Open-Meteo's free archive applies an
+# undocumented per-IP burst ceiling on top — a multi-year per-station
+# fetch is large (~365k data points per response) and 6-7 such calls
+# in tight succession exhaust the minutely token bucket.  The 5 s
+# inter-request gap below paces a 10-station refresh to ~50 s, well
+# under any per-minute envelope; the 5-attempt budget plus 60 s
+# backoff cap absorbs a typical "try again in one minute" cooldown
+# that Open-Meteo advertises in the JSON error body when the
+# minutely bucket trips.  See ``ingestion/_common.py`` for the
+# Retry-After + JSON-reason parsing that lets the retry loop honour
+# the server's advertised cooldown.
+max_attempts: 5
 backoff_base_seconds: 1.0
-backoff_cap_seconds: 10.0
-# Conservative well under Open-Meteo's 600/min free-tier cap.
-min_inter_request_seconds: 0.25
+backoff_cap_seconds: 60.0
+min_inter_request_seconds: 5.0
 stations:
   - name: london
     latitude: 51.5074
