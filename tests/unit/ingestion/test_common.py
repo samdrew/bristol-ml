@@ -26,6 +26,7 @@ import httpx
 import pytest
 
 from bristol_ml.ingestion._common import (
+    _parse_natural_language_cooldown,
     _parse_retry_after,
     _RetryableStatusError,
     _retrying_get,
@@ -76,6 +77,60 @@ class TestParseRetryAfter:
     def test_unparseable_returns_zero(self) -> None:
         assert _parse_retry_after("soon") == 0.0
         assert _parse_retry_after("not-a-date-or-int") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _safe_body_snippet — truncation + whitespace collapse
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _parse_natural_language_cooldown — Open-Meteo's free-text 429 reasons
+# ---------------------------------------------------------------------------
+
+
+class TestParseNaturalLanguageCooldown:
+    def test_one_minute_returns_60(self) -> None:
+        body = (
+            '{"error":true,"reason":"Minutely API request limit exceeded. '
+            'Please try again in one minute."}'
+        )
+        assert _parse_natural_language_cooldown(body) == 60.0
+
+    def test_n_minutes_returns_n_times_60(self) -> None:
+        body = '{"reason":"Please try again in 5 minutes"}'
+        assert _parse_natural_language_cooldown(body) == 300.0
+
+    def test_one_hour_returns_3600(self) -> None:
+        body = (
+            '{"error":true,"reason":"Hourly API request limit exceeded. '
+            'Please try again in one hour."}'
+        )
+        assert _parse_natural_language_cooldown(body) == 3600.0
+
+    def test_n_hours_returns_n_times_3600(self) -> None:
+        body = '{"reason":"Please try again in 2 hours"}'
+        assert _parse_natural_language_cooldown(body) == 7200.0
+
+    def test_tomorrow_returns_24h(self) -> None:
+        body = (
+            '{"error":true,"reason":"Daily API request limit exceeded. Please try again tomorrow."}'
+        )
+        assert _parse_natural_language_cooldown(body) == 86400.0
+
+    def test_unparseable_body_returns_zero(self) -> None:
+        assert _parse_natural_language_cooldown("") == 0.0
+        assert _parse_natural_language_cooldown("plain text not matching anything") == 0.0
+        assert _parse_natural_language_cooldown('{"reason":"server is unhappy"}') == 0.0
+
+    def test_works_on_raw_text_when_body_is_not_json(self) -> None:
+        # Some servers return HTML or plain text rather than JSON.
+        body = "Please try again in one minute."
+        assert _parse_natural_language_cooldown(body) == 60.0
+
+    def test_case_insensitive(self) -> None:
+        body = '{"reason":"PLEASE TRY AGAIN IN ONE MINUTE"}'
+        assert _parse_natural_language_cooldown(body) == 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,10 +240,17 @@ def test_retrying_get_falls_back_to_exponential_when_retry_after_absent(
     )
 
 
-def test_retrying_get_clamps_retry_after_at_backoff_cap(
+def test_retrying_get_advertised_cooldown_within_cap_is_capped_at_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A misbehaving server cannot lock the client up indefinitely."""
+    """A Retry-After under the cap is honoured; the wait does not exceed the cap.
+
+    Pairs with ``test_retrying_get_aborts_early_when_advertised_cooldown_exceeds_cap``:
+    when the server's advertised cooldown is *within* our budget, we
+    sleep for it (or the exponential backoff, whichever is larger),
+    bounded by the cap.  The "fail fast on advertised > cap" contract
+    is exercised by the early-abort test above.
+    """
     sleep_calls: list[float] = []
     monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
 
@@ -197,7 +259,7 @@ def test_retrying_get_clamps_retry_after_at_backoff_cap(
     def _handler(request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
         if state["calls"] == 1:
-            return httpx.Response(429, headers={"Retry-After": "9999"}, text="locked out")
+            return httpx.Response(429, headers={"Retry-After": "3"}, text="brief lockout")
         return httpx.Response(200, json={"ok": True})
 
     transport = httpx.MockTransport(_handler)
@@ -206,9 +268,116 @@ def test_retrying_get_clamps_retry_after_at_backoff_cap(
 
     _retrying_get(client, "https://example.test/z", {}, config)
 
-    assert sleep_calls and max(sleep_calls) <= 5.0, (
-        f"Sleep must clamp at backoff_cap_seconds (5s); got {sleep_calls!r}"
+    assert sleep_calls, "Expected at least one sleep before the retry succeeded."
+    assert max(sleep_calls) <= 5.0, (
+        f"Sleep must not exceed backoff_cap_seconds (5s); got {sleep_calls!r}"
     )
+    assert max(sleep_calls) >= 3.0, (
+        f"Expected sleep >= 3s honouring Retry-After; got {sleep_calls!r}"
+    )
+
+
+def test_retrying_get_honours_natural_language_cooldown_when_no_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open-Meteo's 'try again in one minute' body is honoured (no Retry-After).
+
+    This is the load-bearing fix for the user's actual failure: the
+    free archive does not set ``Retry-After`` and the retry loop
+    previously fell back to ~1s exponential backoff against a
+    60-second minutely lockout — guaranteeing failure.  After the fix
+    the loop sleeps ~60s when the body says "try again in one minute".
+    """
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
+
+    state = {"calls": 0}
+    body = (
+        '{"error":true,"reason":"Minutely API request limit exceeded. '
+        'Please try again in one minute."}'
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return httpx.Response(429, text=body)  # NO Retry-After header
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.Client(transport=transport)
+    config = _StubRetryConfig(max_attempts=3, backoff_cap_seconds=120.0)
+
+    response = _retrying_get(client, "https://example.test/m", {}, config)
+
+    assert response.status_code == 200
+    assert any(s >= 60.0 for s in sleep_calls), (
+        "Expected at least one sleep >= 60s honouring 'try again in one minute' "
+        f"from the response body; got {sleep_calls!r}"
+    )
+
+
+def test_retrying_get_aborts_early_when_advertised_cooldown_exceeds_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the server says 'one hour' but our cap is 60s, fail fast.
+
+    Burning the entire 5x60s retry budget on a wait that's
+    mathematically guaranteed to be too short is a worse user
+    experience than failing immediately with the body intact so the
+    operator can decide when to re-run.
+    """
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    body = (
+        '{"error":true,"reason":"Hourly API request limit exceeded. Please try again in one hour."}'
+    )
+
+    state = {"calls": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        return httpx.Response(429, text=body)
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.Client(transport=transport)
+    config = _StubRetryConfig(max_attempts=5, backoff_cap_seconds=60.0)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _retrying_get(client, "https://example.test/h", {}, config)
+
+    msg = str(exc_info.value)
+    assert "exceeds the configured backoff_cap_seconds" in msg
+    assert "Hourly API request limit" in msg
+    # Must NOT have burned the retry budget — exactly one call.
+    assert state["calls"] == 1, (
+        f"Expected immediate fail-fast (1 call); got {state['calls']} retries."
+    )
+
+
+def test_retrying_get_does_not_abort_early_when_advertised_within_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Symmetric guard: a 60s 'one minute' cooldown under a 120s cap retries normally."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    state = {"calls": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return httpx.Response(
+                429,
+                text='{"reason":"Please try again in one minute"}',
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.Client(transport=transport)
+    config = _StubRetryConfig(max_attempts=3, backoff_cap_seconds=120.0)
+
+    response = _retrying_get(client, "https://example.test/k", {}, config)
+    assert response.status_code == 200
+    assert state["calls"] == 2  # one retry, then success
 
 
 def test_retrying_get_preserves_response_body_in_final_raise(
@@ -219,10 +388,14 @@ def test_retrying_get_preserves_response_body_in_final_raise(
     This is the load-bearing diagnostic added in this fix: previously
     a 429 left the operator guessing which limit was hit because the
     response body was discarded.
+
+    The body deliberately does NOT match a natural-language cooldown
+    pattern — that path is tested by the early-abort test.  Here we
+    pin the "exhaust the budget then raise with body intact" contract.
     """
     monkeypatch.setattr("time.sleep", lambda _s: None)
 
-    body = "Minutely API request limit exceeded. Please try again in one minute."
+    body = "Service unavailable; please try later."
 
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text=body)
@@ -234,11 +407,9 @@ def test_retrying_get_preserves_response_body_in_final_raise(
     with pytest.raises(_RetryableStatusError) as exc_info:
         _retrying_get(client, "https://example.test/q", {}, config)
 
-    # The exception attributes carry the diagnostic; the str carries it too
-    # so a traceback paste from the operator is self-contained.
     assert exc_info.value.status_code == 429
-    assert "Minutely API request limit" in exc_info.value.body_snippet
-    assert "Minutely API request limit" in str(exc_info.value)
+    assert "Service unavailable" in exc_info.value.body_snippet
+    assert "Service unavailable" in str(exc_info.value)
 
 
 def test_retrying_get_emits_warning_log_per_retry_attempt(

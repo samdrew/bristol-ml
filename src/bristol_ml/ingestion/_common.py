@@ -34,7 +34,9 @@ the ``NesoIngestionConfig`` / ``WeatherIngestionConfig`` Pydantic models.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -218,6 +220,85 @@ def _parse_retry_after(value: str | None) -> float:
     return max(0.0, delta)
 
 
+# Open-Meteo's free archive emits 429 with a JSON body of shape
+# ``{"error": true, "reason": "Minutely API request limit exceeded.
+# Please try again in one minute."}`` — and crucially does **not** set
+# the ``Retry-After`` header (verified live 2026-05-03).  The natural-
+# language hint is the only machine-readable cooldown signal the API
+# offers; the parser below extracts a numeric seconds value from it so
+# the retry loop can honour the advertised cooldown rather than blindly
+# falling back to exponential backoff (which under-shoots a 60-second
+# minutely lockout).
+#
+# The patterns are deliberately tight — better to return ``0.0`` (and
+# fall back to exponential) than to mis-parse a freeform message into a
+# non-actionable wait.  Verified against Open-Meteo's open-source error
+# strings (https://github.com/open-meteo/open-meteo, src/Templates/
+# RateLimit.swift).
+_NATURAL_LANGUAGE_COOLDOWN_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
+    # "Please try again in one minute"
+    (re.compile(r"\btry\s+again\s+in\s+one\s+minute\b", re.IGNORECASE), 60.0),
+    # "Please try again in N minute(s)"
+    (re.compile(r"\btry\s+again\s+in\s+(\d+)\s+minute", re.IGNORECASE), 60.0),
+    # "Please try again in one hour"
+    (re.compile(r"\btry\s+again\s+in\s+one\s+hour\b", re.IGNORECASE), 3600.0),
+    # "Please try again in N hour(s)"
+    (re.compile(r"\btry\s+again\s+in\s+(\d+)\s+hour", re.IGNORECASE), 3600.0),
+    # "Please try again tomorrow" (Open-Meteo's daily-bucket message);
+    # bound at 24h so the early-abort path triggers cleanly.
+    (re.compile(r"\btry\s+again\s+tomorrow\b", re.IGNORECASE), 86400.0),
+)
+
+
+def _parse_natural_language_cooldown(body_text: str) -> float:
+    """Extract a numeric cooldown (in seconds) from a server's free-text 429 body.
+
+    Walks the body (or, if the body is JSON of shape
+    ``{"reason": "..."}``, the unwrapped reason string) against a small
+    set of tight regexes covering Open-Meteo's published RateLimit
+    error templates.  Returns ``0.0`` when no pattern matches — the
+    caller falls back to exponential backoff in that case.
+
+    Why a regex pile and not just trust ``Retry-After``? Open-Meteo's
+    free archive does not set ``Retry-After`` (verified live 2026-05-03);
+    the JSON body is the only machine-readable cooldown signal the API
+    offers.  Adding a weak heuristic here is strictly an improvement on
+    "ignore it entirely and burn the retry budget".
+    """
+    if not body_text:
+        return 0.0
+    # Some endpoints (Open-Meteo's case) wrap the reason in JSON.  Try to
+    # unwrap; on failure fall through to scanning the raw text.
+    text = body_text
+    try:
+        parsed = json.loads(body_text)
+        if isinstance(parsed, dict):
+            for key in ("reason", "message", "error"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value:
+                    text = value
+                    break
+    except (ValueError, TypeError):
+        pass
+    for pattern, unit_seconds in _NATURAL_LANGUAGE_COOLDOWN_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        # Patterns with a captured numeric group multiply by the unit
+        # (60 s for minutes, 3600 s for hours).  Patterns with no group
+        # fire on the literal "one minute" / "one hour" / "tomorrow"
+        # forms and return the unit directly.
+        groups = match.groups()
+        if groups and groups[0]:
+            try:
+                count = int(groups[0])
+            except ValueError:
+                return unit_seconds
+            return max(0.0, count * unit_seconds)
+        return unit_seconds
+    return 0.0
+
+
 def _safe_body_snippet(response: httpx.Response, *, limit: int = 500) -> str:
     """Return the first ``limit`` characters of the response body, or an empty string.
 
@@ -265,26 +346,48 @@ def _retrying_get(
         max=config.backoff_cap_seconds,
     )
 
+    def _advertised_cooldown(exc: _RetryableStatusError) -> float:
+        """Pick the strongest cooldown signal the response provided.
+
+        Precedence:
+        1. ``Retry-After`` HTTP header (RFC 7231 standard).
+        2. Natural-language hint parsed from the JSON error body
+           (Open-Meteo's only machine-readable signal).
+        Returns ``0.0`` when neither is available.
+        """
+        if exc.retry_after_seconds > 0:
+            return exc.retry_after_seconds
+        return _parse_natural_language_cooldown(exc.body_snippet)
+
     def _wait_with_retry_after(retry_state):  # type: ignore[no-untyped-def]
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         backoff = base_wait(retry_state)
-        if isinstance(exc, _RetryableStatusError) and exc.retry_after_seconds > 0:
-            advertised = min(exc.retry_after_seconds, config.backoff_cap_seconds)
-            return max(advertised, backoff)
+        if isinstance(exc, _RetryableStatusError):
+            advertised = _advertised_cooldown(exc)
+            if advertised > 0:
+                # Honour the server's stated cooldown but cap so a
+                # mis-reported "try again tomorrow" cannot lock the
+                # client up indefinitely.  The early-abort path in
+                # ``_do_get`` raises immediately when ``advertised >
+                # backoff_cap_seconds`` so this branch only fires when
+                # the server-stated cooldown is achievable inside our
+                # retry budget.
+                return min(advertised, config.backoff_cap_seconds)
         return backoff
 
     def _log_before_sleep(retry_state):  # type: ignore[no-untyped-def]
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         sleep_seconds = retry_state.next_action.sleep if retry_state.next_action else 0.0
         if isinstance(exc, _RetryableStatusError):
+            advertised = _advertised_cooldown(exc)
             logger.warning(
                 "Ingestion retry: HTTP {} on attempt {} of {}; sleeping {:.1f}s "
-                "(Retry-After advertised={:.1f}s; body={!r})",
+                "(advertised cooldown={:.1f}s; body={!r})",
                 exc.status_code,
                 retry_state.attempt_number,
                 config.max_attempts,
                 sleep_seconds,
-                exc.retry_after_seconds,
+                advertised,
                 exc.body_snippet or "<empty>",
             )
         else:
@@ -310,9 +413,26 @@ def _retrying_get(
         if response.status_code >= 500 or response.status_code == 429:
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             body_snippet = _safe_body_snippet(response)
+            advertised = retry_after or _parse_natural_language_cooldown(body_snippet)
+            # Early-abort: when the server advertises a cooldown that
+            # exceeds our budget per attempt, retrying inside this
+            # process is mathematically guaranteed to fail again on the
+            # very next attempt.  Raise immediately with a clear
+            # message so the operator can re-run later rather than
+            # blocking the process for the full retry budget.  The
+            # raised exception is *not* a ``_RetryableStatusError`` —
+            # the retry decorator's ``retry_if_exception_type`` will
+            # not catch it and the call returns to the caller fast.
+            if advertised > config.backoff_cap_seconds:
+                raise RuntimeError(
+                    f"Upstream {response.status_code} for {response.request.url} "
+                    f"advertised a cooldown of {advertised:.0f}s, which exceeds "
+                    f"the configured backoff_cap_seconds={config.backoff_cap_seconds:.0f}s. "
+                    f"Re-run after the cooldown expires.  Body: {body_snippet!r}"
+                )
             raise _RetryableStatusError(
                 f"Upstream returned {response.status_code} for {response.request.url} "
-                f"(Retry-After={retry_after:.1f}s; body={body_snippet!r})",
+                f"(advertised cooldown={advertised:.1f}s; body={body_snippet!r})",
                 status_code=response.status_code,
                 retry_after_seconds=retry_after,
                 body_snippet=body_snippet,
