@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -148,4 +149,72 @@ def test_scipy_parametric_ac4_thirty_day_window_no_divergence() -> None:
         f"AC-4: a single fold's MAE reached {max_mae:.1f} MW, two orders "
         "of magnitude above the healthy fit — a numerical divergence "
         "the bounded fit is supposed to prevent.  Plan 08a AC-4."
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not _cache_warm(),
+    reason=(
+        "weather_calendar.parquet not warm; AC-3 golden-popt regression "
+        "test needs the Stage 5 feature-table cache.  Populate via "
+        "`uv run python -m bristol_ml.features.assembler "
+        "features=weather_calendar`."
+    ),
+)
+def test_scipy_parametric_ac3_no_fourier_golden_popt() -> None:
+    """AC-3 (popt-conformance flavour): no-Fourier fit pins a stable golden vector.
+
+    The plan AC-3 originally asked for ``rtol < 1e-4 vs the LM
+    predecessor`` on the project default config.  Empirical
+    verification (recorded 2026-05-04) showed that on the project
+    default — 13-parameter form with ``diurnal_harmonics=3``,
+    ``weekly_harmonics=2`` — even the *unbounded* LM predecessor
+    produced popt with ``alpha ~ 4e8 MW`` (predictions correct via
+    numerical cancellation; popt physically nonsense).  The bounded
+    TRF predecessor settles many Fourier coefficients at the bounds
+    (±50 000 MW) for the same reason — the temperature regressor is
+    correlated with the weekly-Fourier annual harmonic, so the
+    optimum is multi-modal and any solver finds *some* corner.  An
+    rtol-vs-LM popt pin is therefore unimplementable on the default
+    config; the cross-fold-mean-MAE test above is the operational
+    AC-3 substance.
+
+    For *popt* conformance we fit a deliberately well-conditioned
+    config — Fourier disabled — so ``alpha``, ``beta_heat``,
+    ``beta_cool`` are uniquely determined by the data.  This pins
+    a stable golden vector and catches any future implementation
+    drift that would perturb the fitted slopes.
+
+    Recorded baseline (2026-05-04, ``slice = df.iloc[:8760]``,
+    bounded TRF) — well-determined HDD/CDD model has a unique
+    optimum that agrees with unbounded LM to 4 decimal places:
+        alpha = 27072.446
+        beta_heat = 548.300
+        beta_cool = 470.578
+
+    Plan clause: 08a AC-3 / T4 /
+    ``test_scipy_parametric_ac3_no_fourier_golden_popt``.
+    """
+    df = pd.read_parquet(WEATHER_CALENDAR_CACHE).set_index("timestamp_utc")
+    slice_df = df.iloc[:8760]
+
+    cfg = ScipyParametricConfig(diurnal_harmonics=0, weekly_harmonics=0)
+    model = ScipyParametricModel(cfg)
+    model.fit(slice_df, slice_df["nd_mw"])
+
+    expected = np.array([27072.446, 548.300, 470.578], dtype=np.float64)
+    assert model._popt is not None
+    np.testing.assert_allclose(
+        model._popt,
+        expected,
+        rtol=1e-4,
+        err_msg=(
+            "AC-3 popt-conformance: well-determined no-Fourier fit on "
+            "the first-year slice of weather_calendar.parquet drifted "
+            "from the recorded 2026-05-04 baseline by more than rtol "
+            "1e-4.  This is the regression-detection signal — investigate "
+            "scipy version drift or implementation changes that would "
+            "perturb the well-conditioned fit.  Plan 08a AC-3."
+        ),
     )

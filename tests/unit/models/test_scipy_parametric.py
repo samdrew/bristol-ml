@@ -868,7 +868,8 @@ def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
     ``pyproject.toml``.  Run explicitly with ``uv run pytest -m slow``.
 
     If this test fails, do not weaken the threshold — investigate the
-    convergence behaviour (D4 data-driven p0, D6 method="lm", maxfev=5000).
+    convergence behaviour (D4 data-driven p0, plan 08a D1
+    method="trf" + bounds, max_nfev=5000).
 
     Plan clause: T4 plan §Task T4 / plan D13 / AC-4 / NFR-1.
     """
@@ -904,7 +905,7 @@ def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
         f"Single-fold ScipyParametricModel fit on {n_rows} rows took {elapsed_s:.2f} s "
         f"(> 10 s budget). D13 / AC-4 / NFR-1 cost assumptions no longer hold. "
         "Do not weaken the threshold — investigate convergence behaviour "
-        "(D4 data-driven p0, D6 method='lm', maxfev=5000). "
+        "(D4 data-driven p0, plan 08a D1 method='trf' + bounds, max_nfev=5000). "
         "Plan T4 / ``test_scipy_parametric_fit_single_fold_completes_under_10_seconds``."
     )
     # Sanity: the fit actually produced a result.

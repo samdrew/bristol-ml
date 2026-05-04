@@ -179,16 +179,21 @@ before you touch `scipy_parametric.py`.
   discovery that seasonal-mono folds (winter-only → `CDD ≡ 0`,
   summer-only → `HDD ≡ 0`) caused the unconstrained solver to wander to
   physically meaningless parameters (e.g. `alpha ≈ −7×10⁶ MW`).  See
-  plan `docs/plans/active/08a-bounded-parametric-fit.md`.
+  plan `docs/plans/completed/08a-bounded-parametric-fit.md`.
   Gaussian-CI reasoning still holds for the default `loss="linear"`
   provided no parameter is at a bound (the notebook's Cell 12 appendix
   retains that assumption explicitly).  Three `pcov`-unreliability
   overrides surface unidentifiable parameters as `std_err = inf` rather
   than silently publishing a diverged covariance: bound saturation
-  (parameter within `tol` of either bound), Moore-Penrose-implausibly-large
-  variance (diagonal entry > `1e8`), and zero-information Jacobian column
-  (column norm below `1e-10`).  The WARN message names the affected
-  parameters.  Stage 10 owns bootstrap / quantile-based alternatives.
+  (parameter within `1e-6 · max(width, |lb|+|ub|+1)` of either bound,
+  e.g. ~0.005 MW/°C for the slope bounds), Moore-Penrose-implausibly-
+  large variance (diagonal entry exceeds `((upper - lower) / 2)²`, i.e.
+  ~6.25 × 10⁶ for the slope bounds and ~2.5 × 10⁹ for `alpha`), and
+  zero-information Jacobian column (the design-matrix row for the
+  parameter has standard deviation below `1e-12`).  The WARN message
+  names the affected parameters; `pcov` row/column for each unreliable
+  parameter is set to `np.inf` end-to-end so the saved covariance
+  matrix stays self-consistent.  Stage 10 owns bootstrap / quantile-based alternatives.
 - **UTC-tz guard matches SARIMAX (plan D8).**
   `_require_utc_datetimeindex(features, method=...)` is a private static
   method on `ScipyParametricModel` — copied from SARIMAX rather than

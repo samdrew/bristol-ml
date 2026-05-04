@@ -623,14 +623,29 @@ class ScipyParametricModel:
         #     row variance: see :func:`_detect_zero_information_columns`.
         popt_arr = np.asarray(popt, dtype=np.float64)
         pcov_arr = np.asarray(pcov, dtype=np.float64).copy()
-        diag_raw = np.diag(pcov_arr)
+        # ``np.diag`` on a 2-D array returns a *view*; ``.copy()`` here
+        # is defensive — a future refactor that moves the implausible-
+        # variance computation below the diagonal-override loop would
+        # otherwise see infinities and silently mis-classify.
+        diag_raw = np.diag(pcov_arr).copy()
         at_bound = _detect_at_bound(popt_arr, bounds_lower, bounds_upper)
         implausible = _detect_implausible_variance(diag_raw, bounds_lower, bounds_upper)
         zero_info = _detect_zero_information_columns(design_matrix, n_params=popt_arr.shape[0])
         unreliable = at_bound | implausible | zero_info
         if unreliable.any():
+            # Set the entire row and column for every unreliable
+            # parameter to ``np.inf`` — leaving the off-diagonal entries
+            # at their TRF pseudo-inverse values would publish a
+            # numerically-incoherent covariance matrix (a row/column of
+            # finite off-diagonal values next to an infinite diagonal
+            # is not positive-semidefinite).  Downstream consumers of
+            # ``metadata.hyperparameters["covariance_matrix"]`` then
+            # see a self-consistent "this parameter's covariance is
+            # unreliable in every direction" signal rather than a
+            # silently-broken matrix.
             for idx in np.flatnonzero(unreliable):
-                pcov_arr[idx, idx] = np.inf
+                pcov_arr[idx, :] = np.inf
+                pcov_arr[:, idx] = np.inf
         # Zero-information parameters have a gradient identically zero,
         # so TRF's final ``popt`` for them is determined by
         # ``make_strictly_feasible``'s tiny perturbation off the initial
