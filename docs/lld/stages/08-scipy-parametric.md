@@ -87,6 +87,16 @@ ScipyParametric won the four-way comparison on the T7 seeded synthetic test: MAE
   - **H-1.** `docs/intent/DESIGN.md` §6 layout tree — Stages 1–8 additions batched. Stage 8 adds `src/bristol_ml/models/scipy_parametric.py`, `conf/model/scipy_parametric.yaml`, `notebooks/08_scipy_parametric.ipynb`, `scripts/_build_notebook_08.py`. Deny-tier for the lead; flag at PR review for a batched human edit covering all of Stages 1–8. Stage 7 H-1 carries forward; Stage 8 extends the batch.
   - DESIGN §8 "Open-Meteo UKV 2km" claim remains incorrect (from Stage 2); unchanged here.
 
+## D6 (revisited) — bounded TRF follow-up (plan 08a)
+
+**Original D6** ("`method="lm"` ACCEPTED — no bounds are necessary because D1 fixes the hinge temperatures") was empirically falsified on 2026-05-04. Running `nb08` with a 30-day sliding-window splitter produced a cross-fold mean MAE of ~167 600 MW against a CLI result of ~5 000 MW on the same data. Root cause: D1's fixed hinges eliminate the *temperature* identifiability foot-gun (§R5 base-temperature drift), but they do not eliminate the *seasonal-mono fold* foot-gun. A winter-only fold has `CDD ≡ 0`; a summer-only fold has `HDD ≡ 0`. With unconstrained Levenberg-Marquardt the corresponding slope coefficient wanders freely (e.g. `alpha ≈ −7×10⁶ MW`, Fourier coefficients at `10⁷`), producing a diverged fit that still converges in the LM sense.
+
+**Fix (plan 08a).** Both the `loss="linear"` and robust-loss branches are unified under `method="trf"` with physically-motivated bounds: `alpha ∈ [0, 100 000]`; `beta_heat`, `beta_cool ∈ [0, 5 000]`; each Fourier coefficient `∈ [−50 000, 50 000]`. Three `pcov`-unreliability overrides surface unidentifiable parameters as `std_err = inf` rather than silently publishing a diverged covariance: bound saturation (parameter within `tol` of either bound), Moore-Penrose-implausibly-large variance (diagonal entry > `1e8`), and zero-information Jacobian column (column norm below `1e-10`). The WARN message names the affected parameters.
+
+**Empirical verification.** AC-3: 1-year window cross-fold mean MAE 4 897 MW (max 9 325) — no regression. AC-4: 30-day catastrophic-window mean MAE drops from ~167 600 to 4 563 MW — no fold diverges.
+
+Intent: `/workspace/docs/intent/08-improvements.md`. Plan: `docs/plans/active/08a-bounded-parametric-fit.md`.
+
 ## Next
 
 → Stage 9 — Model registry. The first stage since Stage 4 that does not add a new model family; instead it puts every model family shipped so far (`NaiveModel`, `LinearModel`, `SarimaxModel`, `ScipyParametricModel`) through a cross-version load / leaderboard / sidecar-JSON contract. Stage 8's `ModelMetadata.hyperparameters["covariance_matrix"]` being a JSON-serialisable nested list (D7) is deliberate groundwork — the Stage 9 registry inherits it verbatim. Expect the first `skops.io` upgrade conversation, the first hash-based model identity contract, and the first cross-version compatibility story. The Stage 8 `ScipyParametricModel` save/load round-trip test (AC-2) is the first regression guard Stage 9 will extend.

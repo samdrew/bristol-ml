@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Stage 8 `ScipyParametricModel`: bounded TRF solver replaces unconstrained
+  Levenberg-Marquardt, eliminating the rank-deficient-fold divergence that
+  produced cross-fold mean MAE ~167 600 MW on the nb08 30-day-window splitter
+  (plan 08a).  Physically-motivated bounds (`alpha ∈ [0, 100 000]`;
+  `beta_heat`, `beta_cool ∈ [0, 5 000]`; Fourier coefficients
+  `∈ [−50 000, 50 000]`) are applied across both the `loss="linear"` and
+  robust-loss branches.  Three `pcov`-unreliability overrides (bound
+  saturation, implausibly large Moore-Penrose variance, zero-information
+  Jacobian column) surface unidentifiable parameters as `std_err = inf`.
+  AC-3 verified: 1-year window mean MAE 4 897 MW.  AC-4 verified: 30-day
+  catastrophic-window mean MAE 4 563 MW (down from ~167 600).
+
 - `bristol_ml.registry.list_runs` now skips run directories whose
   artefact is the pre-Stage-12 `model.joblib` file (with no
   `model.skops` sibling), emitting one `loguru.warning` per skipped run
