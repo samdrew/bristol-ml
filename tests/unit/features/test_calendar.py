@@ -567,12 +567,12 @@ def test_derive_calendar_column_order_matches_constant() -> None:
     derived = derive_calendar(df, _NO_HOLIDAYS)
 
     expected_names = [name for name, _ in CALENDAR_VARIABLE_COLUMNS]
-    assert len(expected_names) == 44, (
-        f"CALENDAR_VARIABLE_COLUMNS should have 44 entries; got {len(expected_names)}"
+    assert len(expected_names) == 45, (
+        f"CALENDAR_VARIABLE_COLUMNS should have 45 entries; got {len(expected_names)}"
     )
-    actual_tail = list(derived.columns[-44:])
+    actual_tail = list(derived.columns[-45:])
     assert actual_tail == expected_names, (
-        f"Last 44 columns do not match CALENDAR_VARIABLE_COLUMNS.\n"
+        f"Last 45 columns do not match CALENDAR_VARIABLE_COLUMNS.\n"
         f"Expected: {expected_names}\n"
         f"Actual:   {actual_tail}"
     )
