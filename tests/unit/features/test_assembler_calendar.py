@@ -334,7 +334,7 @@ class TestCalendarOutputSchemaStructure:
 
         # Pairwise: columns 10..53 match CALENDAR_VARIABLE_COLUMNS
         assert len(cal_var_cols) == 45, (
-            f"CALENDAR_VARIABLE_COLUMNS must contain 44 entries; got {len(cal_var_cols)}."
+            f"CALENDAR_VARIABLE_COLUMNS must contain 45 entries; got {len(cal_var_cols)}."
         )
         for i, (expected_name, expected_type) in enumerate(cal_var_cols):
             actual_field = cal_schema.field(10 + i)
@@ -349,9 +349,9 @@ class TestCalendarOutputSchemaStructure:
             )
 
         # Last column: holidays_retrieved_at_utc
-        last_field = cal_schema.field(54)
+        last_field = cal_schema.field(55)
         assert last_field.name == "holidays_retrieved_at_utc", (
-            f"Column 54 must be 'holidays_retrieved_at_utc'; got {last_field.name!r}."
+            f"Column 55 must be 'holidays_retrieved_at_utc'; got {last_field.name!r}."
         )
         assert last_field.type == pa.timestamp("us", tz="UTC"), (
             f"'holidays_retrieved_at_utc' must be timestamp[us, tz=UTC]; got {last_field.type}."
