@@ -1829,9 +1829,7 @@ def test_benchmark_holdout_bar_works_with_seasonal_naive_same_hour_last_week() -
             "demand_forecast_mw": (
                 30_000.0 + 200.0 * np.sin(2 * np.pi * np.arange(len(half_idx)) / 48)
             ),
-            "demand_outturn_mw": features["nd_mw"]
-            .reindex(half_idx, method="ffill")
-            .to_numpy(),
+            "demand_outturn_mw": features["nd_mw"].reindex(half_idx, method="ffill").to_numpy(),
         }
     )
 
@@ -1902,11 +1900,15 @@ def test_benchmark_holdout_bar_fold_len_hours_none_uses_single_fold(
         def fit(self, *a, **k): ...
         def predict(self, features):
             return pd.Series(0.0, index=features.index)
+
         def save(self, p): ...
         @classmethod
-        def load(cls, p): return cls()
+        def load(cls, p):
+            return cls()
+
         @property
-        def metadata(self): return None
+        def metadata(self):
+            return None
 
     fig = _plots.benchmark_holdout_bar(
         candidates={"m": _Stub()},
@@ -1938,12 +1940,17 @@ def test_benchmark_holdout_bar_rejects_non_positive_fold_len_hours() -> None:
 
     class _Stub:
         def fit(self, *a, **k): ...
-        def predict(self, features): return pd.Series(0.0, index=features.index)
+        def predict(self, features):
+            return pd.Series(0.0, index=features.index)
+
         def save(self, p): ...
         @classmethod
-        def load(cls, p): return cls()
+        def load(cls, p):
+            return cls()
+
         @property
-        def metadata(self): return None
+        def metadata(self):
+            return None
 
     with pytest.raises(ValueError, match="fold_len_hours must be positive or None"):
         _plots.benchmark_holdout_bar(

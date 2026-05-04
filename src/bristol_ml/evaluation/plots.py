@@ -943,10 +943,7 @@ def benchmark_holdout_bar(
     # having to know the lag.  ``None`` opts back into the single-fold
     # legacy behaviour.  Clamp to ``holdout_len`` so a caller passing a
     # larger value than the window simply gets a single fold.
-    if fold_len_hours is None:
-        test_len = holdout_len
-    else:
-        test_len = min(int(fold_len_hours), holdout_len)
+    test_len = holdout_len if fold_len_hours is None else min(int(fold_len_hours), holdout_len)
     splitter_cfg = SplitterConfig(
         min_train_periods=min_train,
         test_len=test_len,
