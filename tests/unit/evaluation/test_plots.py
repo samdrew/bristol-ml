@@ -1387,17 +1387,25 @@ def test_forecast_overlay_with_band_requires_horizon_column() -> None:
 def test_forecast_overlay_with_band_q10_q90_default() -> None:
     """Guards plan T4: fill_between bounds match 10th/90th quantile of synthetic errors.
 
-    The plan specifies: compute
-    ``per_fold_errors.groupby("horizon_h")["error"].quantile([0.1, 0.9]).unstack()``
-    then shade ``[point - q_hi, point - q_lo]``.  This test verifies the
-    visible PolyCollection on the axes spans the expected quantile-derived
-    range at horizon_h=0 (the first time step).
+    The harness emits ``error = y_true - y_pred`` (positive = under-forecast),
+    so the band that brackets where actual is likely to land is
+    ``[point + q_lo(error), point + q_hi(error)]``.
 
-    Error convention: error = y_true - y_pred (positive = under-forecast).
+    The Stage-6 plan §6 T4 originally specified the band as
+    ``[point - q_hi, point - q_lo]`` and this test was first written to
+    match that wording.  The plan formula was wrong — subtracting flips
+    the band's deviation from the forecast, producing a reflection of
+    the true band through ``point``.  The inversion was caught visually
+    on ``notebooks/04_linear_baseline.ipynb`` (band collapsed below the
+    forecast where actual peaked); the implementation, the docstring,
+    and this test were corrected together on 2026-05-04.
+
     With a constant point prediction of 3000 MW and deterministic errors,
     the expected band bounds are computable exactly from numpy quantiles.
 
-    Reference: docs/plans/active/06-enhanced-evaluation.md §6 T4 test list.
+    Reference: docs/plans/completed/06-enhanced-evaluation.md §6 T4
+    test list (the formula in the archived plan is superseded by the
+    code + docstring + this test).
     """
     import matplotlib.collections
 
@@ -1430,23 +1438,17 @@ def test_forecast_overlay_with_band_q10_q90_default() -> None:
             "forecast_overlay_with_band must draw at least one PolyCollection "
             "(the empirical quantile band); none found (plan T4 / D8)."
         )
-        # Expected band bounds at horizon_h=0: all folds have the same
-        # error at horizon_h=0 (which is 0 - 24 = -24.0), so q10 == q90 == -24.0.
-        # band_lower = point - q_hi = 3000 - (-24) = 3024
-        # band_upper = point - q_lo = 3000 - (-24) = 3024
-        # For a non-degenerate check, use horizon_h=47 (error = 23):
-        # band_lower = 3000 - 23 = 2977; band_upper = 3000 - 23 = 2977
-        # All errors at a given horizon_h are identical (constant by construction),
-        # so the fill collapses to a line for any single horizon.
-        # Instead, verify the PolyCollection path y-values span the expected
-        # range across all horizons by checking a random horizon with variance.
-        # Rebuild the expected q10/q90 the same way the implementation does:
+        # Rebuild the expected q10/q90 the same way the implementation does;
+        # the band is ``[point + q_lo, point + q_hi]``.  All errors at a
+        # given horizon_h are identical by construction, so the fill is a
+        # zero-width strip per horizon and we verify the y-extent across
+        # the whole 48-horizon grid.
         band = per_fold_errors.groupby("horizon_h")["error"].quantile([0.1, 0.9]).unstack()
-        q_lo_arr = band.iloc[:n_horizons, 0].to_numpy(dtype=np.float64)
-        q_hi_arr = band.iloc[:n_horizons, 1].to_numpy(dtype=np.float64)
+        q_lo_arr = band[0.1].iloc[:n_horizons].to_numpy(dtype=np.float64)
+        q_hi_arr = band[0.9].iloc[:n_horizons].to_numpy(dtype=np.float64)
 
-        expected_lower = 3000.0 - q_hi_arr
-        expected_upper = 3000.0 - q_lo_arr
+        expected_lower = 3000.0 + q_lo_arr
+        expected_upper = 3000.0 + q_hi_arr
 
         # Verify the band spans expected range — extract y coordinates from
         # the PolyCollection vertices.  Each path is a closed polygon.
@@ -1463,12 +1465,114 @@ def test_forecast_overlay_with_band_q10_q90_default() -> None:
         # equal max(expected_upper) (up to floating-point tolerance).
         assert np.isclose(all_y.min(), expected_lower.min(), rtol=1e-6), (
             f"Band y-min = {all_y.min():.4f} does not match expected_lower.min() "
-            f"= {expected_lower.min():.4f} (plan T4 q10/q90 fill_between contract)."
+            f"= {expected_lower.min():.4f} (q10/q90 fill_between contract)."
         )
         assert np.isclose(all_y.max(), expected_upper.max(), rtol=1e-6), (
             f"Band y-max = {all_y.max():.4f} does not match expected_upper.max() "
-            f"= {expected_upper.max():.4f} (plan T4 q10/q90 fill_between contract)."
+            f"= {expected_upper.max():.4f} (q10/q90 fill_between contract)."
         )
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Test 37b — REGRESSION GUARD against the sign-inversion bug fixed 2026-05-04.
+#
+# The pre-2026-05-04 ``forecast_overlay_with_band`` shaded
+# ``[point - q_hi, point - q_lo]``, which is the reflection of the
+# correct band through ``point``.  Symmetric synthetic errors (used by
+# the test above) are blind to this flip — both the buggy and the
+# correct band have the same y-range.  This test uses **purely positive**
+# errors (every fold under-predicts at every horizon) so the buggy and
+# correct bands land on opposite sides of ``point``: the correct band
+# is entirely above ``point``, the buggy band entirely below.  A single
+# assertion (``band_y_min > point``) would have caught the original bug
+# and now locks the corrected contract.
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_overlay_with_band_positive_errors_land_above_forecast() -> None:
+    """Pins the sign of the band: positive errors -> band above the forecast.
+
+    Regression guard for the inversion bug fixed 2026-05-04 (visible on
+    ``notebooks/04_linear_baseline.ipynb``).  With ``error = y_true -
+    y_pred`` the band tracks where actual is likely to land:
+
+    - All-positive errors  -> band entirely **above** ``point``.
+    - All-negative errors  -> band entirely **below** ``point``.
+
+    The buggy version subtracted (``[point - q_hi, point - q_lo]``)
+    which would place the band on the wrong side of ``point`` —
+    detectable by exactly this asymmetric-errors check.  The earlier
+    symmetric-errors test (above) was blind to the flip because the
+    range is identical under reflection.
+    """
+    import matplotlib.collections
+
+    n_horizons = 24
+    n_folds = 8
+    point_value = 3000.0
+
+    # Every fold under-predicts by exactly 500 MW at every horizon.
+    horizon_h = np.tile(np.arange(n_horizons), n_folds)
+    error = np.full(n_horizons * n_folds, 500.0)
+    per_fold_errors = pd.DataFrame({"horizon_h": horizon_h, "error": error})
+
+    idx = pd.date_range("2024-06-01", periods=n_horizons, freq="h", tz="UTC")
+    point = pd.Series(np.full(n_horizons, point_value), index=idx)
+    actual = pd.Series(np.full(n_horizons, point_value + 500.0), index=idx)
+
+    fig = _plots.forecast_overlay_with_band(actual, point, per_fold_errors)
+    try:
+        ax = fig.axes[0]
+        polys = [
+            c for c in ax.get_children() if isinstance(c, matplotlib.collections.PolyCollection)
+        ]
+        assert polys, "Expected exactly one PolyCollection for the band."
+        all_y = np.concatenate([p.vertices[:, 1] for p in polys[0].get_paths()])
+        finite_y = all_y[np.isfinite(all_y)]
+        assert finite_y.size > 0, "PolyCollection vertices contain no finite values."
+
+        # Correct contract: every band y-coordinate lies on or above
+        # ``point_value`` because every error is +500 MW.  The buggy
+        # subtract-formula would put every y-coordinate at
+        # ``point_value - 500 = 2500`` instead.
+        assert finite_y.min() >= point_value - 1e-6, (
+            f"Band collapsed below the forecast under all-positive errors: "
+            f"y_min={finite_y.min():.2f} but point={point_value:.2f}.  This is "
+            f"the sign-inversion symptom fixed 2026-05-04 — the band is being "
+            f"reflected through point instead of placed above it."
+        )
+        assert np.isclose(finite_y.max(), point_value + 500.0, rtol=1e-6), (
+            f"Band upper edge under all-positive errors should equal "
+            f"point + 500 = {point_value + 500.0:.2f}; got {finite_y.max():.2f}."
+        )
+
+        # Symmetric assertion for all-negative errors so the contract is
+        # pinned in both directions.  Re-using the same fixture style.
+        per_fold_errors_neg = pd.DataFrame(
+            {
+                "horizon_h": horizon_h,
+                "error": np.full(n_horizons * n_folds, -500.0),
+            }
+        )
+        fig_neg = _plots.forecast_overlay_with_band(actual, point, per_fold_errors_neg)
+        try:
+            ax_neg = fig_neg.axes[0]
+            polys_neg = [
+                c
+                for c in ax_neg.get_children()
+                if isinstance(c, matplotlib.collections.PolyCollection)
+            ]
+            all_y_neg = np.concatenate([p.vertices[:, 1] for p in polys_neg[0].get_paths()])
+            finite_y_neg = all_y_neg[np.isfinite(all_y_neg)]
+            assert finite_y_neg.max() <= point_value + 1e-6, (
+                f"Band rose above the forecast under all-negative errors: "
+                f"y_max={finite_y_neg.max():.2f} but point={point_value:.2f}.  "
+                f"Sign inversion symptom — see the docstring above."
+            )
+        finally:
+            plt.close(fig_neg)
     finally:
         plt.close(fig)
 
