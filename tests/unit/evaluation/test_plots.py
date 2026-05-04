@@ -1754,6 +1754,217 @@ def test_benchmark_holdout_bar_returns_figure_with_metric_bars(
 
 
 # ---------------------------------------------------------------------------
+# Test 39b — REGRESSION GUARD: benchmark_holdout_bar must not break
+# seasonal-naive same_hour_last_week.
+#
+# Bug fixed 2026-05-04 ("Stage 6 separation" branch): the helper used to
+# build a single fold spanning the full holdout, so for a 92-day holdout
+# only the first 168 test rows had a t-168h training row and the
+# remaining 2041 raised
+#   ValueError: Seasonal-naive 'same_hour_last_week' requires training
+#   targets at t - 7 days; 2041/2209 prediction rows have no matching
+#   training row.
+# Post-fix the helper rolls within the holdout in weekly chunks (168h)
+# by default, so each fold's lookback always lands in training.
+#
+# This test exercises the **end-to-end** code path (no compare_on_holdout
+# stub) — the previous Test 39 stubs the scoring function and would not
+# catch a splitter regression.
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_holdout_bar_works_with_seasonal_naive_same_hour_last_week() -> None:
+    """``same_hour_last_week`` succeeds end-to-end through the helper.
+
+    Pins the post-2026-05-04 fold-rolling default.  The pre-fix single-
+    fold splitter would raise ``Seasonal-naive '...' requires training
+    targets at t - 7 days; N/M prediction rows have no matching training
+    row.`` for any holdout longer than 168 hours.  After the fix the
+    helper walks the holdout in weekly folds and every fold's lookback
+    lands in the training prefix.
+
+    Synthetic features + outturn (constant 30 000 MW + low-amplitude
+    sinusoid) so the predictions and metrics are well-defined; the test
+    asserts the figure renders and the bar count matches the
+    ``len(metrics) x (len(candidates) + 1)`` contract.
+    """
+    import matplotlib.figure
+
+    from bristol_ml.evaluation.metrics import mae, rmse
+    from bristol_ml.models.naive import NaiveModel
+    from conf._schemas import NaiveConfig
+
+    # Synthesise 200 days of hourly data: 168 h pre-holdout train + a
+    # 32-day (768 h) holdout.  Pre-fix that holdout would be a single
+    # fold of length 768 — only the first 168 rows of which would be
+    # predictable by same_hour_last_week.  Post-fix the helper builds
+    # ~4 weekly folds and every fold succeeds.
+    n_pre = 24 * 60  # 60 days of training history before the holdout
+    n_post = 24 * 32  # 32 days of holdout
+    total = n_pre + n_post
+    idx = pd.date_range("2024-01-01", periods=total, freq="h", tz="UTC")
+    base = 30_000.0 + 200.0 * np.sin(2 * np.pi * np.arange(total) / 24)
+    # Include the Stage-3 weather column set so the harness's default
+    # feature_columns fallback finds them.  The naive model does not
+    # actually use features, but the harness still slices by feature
+    # name before delegating.
+    features = pd.DataFrame(
+        {
+            "nd_mw": base.astype("float64"),
+            "temperature_2m": np.full(total, 10.0, dtype="float32"),
+            "dew_point_2m": np.full(total, 5.0, dtype="float32"),
+            "wind_speed_10m": np.full(total, 3.0, dtype="float32"),
+            "cloud_cover": np.full(total, 50.0, dtype="float32"),
+            "shortwave_radiation": np.full(total, 100.0, dtype="float32"),
+        },
+        index=idx,
+    )
+
+    # Synthesise a NESO forecast frame on the same UTC index, half-hourly,
+    # so compare_on_holdout's hourly aggregation has something to score.
+    half_idx = pd.date_range(idx[0], idx[-1] + pd.Timedelta(minutes=30), freq="30min", tz="UTC")
+    neso = pd.DataFrame(
+        {
+            "timestamp_utc": half_idx,
+            "demand_forecast_mw": (
+                30_000.0 + 200.0 * np.sin(2 * np.pi * np.arange(len(half_idx)) / 48)
+            ),
+            "demand_outturn_mw": features["nd_mw"].reindex(half_idx, method="ffill").to_numpy(),
+        }
+    )
+
+    holdout_start = idx[n_pre]
+    holdout_end = idx[-1]
+
+    fig = _plots.benchmark_holdout_bar(
+        candidates={
+            "naive_lw": NaiveModel(NaiveConfig(strategy="same_hour_last_week")),
+        },
+        neso_forecast=neso,
+        features=features,
+        metrics=[mae, rmse],
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+        # No fold_len_hours override -> uses the post-fix default of 168 h.
+    )
+    try:
+        assert isinstance(fig, matplotlib.figure.Figure)
+        # Bar count contract still holds: 2 metrics x (1 candidate + 1 neso) = 4.
+        ax = fig.axes[0]
+        total_bars = sum(len(c) for c in ax.containers)
+        assert total_bars == 4, (
+            f"Expected 2 metrics x 2 rows (candidate + neso) = 4 bars; got {total_bars}."
+        )
+    finally:
+        plt.close(fig)
+
+
+def test_benchmark_holdout_bar_fold_len_hours_none_uses_single_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fold_len_hours=None`` selects the legacy single-fold splitter.
+
+    The fix changed the default to weekly folds for seasonal-naive
+    compatibility, but a caller with a fit-once-predict-N model
+    (e.g. SARIMAX) may still want a single-fold score.  The opt-in
+    parameter must give them the pre-fix splitter shape.
+    """
+    captured: dict[str, object] = {}
+
+    def _capturing_compare(
+        candidates: object,
+        df: object,
+        neso_forecast: object,
+        splitter_cfg: object,
+        metrics: object,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        captured["splitter_cfg"] = splitter_cfg
+        return pd.DataFrame({"mae": [1.0, 2.0]}, index=["m", "neso"])
+
+    monkeypatch.setattr(
+        "bristol_ml.evaluation.benchmarks.compare_on_holdout",
+        _capturing_compare,
+    )
+
+    from bristol_ml.evaluation.metrics import mae
+
+    n = 24 * 30  # 30 days
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    features = pd.DataFrame({"nd_mw": np.full(n, 30_000.0)}, index=idx)
+    holdout_start = idx[n // 2]
+    holdout_end = idx[-1]
+    holdout_rows = int(((idx >= holdout_start) & (idx <= holdout_end)).sum())
+
+    class _Stub:
+        def fit(self, *a, **k): ...
+        def predict(self, features):
+            return pd.Series(0.0, index=features.index)
+
+        def save(self, p): ...
+        @classmethod
+        def load(cls, p):
+            return cls()
+
+        @property
+        def metadata(self):
+            return None
+
+    fig = _plots.benchmark_holdout_bar(
+        candidates={"m": _Stub()},
+        neso_forecast=pd.DataFrame(),
+        features=features,
+        metrics=[mae],
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+        fold_len_hours=None,
+    )
+    try:
+        cfg = captured["splitter_cfg"]
+        assert cfg.test_len == holdout_rows, (
+            f"fold_len_hours=None must build a splitter whose test_len equals "
+            f"the full holdout span ({holdout_rows} rows); got test_len={cfg.test_len}."
+        )
+        assert cfg.step == cfg.test_len, "Single-fold splitter must have step == test_len."
+    finally:
+        plt.close(fig)
+
+
+def test_benchmark_holdout_bar_rejects_non_positive_fold_len_hours() -> None:
+    """``fold_len_hours <= 0`` raises with a clear message."""
+    from bristol_ml.evaluation.metrics import mae
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    features = pd.DataFrame({"nd_mw": np.full(n, 30_000.0)}, index=idx)
+
+    class _Stub:
+        def fit(self, *a, **k): ...
+        def predict(self, features):
+            return pd.Series(0.0, index=features.index)
+
+        def save(self, p): ...
+        @classmethod
+        def load(cls, p):
+            return cls()
+
+        @property
+        def metadata(self):
+            return None
+
+    with pytest.raises(ValueError, match="fold_len_hours must be positive or None"):
+        _plots.benchmark_holdout_bar(
+            candidates={"m": _Stub()},
+            neso_forecast=pd.DataFrame(),
+            features=features,
+            metrics=[mae],
+            holdout_start=idx[150],
+            holdout_end=idx[-1],
+            fold_len_hours=0,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 40 — benchmark_holdout_bar uses holdout window from config (Plan T4)
 # ---------------------------------------------------------------------------
 
