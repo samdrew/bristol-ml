@@ -235,10 +235,16 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
     feature_cache = fset.cache_dir / fset.cache_filename
     if not feature_cache.exists():
+        # The assembler CLI dispatches on the active features=<name>
+        # group (Stage 5 deferred follow-up, closed by the
+        # feature-cache-regeneration-ux fix on 2026-05-04), so the
+        # error message hands the operator a copy-pasteable command
+        # that targets the correct orchestrator regardless of which
+        # feature set is active.
         print(
-            f"Feature-table cache missing at {feature_cache}. Run "
-            f"`python -m bristol_ml.features.assembler` (or "
-            f"`assemble_calendar` for the calendar set) first.",
+            f"Feature-table cache missing at {feature_cache}.\n"
+            f"Run: uv run python -m bristol_ml.features.assembler "
+            f"features={fset.name} --cache auto",
             file=sys.stderr,
         )
         return 2
