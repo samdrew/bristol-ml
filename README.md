@@ -75,6 +75,27 @@ The download lands in `~/.cache/huggingface/`. Subsequent runs (and CI) honour `
 
 See [`CLAUDE.md`](CLAUDE.md) for Claude Code guidance, [`docs/architecture/`](docs/architecture/) for architectural decisions, and [`docs/lld/stages/`](docs/lld/stages/) for stage retrospectives.
 
+## Regenerating feature caches after a code change
+
+The assembler writes one of two feature-table parquets depending on the active `features=` Hydra group:
+
+| Group | Output parquet | Stage |
+|-------|----------------|-------|
+| `weather_only` (default) | `data/features/weather_only.parquet` | 3 |
+| `weather_calendar` | `data/features/weather_calendar.parquet` | 5 |
+
+When you change a feature derivation (e.g. add a column to `derive_calendar`), the on-disk parquet's schema no longer matches what `load`/`load_calendar` expect, and the train CLI fails with `Cached parquet at <path> is missing required column '<name>'`. The error message names the regeneration command; for reference:
+
+```bash
+# Stage 3 weather-only feature table
+uv run python -m bristol_ml.features.assembler features=weather_only --cache offline
+
+# Stage 5 weather + calendar feature table
+uv run python -m bristol_ml.features.assembler features=weather_calendar --cache offline
+```
+
+`--cache offline` (the default) reuses the warm ingester caches (NESO, weather, holidays) and only re-runs the feature derivation — the right policy after a code-only change. `--cache auto` populates missing ingester caches from the network on first run; `--cache refresh` re-fetches them. The assembler's own output parquet is always written via atomic replace, so a re-run never corrupts a partially-written file.
+
 ## Worked example: NESO demand (Stage 1)
 
 `notebooks/01_neso_demand.ipynb` loads cached GB half-hourly demand (sourced from the NESO Data Portal under OGL v3), resamples to hourly, and plots a representative week plus daily peaks across the cached window. The first run populates the local cache from the NESO CKAN API; subsequent runs work offline. See [`src/bristol_ml/ingestion/CLAUDE.md`](src/bristol_ml/ingestion/CLAUDE.md) for the on-disk parquet schema, and the [Stage 1 retrospective](docs/lld/stages/01-neso-demand-ingestion.md) for the design choices.

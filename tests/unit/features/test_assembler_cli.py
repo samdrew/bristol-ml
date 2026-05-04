@@ -339,6 +339,183 @@ class TestPrimedCacheShapes:
 
 
 # ---------------------------------------------------------------------------
+# Tests — _resolve_orchestrator dispatch (feature-cache-regeneration-ux fix)
+#
+# Closes the Stage 5 deferred follow-up flagged in
+# ``docs/lld/stages/05-calendar-features.md`` §"Deferred":
+#   "The python -m bristol_ml.features.assembler CLI still only calls
+#    assemble().  Extending the assembler CLI to dispatch by
+#    _resolve_feature_set is a small follow-up not required by Stage 5
+#    acceptance."
+#
+# After the fix the CLI dispatches on the active features=<name> group
+# so a user adding a calendar column can regenerate the cache directly:
+#
+#     uv run python -m bristol_ml.features.assembler \
+#         features=weather_calendar --cache offline
+#
+# These tests pin the dispatch rules and the new error-message contract.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOrchestratorDispatch:
+    """The CLI dispatches on the populated ``features=`` group."""
+
+    def test_weather_only_returns_assemble(self, primed_caches: dict[str, Path]) -> None:
+        """``features=weather_only`` (the default) routes to ``assemble``."""
+        cfg = _make_app_config(primed_caches)
+        name, orchestrator = assembler_mod._resolve_orchestrator(cfg)
+        assert name == "weather_only"
+        assert orchestrator is assembler_mod.assemble
+
+    def test_weather_calendar_returns_assemble_calendar(self, tmp_path: Path) -> None:
+        """``features=weather_calendar`` routes to ``assemble_calendar``.
+
+        Constructs a calendar-only config (mirrors the Hydra group-swap
+        runtime state where ``cfg.features.weather_only`` is ``None``).
+        """
+        cfg = AppConfig(
+            project=ProjectConfig(name="ux_dispatch_test", seed=0),
+            ingestion=IngestionGroup(),
+            features=FeaturesGroup(
+                weather_calendar=FeatureSetConfig(
+                    name="weather_calendar",
+                    cache_dir=tmp_path,
+                    cache_filename="weather_calendar.parquet",
+                ),
+            ),
+            evaluation=EvaluationGroup(),
+        )
+        name, orchestrator = assembler_mod._resolve_orchestrator(cfg)
+        assert name == "weather_calendar"
+        assert orchestrator is assembler_mod.assemble_calendar
+
+    def test_neither_populated_raises_with_actionable_message(self, tmp_path: Path) -> None:
+        """No feature-set group populated ⇒ ValueError naming the override.
+
+        The error message must hand the user a copy-pasteable
+        ``features=<name>`` recipe rather than a Python symbol.
+        """
+        cfg = AppConfig(
+            project=ProjectConfig(name="ux_neither_test", seed=0),
+            ingestion=IngestionGroup(),
+            features=FeaturesGroup(),
+            evaluation=EvaluationGroup(),
+        )
+        with pytest.raises(ValueError) as exc_info:
+            assembler_mod._resolve_orchestrator(cfg)
+        msg = str(exc_info.value)
+        assert "Exactly one of" in msg
+        assert "features=" in msg, f"Error message must name the Hydra override; got: {msg!r}"
+
+    def test_both_populated_raises(self, tmp_path: Path) -> None:
+        """Both feature-sets populated ⇒ ValueError listing both names.
+
+        Defensive guard against a Hydra composition bug; runtime state
+        should always have exactly one populated.
+        """
+        cfg = AppConfig(
+            project=ProjectConfig(name="ux_both_test", seed=0),
+            ingestion=IngestionGroup(),
+            features=FeaturesGroup(
+                weather_only=FeatureSetConfig(
+                    name="weather_only",
+                    cache_dir=tmp_path,
+                    cache_filename="weather_only.parquet",
+                ),
+                weather_calendar=FeatureSetConfig(
+                    name="weather_calendar",
+                    cache_dir=tmp_path,
+                    cache_filename="weather_calendar.parquet",
+                ),
+            ),
+            evaluation=EvaluationGroup(),
+        )
+        with pytest.raises(ValueError) as exc_info:
+            assembler_mod._resolve_orchestrator(cfg)
+        msg = str(exc_info.value)
+        assert "weather_only" in msg and "weather_calendar" in msg, (
+            f"Error message must name both populated sets; got: {msg!r}"
+        )
+
+
+class TestSchemaMismatchErrorIncludesRegenHint:
+    """``load`` / ``load_calendar`` errors include a regeneration command."""
+
+    def test_load_missing_column_names_regen_command(self, tmp_path: Path) -> None:
+        """A weather-only parquet missing one of OUTPUT_SCHEMA's columns
+        raises ValueError naming the column AND the regen command.
+        """
+        # Build an OUTPUT_SCHEMA-shaped parquet, then drop one column.
+        # Cast to a schema derived from OUTPUT_SCHEMA *minus* the dropped
+        # column so other fields (e.g. timestamp precision) match exactly
+        # and the missing-column branch fires cleanly.
+        path = tmp_path / "weather_only.parquet"
+        timestamps = pd.date_range("2024-01-01", periods=24, freq="h", tz="UTC")
+        retrieved = pd.Timestamp("2024-01-02", tz="UTC")
+        dropped = "shortwave_radiation"
+        df = pd.DataFrame(
+            {
+                "timestamp_utc": timestamps,
+                "nd_mw": pd.array([30_000] * 24, dtype="int32"),
+                "tsd_mw": pd.array([31_000] * 24, dtype="int32"),
+                "temperature_2m": pd.array([10.0] * 24, dtype="float32"),
+                "dew_point_2m": pd.array([5.0] * 24, dtype="float32"),
+                "wind_speed_10m": pd.array([3.0] * 24, dtype="float32"),
+                "cloud_cover": pd.array([50.0] * 24, dtype="float32"),
+                # 'shortwave_radiation' deliberately absent.
+                "neso_retrieved_at_utc": [retrieved] * 24,
+                "weather_retrieved_at_utc": [retrieved] * 24,
+            }
+        )
+        partial_schema = pa.schema([f for f in assembler_mod.OUTPUT_SCHEMA if f.name != dropped])
+        table = pa.Table.from_pandas(df, preserve_index=False).cast(partial_schema, safe=True)
+        pq.write_table(table, path)
+
+        with pytest.raises(ValueError) as exc_info:
+            assembler_mod.load(path)
+        msg = str(exc_info.value)
+        assert dropped in msg, f"Error must name the missing column; got: {msg!r}"
+        assert "features=weather_only" in msg, f"Error must include the regen command; got: {msg!r}"
+
+    def test_load_calendar_missing_column_names_regen_command(self, tmp_path: Path) -> None:
+        """``load_calendar`` schema-mismatch ValueError includes the
+        ``features=weather_calendar`` regen command.
+
+        Pins the operational contract: an operator who adds a calendar
+        column gets a copy-pasteable recovery hint without consulting
+        docs (this is the exact failure mode that motivated this fix).
+        """
+        # Build a parquet that would pass OUTPUT_SCHEMA but is missing
+        # all calendar columns — load_calendar must reject it.
+        path = tmp_path / "weather_calendar.parquet"
+        timestamps = pd.date_range("2024-01-01", periods=24, freq="h", tz="UTC")
+        retrieved = pd.Timestamp("2024-01-02", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "timestamp_utc": timestamps,
+                "nd_mw": pd.array([30_000] * 24, dtype="int32"),
+                "tsd_mw": pd.array([31_000] * 24, dtype="int32"),
+                "temperature_2m": pd.array([10.0] * 24, dtype="float32"),
+                "dew_point_2m": pd.array([5.0] * 24, dtype="float32"),
+                "wind_speed_10m": pd.array([3.0] * 24, dtype="float32"),
+                "cloud_cover": pd.array([50.0] * 24, dtype="float32"),
+                "shortwave_radiation": pd.array([100.0] * 24, dtype="float32"),
+                "neso_retrieved_at_utc": [retrieved] * 24,
+                "weather_retrieved_at_utc": [retrieved] * 24,
+            }
+        )
+        pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+
+        with pytest.raises(ValueError) as exc_info:
+            assembler_mod.load_calendar(path)
+        msg = str(exc_info.value)
+        assert "features=weather_calendar" in msg, (
+            f"Error must include the regen command; got: {msg!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Trivial smoke ensuring test-file imports stay live
 # ---------------------------------------------------------------------------
 

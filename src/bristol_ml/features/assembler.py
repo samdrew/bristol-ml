@@ -450,6 +450,12 @@ def _resolve_provenance(
 # ---------------------------------------------------------------------------
 
 
+_REGEN_HINT_WEATHER_ONLY = (
+    "Regenerate via: "
+    "uv run python -m bristol_ml.features.assembler features=weather_only --cache offline"
+)
+
+
 def load(path: Path) -> pd.DataFrame:
     """Read a feature-table parquet; assert ``OUTPUT_SCHEMA``; return a dataframe.
 
@@ -458,18 +464,29 @@ def load(path: Path) -> pd.DataFrame:
     Extra columns trigger a ``ValueError`` — the feature-table contract
     is exact, not permissive, because downstream models may select
     columns positionally for speed.
+
+    Schema-mismatch ``ValueError`` messages name the missing or
+    mistyped column **and** the regeneration command, because the most
+    common cause of this failure mode in the wild is a schema bump
+    (e.g. a new column added to ``derive_calendar``) where the on-disk
+    parquet pre-dates the code change.  Naming the recovery command
+    in the error itself saves the operator a docs lookup.
     """
     table = pq.read_table(path)
     actual = table.schema
 
     for field in OUTPUT_SCHEMA:
         if field.name not in actual.names:
-            raise ValueError(f"Cached parquet at {path} is missing required column {field.name!r}")
+            raise ValueError(
+                f"Cached parquet at {path} is missing required column "
+                f"{field.name!r}.  This usually means the schema changed since "
+                f"the cache was written.  {_REGEN_HINT_WEATHER_ONLY}"
+            )
         actual_field = actual.field(field.name)
         if actual_field.type != field.type:
             raise ValueError(
                 f"Column {field.name!r} in {path} has type {actual_field.type}; "
-                f"expected {field.type}"
+                f"expected {field.type}.  {_REGEN_HINT_WEATHER_ONLY}"
             )
 
     expected_names = {field.name for field in OUTPUT_SCHEMA}
@@ -477,7 +494,8 @@ def load(path: Path) -> pd.DataFrame:
     if extra:
         raise ValueError(
             f"Cached parquet at {path} has unexpected column(s) {sorted(extra)}; "
-            f"the feature-table schema is exact (Plan AC-2)."
+            f"the feature-table schema is exact (Plan AC-2).  "
+            f"{_REGEN_HINT_WEATHER_ONLY}"
         )
 
     return table.to_pandas()
@@ -488,10 +506,16 @@ def load(path: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+_REGEN_HINT_WEATHER_CALENDAR = (
+    "Regenerate via: "
+    "uv run python -m bristol_ml.features.assembler features=weather_calendar --cache offline"
+)
+
+
 def load_calendar(path: Path) -> pd.DataFrame:
     """Read a ``weather_calendar`` feature-table parquet; assert ``CALENDAR_OUTPUT_SCHEMA``.
 
-    Mirrors :func:`load` but on the 55-column Stage 5 schema. Rejects both
+    Mirrors :func:`load` but on the Stage 5 schema. Rejects both
     missing and extra columns: the two feature-table contracts are exact,
     not permissive — a parquet written under :data:`OUTPUT_SCHEMA`
     (weather-only) will be rejected here because its calendar columns are
@@ -499,18 +523,26 @@ def load_calendar(path: Path) -> pd.DataFrame:
 
     The schema-validated returns carry calendar columns as ``int8`` and
     the ``holidays_retrieved_at_utc`` column as tz-aware UTC.
+
+    Schema-mismatch ``ValueError`` messages include the regeneration
+    command so an operator who has just added or removed a calendar
+    column gets a copy-pasteable recovery hint without consulting docs.
     """
     table = pq.read_table(path)
     actual = table.schema
 
     for field in CALENDAR_OUTPUT_SCHEMA:
         if field.name not in actual.names:
-            raise ValueError(f"Cached parquet at {path} is missing required column {field.name!r}")
+            raise ValueError(
+                f"Cached parquet at {path} is missing required column "
+                f"{field.name!r}.  This usually means the schema changed "
+                f"since the cache was written.  {_REGEN_HINT_WEATHER_CALENDAR}"
+            )
         actual_field = actual.field(field.name)
         if actual_field.type != field.type:
             raise ValueError(
                 f"Column {field.name!r} in {path} has type {actual_field.type}; "
-                f"expected {field.type}"
+                f"expected {field.type}.  {_REGEN_HINT_WEATHER_CALENDAR}"
             )
 
     expected_names = {field.name for field in CALENDAR_OUTPUT_SCHEMA}
@@ -518,7 +550,8 @@ def load_calendar(path: Path) -> pd.DataFrame:
     if extra:
         raise ValueError(
             f"Cached parquet at {path} has unexpected column(s) {sorted(extra)}; "
-            f"the weather_calendar feature-table schema is exact (Plan AC-3 / AC-7)."
+            f"the weather_calendar feature-table schema is exact (Plan AC-3 / AC-7).  "
+            f"{_REGEN_HINT_WEATHER_CALENDAR}"
         )
 
     return table.to_pandas()
@@ -756,24 +789,80 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m bristol_ml.features.assembler",
         description=(
-            "Assemble the Stage 3 hourly feature table from the cached NESO demand + "
-            "weather parquets and persist it via the resolved `features.weather_only` "
-            "config. Uses CachePolicy.OFFLINE by default; pass --cache auto to populate "
-            "missing caches."
+            "Assemble an hourly feature-table parquet from the cached upstream "
+            "ingestion artefacts.  Dispatches on the active ``features=`` Hydra "
+            "group:\n"
+            "  features=weather_only     -> data/features/weather_only.parquet      (Stage 3)\n"
+            "  features=weather_calendar -> data/features/weather_calendar.parquet  (Stage 5)\n"
+            "\n"
+            "The default Hydra composition selects ``features=weather_only``, so "
+            "running the bare CLI regenerates the Stage 3 cache.  Pass "
+            "``features=weather_calendar`` to regenerate the Stage 5 cache.\n"
+            "\n"
+            "``--cache offline`` (the default) reuses the warm ingester caches "
+            "(NESO, weather, holidays) and only re-runs the feature derivation "
+            "— the right policy after a code-only change such as adding a "
+            "calendar column.  ``--cache auto`` fills missing ingester caches "
+            "from the network; ``--cache refresh`` re-fetches them.  The "
+            "assembler's own output parquet is always written via atomic "
+            "replace, so a re-run never corrupts a partially-written file."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--cache",
         choices=["auto", "refresh", "offline"],
         default="offline",
-        help="Cache policy passed through to both ingesters (default: offline).",
+        help="Cache policy passed through to the ingesters (default: offline).",
     )
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Hydra overrides, e.g. features.weather_only.demand_aggregation=max",
+        help=(
+            "Hydra overrides, e.g. ``features=weather_calendar`` to swap the "
+            "feature-set group, or ``features.weather_only.demand_aggregation=max``."
+        ),
     )
     return parser
+
+
+def _resolve_orchestrator(
+    cfg: AppConfig,
+) -> tuple[str, object]:
+    """Dispatch on the active ``features=`` group.
+
+    Returns the (group-name, orchestrator-callable) pair matching the
+    populated field on ``cfg.features``.  Mirrors
+    ``bristol_ml.train._resolve_feature_set``'s mutual-exclusivity
+    invariant: under the Stage 5 Hydra group-swap refactor exactly one
+    of ``cfg.features.weather_only`` / ``cfg.features.weather_calendar``
+    is non-``None`` per run, and adding a third sibling (e.g. Stage 16's
+    ``with_remit``) is a one-line extension below.
+
+    Returning the orchestrator as ``object`` rather than a Callable type
+    keeps this helper free of typing-import gymnastics; the caller
+    invokes it positionally with ``(cfg, cache=...)`` per the
+    ``assemble`` / ``assemble_calendar`` shared signature.
+    """
+    populated = [
+        name
+        for name, value in (
+            ("weather_only", cfg.features.weather_only),
+            ("weather_calendar", cfg.features.weather_calendar),
+        )
+        if value is not None
+    ]
+    if len(populated) != 1:
+        raise ValueError(
+            "Exactly one of features.weather_only or features.weather_calendar "
+            "must be set; pass `features=<name>` at the CLI (e.g. "
+            "`features=weather_calendar`).  "
+            f"Got populated set(s): {populated or 'none'}."
+        )
+    name = populated[0]
+    if name == "weather_only":
+        return ("weather_only", assemble)
+    return ("weather_calendar", assemble_calendar)
 
 
 def _cli_main(argv: Iterable[str] | None = None) -> int:
@@ -785,7 +874,14 @@ def _cli_main(argv: Iterable[str] | None = None) -> int:
 
     cfg = load_config(overrides=list(args.overrides))
     try:
-        out_path = assemble(cfg, cache=args.cache)
+        group_name, orchestrator = _resolve_orchestrator(cfg)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    logger.info("Feature-assembler CLI: dispatching to features={} orchestrator", group_name)
+    try:
+        out_path = orchestrator(cfg, cache=args.cache)  # type: ignore[operator]
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

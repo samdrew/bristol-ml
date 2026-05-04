@@ -160,7 +160,14 @@ def test_train_cli_exits_2_when_feature_cache_missing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Missing feature-table cache produces exit code 2 with a named-path error."""
+    """Missing feature-table cache produces exit code 2 with an actionable error.
+
+    The error message must hand the operator a copy-pasteable
+    ``features.assembler features=<name> --cache auto`` command rather
+    than naming a Python symbol (the pre-fix message named
+    ``assemble_calendar`` — a Python function, not a CLI verb, which
+    sent operators on a tooling chase rather than a recovery path).
+    """
     monkeypatch.setenv("BRISTOL_ML_CACHE_DIR", str(tmp_path))
     # Deliberately do NOT call _write_feature_cache — the cache is absent.
 
@@ -169,6 +176,14 @@ def test_train_cli_exits_2_when_feature_cache_missing(
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "Feature-table cache missing" in err
+    # Pin the actionable-recipe contract: the message must include the
+    # exact CLI invocation that recovers (post-2026-05-04 fix).
+    assert "python -m bristol_ml.features.assembler" in err
+    assert "features=weather_only" in err, (
+        f"Default config has features=weather_only; the error must echo "
+        f"that group name so the recipe is copy-pasteable.  Got: {err!r}"
+    )
+    assert "--cache auto" in err
 
 
 def test_train_cli_skips_benchmark_when_forecast_cache_missing(

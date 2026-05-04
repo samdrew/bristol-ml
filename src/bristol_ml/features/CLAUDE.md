@@ -159,10 +159,41 @@ source of truth for the 44 calendar column names / dtypes.
 
     python -m bristol_ml.features.weather   [--head N]
     python -m bristol_ml.features.calendar  [--rows N]
-    python -m bristol_ml.features.assembler [--cache {auto,refresh,offline}]
+    python -m bristol_ml.features.assembler [--cache {auto,refresh,offline}] [overrides...]
     python -m bristol_ml.features.fourier   [--help]
 
 All four CLIs honour Hydra overrides in the trailing positional slot.
+
+## Regenerating after a feature change
+
+When you add or remove a column in `derive_calendar` (or
+`weather.national_aggregate`, or any pure derivation), the relevant
+`*_OUTPUT_SCHEMA` constant changes and any existing cached parquet
+under `data/features/` is now schema-stale. `load` / `load_calendar`
+will refuse it with a `ValueError` naming both the missing column and
+the regeneration command — copy-paste from the error itself, or use
+the recipes below.
+
+The `assembler` CLI dispatches on the active `features=` group:
+
+    # Stage 3 weather-only frame
+    uv run python -m bristol_ml.features.assembler features=weather_only --cache offline
+
+    # Stage 5 weather + calendar frame
+    uv run python -m bristol_ml.features.assembler features=weather_calendar --cache offline
+
+Use `--cache offline` (the default) when only the derivation has
+changed; the upstream ingester caches stay warm and the assembler
+only re-runs `build` / `derive_calendar` against them. `--cache auto`
+populates missing ingester caches from the network on first run.
+`--cache refresh` re-fetches them. The assembler's own output parquet
+is always written via atomic replace, so a re-run never corrupts a
+partially-written file (NFR-3).
+
+The dispatch helper (`assembler._resolve_orchestrator`) mirrors
+`bristol_ml.train._resolve_feature_set` so the two CLIs agree on
+which feature-set group is active. Adding a third sibling (e.g.
+Stage 16's `with_remit`) is a one-line extension to both helpers.
 
 ## Extensibility
 
