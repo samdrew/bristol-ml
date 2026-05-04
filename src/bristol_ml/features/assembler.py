@@ -54,11 +54,14 @@ __all__ = [
     "DEMAND_COLUMNS",
     "OUTPUT_SCHEMA",
     "WEATHER_VARIABLE_COLUMNS",
+    "WITH_REMIT_OUTPUT_SCHEMA",
     "assemble",
     "assemble_calendar",
+    "assemble_with_remit",
     "build",
     "load",
     "load_calendar",
+    "load_with_remit",
 ]
 
 
@@ -141,6 +144,48 @@ Composition (55 columns total):
 Column order is contractual; additions are additive (append), renames or
 reorders are breaking.  See plan T4 for the structural invariant pinned by
 ``test_calendar_output_schema_is_weather_schema_plus_calendar_plus_provenance``.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Stage 16 — weather + calendar + REMIT schema
+# ---------------------------------------------------------------------------
+#
+# ``REMIT_VARIABLE_COLUMNS`` is owned by ``features.remit`` (the
+# derivation module); imported here so the WITH_REMIT_OUTPUT_SCHEMA
+# composition has a single source of truth for the three REMIT column
+# names / dtypes (Stage 16 plan D2).
+from bristol_ml.features.remit import REMIT_VARIABLE_COLUMNS  # noqa: E402
+
+WITH_REMIT_OUTPUT_SCHEMA: pa.Schema = pa.schema(
+    [
+        *CALENDAR_OUTPUT_SCHEMA,
+        *REMIT_VARIABLE_COLUMNS,
+        ("remit_retrieved_at_utc", pa.timestamp("us", tz="UTC")),
+    ]
+)
+"""The on-disk parquet schema for a Stage 16 ``with_remit`` feature table.
+
+Composition (59 columns total):
+
+- positions 0..54  -> ``CALENDAR_OUTPUT_SCHEMA.names`` (the 55-column
+  Stage 5 weather+calendar schema, unchanged — the calendar frame is
+  an exact prefix of the with-REMIT frame so downstream code that
+  reads only the calendar columns continues to work by column-name
+  selection).
+- positions 55..57 -> :data:`bristol_ml.features.remit.REMIT_VARIABLE_COLUMNS`
+  (3 columns: float32 ``remit_unavail_mw_total``,
+  int32 ``remit_active_unplanned_count``, float32
+  ``remit_unavail_mw_next_24h``).
+- position 58       -> ``remit_retrieved_at_utc`` (``timestamp[us,
+  tz=UTC]``), the fourth provenance scalar mirroring the Stage 3 / 5
+  conventions (one per upstream ingester:
+  ``neso_retrieved_at_utc`` / ``weather_retrieved_at_utc`` /
+  ``holidays_retrieved_at_utc`` already live inside the calendar
+  prefix at positions 8 / 9 / 54).
+
+Column order is contractual; additions are additive (append), renames
+or reorders are breaking.  Stage 16 plan D2.
 """
 
 
@@ -778,6 +823,320 @@ def assemble_calendar(cfg: AppConfig, *, cache: str | object = "offline") -> Pat
         out_path,
     )
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# load_with_remit — schema-validated read for the Stage 16 with_remit set
+# ---------------------------------------------------------------------------
+
+
+def load_with_remit(path: Path) -> pd.DataFrame:
+    """Read a ``with_remit`` feature-table parquet; assert :data:`WITH_REMIT_OUTPUT_SCHEMA`.
+
+    Mirrors :func:`load` and :func:`load_calendar` on the 59-column
+    Stage 16 schema.  Rejects both missing and extra columns: the three
+    feature-table contracts are exact, not permissive — a parquet
+    written under :data:`OUTPUT_SCHEMA` (weather-only) or
+    :data:`CALENDAR_OUTPUT_SCHEMA` (weather+calendar) will be rejected
+    here because its REMIT columns are absent, and vice versa.
+
+    The schema-validated returns carry REMIT columns as float32 / int32 /
+    float32 (per :data:`bristol_ml.features.remit.REMIT_VARIABLE_COLUMNS`)
+    and the ``remit_retrieved_at_utc`` column as tz-aware UTC.
+    """
+    table = pq.read_table(path)
+    actual = table.schema
+
+    for field in WITH_REMIT_OUTPUT_SCHEMA:
+        if field.name not in actual.names:
+            raise ValueError(f"Cached parquet at {path} is missing required column {field.name!r}")
+        actual_field = actual.field(field.name)
+        if actual_field.type != field.type:
+            raise ValueError(
+                f"Column {field.name!r} in {path} has type {actual_field.type}; "
+                f"expected {field.type}"
+            )
+
+    expected_names = {field.name for field in WITH_REMIT_OUTPUT_SCHEMA}
+    extra = [name for name in actual.names if name not in expected_names]
+    if extra:
+        raise ValueError(
+            f"Cached parquet at {path} has unexpected column(s) {sorted(extra)}; "
+            f"the with_remit feature-table schema is exact (Stage 16 plan AC-2)."
+        )
+
+    return table.to_pandas()
+
+
+# ---------------------------------------------------------------------------
+# assemble_with_remit — orchestrator for the Stage 16 with_remit set
+# ---------------------------------------------------------------------------
+
+
+def assemble_with_remit(cfg: AppConfig, *, cache: str | object = "offline") -> Path:
+    """End-to-end: build calendar frame, derive REMIT features, persist.
+
+    Stage 16 T4 orchestrator — composes Stage 5's weather+calendar
+    pipeline (NESO + weather + holidays + calendar derivation) with the
+    Stage 16 REMIT derivation (loads the persisted extractor parquet,
+    enriches the REMIT log with LLM-extracted ``affected_capacity_mw``,
+    runs :func:`bristol_ml.features.remit.derive_remit_features`),
+    appends the ``remit_retrieved_at_utc`` provenance scalar, casts to
+    :data:`WITH_REMIT_OUTPUT_SCHEMA` and writes via
+    :func:`bristol_ml.ingestion._common._atomic_write`.
+
+    Extracted-features parquet handling (Stage 16 plan A5):
+
+    - The function reads the parquet at the resolved path
+      (``data/processed/`` + ``cfg.features.with_remit.extracted_parquet_filename``
+      if set, else
+      :data:`bristol_ml.llm.persistence.DEFAULT_OUTPUT_PATH`).
+    - If the parquet is **absent**, the assembler runs the configured
+      :class:`bristol_ml.llm.Extractor` over the REMIT log and writes
+      the parquet on the fly via :func:`extract_and_persist`.  This
+      keeps CI green under stub-mode without requiring an explicit
+      pre-step; the human running the real-extractor path (Stage 16
+      plan A3) executes :mod:`bristol_ml.llm.persistence` once
+      beforehand to populate the parquet, then re-runs this assembler
+      against the warm cache.
+
+    Per-event LLM enrichment is applied by overriding ``affected_mw``
+    on the REMIT log with the extractor's ``affected_capacity_mw``
+    where available — the LLM-extracted capacity is preferred over the
+    raw REMIT field because it interprets free-text values that the
+    structured field omits.  Where the extractor returned ``None``
+    the raw ``affected_mw`` is retained.
+
+    Parameters
+    ----------
+    cfg
+        Resolved :class:`AppConfig`.  ``cfg.features.with_remit`` must
+        be populated (the Hydra group-swap arranges this when the user
+        invokes ``features=with_remit``); ``cfg.ingestion.neso``,
+        ``cfg.ingestion.weather``, ``cfg.ingestion.holidays`` and
+        ``cfg.ingestion.remit`` must all be populated.
+    cache
+        Cache policy passed through to the ingesters and to the
+        extractor-persistence pre-step.  Accepts either a
+        :class:`CachePolicy` value or one of the strings ``"auto"``,
+        ``"refresh"``, ``"offline"``.  Default is ``"offline"`` — the
+        CI-safe choice.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path the Stage 16 feature table was written to.
+    """
+    from bristol_ml.features.calendar import derive_calendar
+    from bristol_ml.features.remit import derive_remit_features
+    from bristol_ml.features.weather import national_aggregate
+    from bristol_ml.ingestion import holidays as _holidays_ing
+    from bristol_ml.ingestion import neso, weather
+    from bristol_ml.ingestion import remit as _remit_ing
+    from bristol_ml.ingestion._common import CachePolicy, _atomic_write, _cache_path
+    from bristol_ml.llm.extractor import build_extractor
+    from bristol_ml.llm.persistence import (
+        DEFAULT_OUTPUT_PATH as _EXTRACTED_DEFAULT_PATH,
+    )
+    from bristol_ml.llm.persistence import (
+        extract_and_persist,
+        load_extracted,
+    )
+
+    if cfg.features.with_remit is None:
+        raise ValueError(
+            "No with_remit feature-set config resolved. Invoke with "
+            "`features=with_remit` (Hydra group override) or ensure "
+            "`conf/features/with_remit.yaml` is selected in the defaults list."
+        )
+    if cfg.ingestion.neso is None or cfg.ingestion.weather is None:
+        raise ValueError(
+            "Both `ingestion.neso` and `ingestion.weather` must be resolved "
+            "before the with_remit assembler runs."
+        )
+    if cfg.ingestion.holidays is None:
+        raise ValueError(
+            "`ingestion.holidays` must be resolved before the with_remit assembler runs."
+        )
+    if cfg.ingestion.remit is None:
+        raise ValueError(
+            "`ingestion.remit` must be resolved before the with_remit "
+            "assembler runs.  Ensure `- ingestion/remit@ingestion.remit` is "
+            "in the `conf/config.yaml` defaults list."
+        )
+
+    fset = cfg.features.with_remit
+    policy = cache if isinstance(cache, CachePolicy) else CachePolicy(cache)
+
+    # --- Calendar composition (mirrors assemble_calendar -- mutual exclusion
+    # prevents direct delegation; same pattern documented in the Stage 5
+    # 'Notes' on assemble_calendar) ---------------------------------------
+    neso_path = neso.fetch(cfg.ingestion.neso, cache=policy)
+    neso_df = neso.load(neso_path)
+    demand_hourly = _resample_demand_hourly(
+        neso_df,
+        agg=fset.demand_aggregation,
+    )
+
+    weather_path = weather.fetch(cfg.ingestion.weather, cache=policy)
+    weather_df = weather.load(weather_path)
+    weights = {s.name: s.weight for s in cfg.ingestion.weather.stations}
+    weather_national = national_aggregate(weather_df, weights)
+
+    neso_stamp = (
+        pd.Timestamp(neso_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in neso_df.columns and len(neso_df)
+        else None
+    )
+    weather_stamp = (
+        pd.Timestamp(weather_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in weather_df.columns and len(weather_df)
+        else None
+    )
+
+    weather_frame = build(
+        demand_hourly,
+        weather_national,
+        fset,
+        neso_retrieved_at_utc=neso_stamp,
+        weather_retrieved_at_utc=weather_stamp,
+    )
+
+    holidays_path = _holidays_ing.fetch(cfg.ingestion.holidays, cache=policy)
+    holidays_df = _holidays_ing.load(holidays_path)
+    calendar_frame = derive_calendar(weather_frame, holidays_df)
+
+    holidays_stamp = (
+        pd.Timestamp(holidays_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in holidays_df.columns and len(holidays_df)
+        else pd.Timestamp.now("UTC").floor("us")
+    )
+    calendar_frame["holidays_retrieved_at_utc"] = holidays_stamp
+
+    # --- REMIT log + extractor parquet -----------------------------------
+    remit_path = _remit_ing.fetch(cfg.ingestion.remit, cache=policy)
+    remit_df = _remit_ing.load(remit_path)
+
+    extracted_path = _resolve_extracted_path(fset, _EXTRACTED_DEFAULT_PATH)
+    if extracted_path.exists():
+        extracted_df = load_extracted(extracted_path)
+        logger.info(
+            "with_remit assembler: extracted-features cache hit at {} ({} row(s))",
+            extracted_path,
+            len(extracted_df),
+        )
+    else:
+        # Reviewer B3: name the actual extractor that build_extractor will
+        # return rather than claiming "stub-mode default" — under
+        # ``llm.type=openai`` with a populated API key this fallback would
+        # silently dispatch the live extractor across the entire REMIT
+        # corpus, which the operator must consent to explicitly via the
+        # CLI.  The WARNING names the extractor type so the cost surprise
+        # is visible.
+        extractor = build_extractor(cfg.llm)
+        logger.warning(
+            "with_remit assembler: extracted-features parquet missing at {}; "
+            "running {} inline.  For a controlled real-extractor pass run "
+            "`python -m bristol_ml.llm.persistence --cache auto` (with "
+            "explicit `--limit` / Hydra overrides) first, then re-run the "
+            "assembler against the warm cache.",
+            extracted_path,
+            type(extractor).__name__,
+        )
+        extract_and_persist(extractor, remit_df, output_path=extracted_path)
+        extracted_df = load_extracted(extracted_path)
+
+    enriched_remit = _override_affected_mw(remit_df, extracted_df)
+
+    remit_retrieved_stamp = (
+        pd.Timestamp(remit_df["retrieved_at_utc"].iloc[0]).tz_convert("UTC")
+        if "retrieved_at_utc" in remit_df.columns and len(remit_df)
+        else pd.Timestamp.now("UTC").floor("us")
+    )
+
+    # --- Hourly REMIT features over the calendar frame's index -----------
+    hourly_index = pd.DatetimeIndex(calendar_frame["timestamp_utc"]).tz_convert("UTC")
+    remit_features = derive_remit_features(
+        enriched_remit,
+        hourly_index,
+        forward_lookahead_hours=fset.forward_lookahead_hours,
+    )
+
+    # --- Concatenate REMIT columns onto the calendar frame ---------------
+    # ``derive_remit_features`` returns its own ``timestamp_utc`` aligned
+    # 1:1 with the input index; merge on that column so a future change
+    # in either side's row count is caught loudly by the validate kwarg.
+    merged = calendar_frame.merge(
+        remit_features, on="timestamp_utc", how="inner", validate="one_to_one"
+    )
+    merged["remit_retrieved_at_utc"] = remit_retrieved_stamp
+
+    # --- Project to WITH_REMIT_OUTPUT_SCHEMA column order + write --------
+    column_order = [field.name for field in WITH_REMIT_OUTPUT_SCHEMA]
+    missing = [c for c in column_order if c not in merged.columns]
+    if missing:
+        raise ValueError(
+            f"assemble_with_remit: derived frame missing expected columns {missing}. "
+            "derive_remit_features / derive_calendar contract has regressed."
+        )
+    result = merged[column_order].copy()
+
+    table = pa.Table.from_pandas(result, preserve_index=False).cast(
+        WITH_REMIT_OUTPUT_SCHEMA, safe=True
+    )
+    out_path = _cache_path(fset)
+    _atomic_write(table, out_path)
+    logger.info(
+        "Feature-assembler (with_remit) cache written: {} rows -> {}",
+        len(result),
+        out_path,
+    )
+    return out_path
+
+
+def _resolve_extracted_path(fset: object, default_path: Path) -> Path:
+    """Resolve the persisted-extractor parquet path against the with_remit config.
+
+    Priority: explicit ``WithRemitFeatureConfig.extracted_parquet_filename``
+    (placed under the standard ``data/processed/`` directory) > the
+    project default (``data/processed/remit_extracted.parquet``).
+    """
+    override = getattr(fset, "extracted_parquet_filename", None)
+    if override:
+        return (default_path.parent / override).resolve()
+    return default_path.resolve()
+
+
+def _override_affected_mw(remit_df: pd.DataFrame, extracted_df: pd.DataFrame) -> pd.DataFrame:
+    """Prefer the LLM-extracted ``affected_capacity_mw`` over raw ``affected_mw``.
+
+    Joins ``remit_df`` with ``extracted_df`` on ``(mrid, revision_number)``
+    and overwrites ``affected_mw`` with the extracted capacity where the
+    extractor returned a non-null value.  Where the extractor returned
+    ``None`` the raw ``affected_mw`` is preserved unchanged.
+
+    The join is left so that every REMIT row survives even when the
+    extractor parquet is missing rows for a given ``(mrid, revision)``
+    pair (which can happen if extraction was performed against a
+    smaller subset of the corpus via ``--limit``).
+    """
+    join_cols = ["mrid", "revision_number"]
+    enriched = remit_df.merge(
+        extracted_df[[*join_cols, "affected_capacity_mw"]],
+        on=join_cols,
+        how="left",
+        # Reviewer B2: refuse a corrupted extracted parquet that would fan
+        # out REMIT rows by duplicating join keys.  ``many_to_one`` asserts
+        # the right side is unique on ``(mrid, revision_number)`` — a
+        # property guaranteed by ``EXTRACTED_OUTPUT_SCHEMA``'s primary key
+        # but not enforced by parquet itself.
+        validate="many_to_one",
+    )
+    enriched["affected_mw"] = enriched["affected_capacity_mw"].combine_first(
+        enriched["affected_mw"]
+    )
+    enriched = enriched.drop(columns=["affected_capacity_mw"])
+    return enriched
 
 
 # ---------------------------------------------------------------------------

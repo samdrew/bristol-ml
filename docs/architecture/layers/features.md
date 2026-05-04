@@ -1,8 +1,8 @@
 # Features — layer architecture
 
-- **Status:** Stable — realised by Stage 2 (national weather aggregate, shipped), Stage 3 (feature assembler, shipped), and Stage 5 (calendar features, shipped). Revisit at Stage 16 (REMIT features), which extends the layer in a way that will stress the forward-fill-cap / multi-horizon conventions.
+- **Status:** Stable — realised by Stage 2 (national weather aggregate), Stage 3 (feature assembler, `weather_only`), Stage 5 (calendar features, `weather_calendar`), and Stage 16 (REMIT features, `with_remit`).
 - **Canonical overview:** [`DESIGN.md` §3.2](../../intent/DESIGN.md#32-layer-responsibilities) (features paragraph).
-- **Concrete instances:** Stage 2 retro [`lld/stages/02-weather-ingestion.md`](../../lld/stages/02-weather-ingestion.md) (the `national_aggregate` function); Stage 3 retro [`lld/stages/03-feature-assembler.md`](../../lld/stages/03-feature-assembler.md) (the `weather_only` assembler); Stage 5 retro [`lld/stages/05-calendar-features.md`](../../lld/stages/05-calendar-features.md) (the `weather_calendar` extension plus `features/calendar.py`).
+- **Concrete instances:** Stage 2 retro [`lld/stages/02-weather-ingestion.md`](../../lld/stages/02-weather-ingestion.md) (the `national_aggregate` function); Stage 3 retro [`lld/stages/03-feature-assembler.md`](../../lld/stages/03-feature-assembler.md) (the `weather_only` assembler); Stage 5 retro [`lld/stages/05-calendar-features.md`](../../lld/stages/05-calendar-features.md) (the `weather_calendar` extension plus `features/calendar.py`); Stage 16 retro [`lld/stages/16-model-with-remit.md`](../../lld/stages/16-model-with-remit.md) (the `with_remit` extension plus `features/remit.py` and `llm/persistence.py`).
 - **Related principles:** §2.1.1 (standalone), §2.1.2 (typed narrow interfaces), §2.1.4 (config outside code), §2.1.6 (provenance), §2.1.7 (tests at boundaries), §2.1.8 (notebook thinness).
 
 ---
@@ -123,16 +123,91 @@ Each of these is swappable without touching downstream code. The `OUTPUT_SCHEMA`
 | `features/assembler.py` | `weather_calendar` | 5 | Shipped | Extends the same module with a second schema (`CALENDAR_OUTPUT_SCHEMA`, 55 cols) plus `assemble_calendar` / `load_calendar`; with-without comparison is a `features=weather_calendar` Hydra group-swap. |
 | `ingestion/holidays.py` (ingestion-layer companion) | — | 5 | Shipped | gov.uk bank-holidays feed; consumed by `features/calendar.py` but persisted under `ingestion/`. |
 | `features/lags.py` (tentative name) | — (helper) | 7 | Planning | Lag-feature derivation for SARIMAX and beyond. |
-| `features/remit.py` (tentative name) | `with_remit` | 16 | Planning | REMIT bi-temporal features collapsed to the hourly grid. |
+| `features/remit.py` | `with_remit` | 16 | Shipped | REMIT bi-temporal features collapsed to the hourly grid. Three REMIT columns + one provenance scalar appended to the `weather_calendar` prefix. |
+
+## The `with_remit` feature set (Stage 16)
+
+### Schema: 59 columns
+
+`WITH_REMIT_OUTPUT_SCHEMA` (`pa.Schema` constant in `features/assembler.py`) is
+composed as:
+
+| Positions | Source | Count | Notes |
+|-----------|--------|-------|-------|
+| 0..54 | `CALENDAR_OUTPUT_SCHEMA` | 55 | Exact Stage 5 weather+calendar prefix; column-name selection backwards-compatible. |
+| 55 | `remit_unavail_mw_total` | 1 | `float32`; sum of `affected_mw` for REMIT events active at `t` under the bi-temporal as-of rule. |
+| 56 | `remit_active_unplanned_count` | 1 | `int32`; count of active events whose `cause` matches `"Unplanned"` at `t`. |
+| 57 | `remit_unavail_mw_next_24h` | 1 | `float32`; sum of `affected_mw` for events known at `t` whose `effective_from` falls in `[t, t+24h)`. |
+| 58 | `remit_retrieved_at_utc` | 1 | `timestamp[us, tz=UTC]`; fourth provenance scalar. |
+
+The three REMIT columns are defined in `REMIT_VARIABLE_COLUMNS` (owned by
+`features/remit.py`; re-exported from `features/assembler.py`), following the
+same single-source-of-truth convention as `CALENDAR_VARIABLE_COLUMNS`.
+
+### Bi-temporal correctness
+
+`derive_remit_features` is *structurally* correct: each revision contributes
+only over the open half-interval during which it is the latest visible revision
+of its `mrid` **and** active per its event window. No row of the result reflects
+information published after that row's `timestamp_utc` (NFR-1; intent AC-1).
+Bypassing `derive_remit_features` (e.g. joining the raw REMIT log directly onto
+the grid) exposes the caller to leakage. The module docstring states this
+constraint explicitly.
+
+**Withdrawn-truncates-prior.** A `Withdrawn` revision does not contribute to
+any signal but does truncate the prior revision's transaction-time validity.
+The `tx_valid_to` shift is applied over the full sorted log including `Withdrawn`
+rows; those rows are dropped only at the end of `_per_mrid_validity`. This is a
+non-obvious ordering constraint that is easy to break; any refactor must preserve
+it.
+
+### Forward-looking column and `include_forward_lookahead`
+
+`remit_unavail_mw_next_24h` is **always present in the parquet** (schema
+stability). The `WithRemitFeatureConfig.include_forward_lookahead` flag
+(`conf/features/with_remit.yaml`) governs whether the model's `feature_columns`
+list reads the column. Stage 16 produces two registered runs using the same
+parquet: one with `include_forward_lookahead=true` (full 3-column REMIT signal)
+and one with `include_forward_lookahead=false` (2-column current-state-only
+signal). The four-row ablation table in `notebooks/04_remit_ablation.ipynb`
+isolates the marginal contribution of each column.
+
+### Assembler pipeline
+
+`assemble_with_remit(cfg, *, cache)` — Stage 16 orchestrator. Composes:
+
+1. NESO fetch + hourly resample.
+2. Weather fetch + national aggregate.
+3. `build(...)` → weather-only frame.
+4. Holidays fetch + `derive_calendar(...)` → calendar frame.
+5. REMIT fetch + load extractor parquet (auto-runs `extract_and_persist` inline
+   if the parquet is absent, logging a WARNING; see `features/CLAUDE.md`
+   §"Stage 16 notes").
+6. `derive_remit_features(...)` → REMIT feature frame.
+7. Merge calendar + REMIT frames on `timestamp_utc` (inner, `validate="one_to_one"`).
+8. Append `remit_retrieved_at_utc` provenance scalar.
+9. Cast to `WITH_REMIT_OUTPUT_SCHEMA`; atomic write.
+
+The extractor parquet (`data/processed/remit_extracted.parquet`) flows from
+`bristol_ml.llm.persistence` (Stage 16 plan A5) into the assembler. This is the
+project's first cross-layer data dependency at training time: the `llm` layer
+writes it once; the features layer reads it on every retraining run.
+
+**CLI note.** `python -m bristol_ml.features.assembler` dispatches only on
+`assemble()` (weather-only). Call `assemble_with_remit` in-process after
+`load_config(overrides=["features=with_remit"])`.
 
 ## Open questions
 
-- **Feature-set naming convention.** `weather_only` / `weather_calendar` / `with_remit` follow no explicit rule beyond "describe the columns". A prefix / suffix convention would prevent drift when Stages 16+ add more sets. Decide if / when the third set lands.
+- **Feature-set naming convention.** `weather_only` / `weather_calendar` /
+  `with_remit` follow no explicit rule beyond "describe the columns". A prefix /
+  suffix convention would prevent drift when future stages add more sets.
 - **~~Feature-table schema contract for Stage 5~~** — Resolved at Stage 5. The assembler exposes two `pa.Schema` constants (`OUTPUT_SCHEMA`, `CALENDAR_OUTPUT_SCHEMA`); the calendar schema is an exact prefix-extension of the weather-only schema. Each feature set carries its own `load` / `load_calendar` schema-validating reader. See [`lld/stages/05-calendar-features.md`](../../lld/stages/05-calendar-features.md) §"Design choices made here".
+- **~~Feature-table schema contract for Stage 16~~** — Resolved at Stage 16. `WITH_REMIT_OUTPUT_SCHEMA` (59 cols) is an exact prefix-extension of `CALENDAR_OUTPUT_SCHEMA` (55 cols); `load_with_remit` schema-validates it. See the `with_remit` feature set section above and [`lld/stages/16-model-with-remit.md`](../../lld/stages/16-model-with-remit.md).
 - **~~Population-weighting home~~** — Resolved at Stage 5. Stays in `features/weather.py::national_aggregate` (Stage 2's placement); `features/calendar.py` reads aggregated hourly weather, so no Stage 5 reorganisation of the weighting function was needed. The calendar set inherits the aggregate unchanged via the shared `build()` prefix.
 - **Lag-feature placement.** The line between "features/lags.py computes a lag" and "a model's own preprocessing step adds the lag" is not yet drawn — SARIMAX wants integrated lags, linear wants them as columns, neural may want either. Revisit at Stage 7 when the first lag-hungry model lands.
 - **Multi-horizon feature tables.** Every feature row keys on a single `timestamp_utc`. Day-ahead-only forecasting is fine; week-ahead would either need a horizon column or a separate feature set per horizon. Deferred until a week-ahead model is actually in scope.
-- **Feature-table partitioning.** Flat single-file parquet will cross GB when REMIT arrives at Stage 16. `pyarrow.dataset.write_dataset` with year partitioning is the natural move; retrofittable without changing the public interface.
+- **Feature-table partitioning.** The `with_remit` parquet is still a flat single file. If future stages grow the table past a comfortable single-file size, `pyarrow.dataset.write_dataset` with year partitioning is retrofittable without changing the public interface.
 - **Pandera introduction.** Considered and explicitly rejected at Stage 3 (decision D2) — pyarrow `OUTPUT_SCHEMA` is idiomatic, dependency-free, and sufficient for the invariants. Revisit only if a feature set needs cross-column invariants (e.g. `timestamp_utc.is_monotonic_increasing` declared as data) that pyarrow cannot express.
 - **Lead/lag asymmetry in the forward-fill cap.** Weather gaps are forward-filled only — backward-fill is not applied. On the first few hours after a cold start this may drop rows that a backward-fill would keep. Acceptable at Stage 3's assumption of years-deep history; revisit if a freshly-primed cache becomes a common demo scenario.
 

@@ -107,6 +107,88 @@ class Extractor(Protocol):
 Adding a method is a Stage 15/16 contract change — discuss before
 doing it. The two-method shape is the AC-1 cap (intent line 32).
 
+## Persistence (Stage 16)
+
+New module `bristol_ml.llm.persistence`. Adds the on-disk persistence step that
+Stage 14's extractor was missing (codebase hazard H1 — `Extractor.extract_batch`
+returns `list[ExtractionResult]` in memory with no on-disk persistence layer).
+Stage 16 needs the extractor output as a stable artefact that the feature
+assembler reads cheaply on every retraining run.
+
+### `EXTRACTED_OUTPUT_SCHEMA` (11 columns)
+
+`pyarrow.Schema` constant. Column order is contractual; the assembler joins on
+`(mrid, revision_number)` and reads `affected_capacity_mw`, `event_type`,
+`fuel_type`, and `confidence` by name.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `mrid` | `string` | Primary key half (mirrors Stage 13 REMIT log). |
+| `revision_number` | `int32` | Primary key half. |
+| `event_type` | `string` | LLM-canonicalised; non-nullable. |
+| `fuel_type` | `string` | LLM-canonicalised; non-nullable. |
+| `affected_capacity_mw` | `float64` | Nullable — `None` when unrecoverable. |
+| `effective_from` | `timestamp[us, tz=UTC]` | Mirrored from input or LLM-extracted. |
+| `effective_to` | `timestamp[us, tz=UTC]` | Nullable for open-ended events. |
+| `confidence` | `float32` | Documented sentinel (see `ExtractionResult.confidence`). |
+| `prompt_hash` | `string` | Nullable — 12-char SHA-256 prefix; `None` for stub. |
+| `model_id` | `string` | Nullable — `None` for stub. |
+| `extracted_at_utc` | `timestamp[us, tz=UTC]` | Provenance scalar (constant per run). |
+
+### `extract_and_persist(extractor, remit_df, *, output_path) -> Path`
+
+Runs `extractor.extract_batch(events)` over the entire `remit_df`, joins the
+results back onto `(mrid, revision_number)`, stamps `extracted_at_utc`, casts
+to `EXTRACTED_OUTPUT_SCHEMA`, and writes via
+`ingestion._common._atomic_write` (idempotent — partial writes leave the
+previous file intact, NFR-3). Returns the absolute output path. Raises
+`ValueError` if `remit_df` is missing required columns; raises `RuntimeError` if
+`extract_batch` returns a different number of results than inputs (Protocol
+contract violation).
+
+### `load_extracted(path) -> pd.DataFrame`
+
+Schema-validated read for `EXTRACTED_OUTPUT_SCHEMA`. Rejects both missing and
+extra columns (exact schema contract). The function's discipline mirrors
+`features.assembler.load`.
+
+### CLI: `python -m bristol_ml.llm.persistence`
+
+Ties `remit.fetch + remit.load -> build_extractor(cfg.llm) ->
+extract_and_persist` and prints the output path.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cache {auto,refresh,offline}` | `offline` | Cache policy for the REMIT ingester. |
+| `--limit N` | `0` (no cap) | Cap the number of REMIT rows fed to the extractor. Use a small value to dry-run the live path. |
+| `--output PATH` | `data/processed/remit_extracted.parquet` | Override the output path. |
+
+Hydra overrides follow as trailing positional arguments (e.g.
+`llm.type=openai llm.model_name=gpt-4o-mini`). The group `+llm=extractor` is
+composed automatically by the CLI so callers do not need to add it manually.
+
+**Stub-default.** `BRISTOL_ML_LLM_STUB=1` (the CI default) routes all
+extraction through `StubExtractor`; the output is a valid parquet with
+stub-quality values (gold-set hits at `confidence=1.0`; misses at
+`confidence=0.0`). This keeps CI green without incurring OpenAI costs.
+
+### Architectural reason (plan A5)
+
+Stage 14's extractor returns in-memory results only, which was intentional for
+the Stage 14 scope. Stage 16 required a stable on-disk artefact that the feature
+assembler reads without re-running extraction on every training call. Rather than
+adding persistence directly to `extractor.py`, the separate module follows the
+project's ingestion-style pattern (codebase §1: fetch-then-load; `_atomic_write`
+for idempotency) and keeps the features layer free of LLM-layer imports beyond
+`load_extracted` (plan OQ-5).
+
+The assembler's auto-run fallback (when the parquet is absent) calls
+`extract_and_persist` inline under stub mode to keep CI green; the human running
+the real-extractor path executes `python -m bristol_ml.llm.persistence`
+beforehand, then lets the assembler read the warm cache.
+
 ## Quick recipes
 
 ### Run the stub against a single event (offline)
@@ -335,9 +417,12 @@ uv run pytest tests/unit/llm/ tests/integration/llm/ \
 
 - Layer doc — [`docs/architecture/layers/llm.md`](../../../docs/architecture/layers/llm.md).
 - Stage 14 retro — [`docs/lld/stages/14-llm-extractor.md`](../../../docs/lld/stages/14-llm-extractor.md).
+- Stage 16 retro — [`docs/lld/stages/16-model-with-remit.md`](../../../docs/lld/stages/16-model-with-remit.md).
 - Intent — [`docs/intent/14-llm-extractor.md`](../../../docs/intent/14-llm-extractor.md).
 - Plan — [`docs/plans/completed/14-llm-extractor.md`](../../../docs/plans/completed/14-llm-extractor.md).
 - ADR-0003 — Protocol-over-ABC for swappable interfaces.
 - Sibling boundary — `src/bristol_ml/ingestion/CLAUDE.md` (REMIT row;
   `OUTPUT_SCHEMA` is the upstream `RemitEvent` mirrors).
+- Downstream consumer — `src/bristol_ml/features/CLAUDE.md` §"Stage 16 notes"
+  (how the persistence parquet flows into the assembler).
 - README §"Configuring an OpenAI API key" — operator-facing setup.

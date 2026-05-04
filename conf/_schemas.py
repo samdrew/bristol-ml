@@ -316,13 +316,61 @@ class FeatureSetConfig(BaseModel):
     forward_fill_hours: int = Field(default=3, ge=0)
 
 
+class WithRemitFeatureConfig(FeatureSetConfig):
+    """Configuration for the Stage 16 ``with_remit`` feature set.
+
+    Extends :class:`FeatureSetConfig` with three knobs that specifically
+    govern the REMIT-derived columns appended to the weather+calendar
+    prefix.  Stage 16 plan §1.B D6/D7 + NFR-5: the aggregation level,
+    the forward-looking window width, and the inclusion of the
+    forward-looking column itself are YAML fields, never code constants.
+
+    Field semantics:
+
+    - ``forward_lookahead_hours``: width of the "known unavailability over
+      the next N hours" window for ``remit_unavail_mw_next_24h``.  Default
+      24 — the day-ahead forecasting horizon (intent §"Forward-looking
+      features"; domain research §2 — TFT/AutoGluon "known covariates").
+      ``0`` is permitted but degenerate; the corresponding column is then
+      always zero.
+    - ``include_forward_lookahead``: whether to emit the forward-looking
+      column at all.  ``True`` (the default) ships the three-column
+      Stage 16 schema (`remit_unavail_mw_total`,
+      ``remit_active_unplanned_count``, ``remit_unavail_mw_next_24h``);
+      ``False`` ships the two-column current-state-only variant used by
+      the with/without comparison registered run (plan A2 / A4).  Both
+      registered runs in §6 T6 share this config with only this field
+      flipped — the rest of the schema is identical.
+    - ``extracted_parquet_filename``: filename (within
+      :class:`LlmExtractorConfig.persistence_dir`) of the persisted
+      :class:`ExtractionResult` parquet (plan A5 / T3).  ``None`` (the
+      default) means "Stage 16 derives the path from the configured
+      persistence directory and a fixed filename"; an explicit value
+      pins it (e.g. for unit tests using a temp directory).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Plan A2: the forward-looking window width is configurable.  Default
+    # 24 = the day-ahead horizon.
+    forward_lookahead_hours: int = Field(default=24, ge=0, le=168)
+    # Plan A2/A4: distinguishes the two T6 registered runs.  Both runs use
+    # the same WithRemitFeatureConfig with only this field differing.
+    include_forward_lookahead: bool = True
+    # Plan A5/T3: explicit override for the extracted-features parquet
+    # filename.  ``None`` resolves at orchestrator time to a project
+    # default under ``data/processed/``.
+    extracted_parquet_filename: str | None = None
+
+
 class FeaturesGroup(BaseModel):
     """Container for named feature-set configs.
 
     Each field is optional so stage-0/1/2 configs (no features section) still
     validate.  Stage 5 adds ``weather_calendar`` alongside ``weather_only``;
-    per plan D-10 exactly one is populated per run — the ``features=`` Hydra
-    group override (wired in ``conf/config.yaml`` defaults as ``- features:
+    Stage 16 adds ``with_remit``.  Per plan D-10 (Stage 5) / Stage 16 D6
+    exactly one is populated per run — the ``features=`` Hydra group
+    override (wired in ``conf/config.yaml`` defaults as ``- features:
     weather_only``) selects which file loads, and ``bristol_ml.train.
     _resolve_feature_set`` enforces the mutual-exclusivity invariant at
     runtime.
@@ -332,6 +380,11 @@ class FeaturesGroup(BaseModel):
 
     weather_only: FeatureSetConfig | None = None
     weather_calendar: FeatureSetConfig | None = None
+    # Stage 16 plan D6: subclass field carrying the REMIT-specific knobs.
+    # The ``with_remit`` feature set is a strict superset of
+    # ``weather_calendar`` columns plus the REMIT block (see
+    # ``WITH_REMIT_OUTPUT_SCHEMA`` in ``features/assembler.py``).
+    with_remit: WithRemitFeatureConfig | None = None
 
 
 class SplitterConfig(BaseModel):
