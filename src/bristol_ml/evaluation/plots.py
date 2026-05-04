@@ -815,18 +815,48 @@ def benchmark_holdout_bar(
     *,
     holdout_start: pd.Timestamp,
     holdout_end: pd.Timestamp,
+    fold_len_hours: int | None = 168,
     ax: matplotlib.axes.Axes | None = None,
     title: str = "Holdout-window benchmark (NESO three-way comparison)",
 ) -> matplotlib.figure.Figure:
-    """Fixed-window NESO three-way benchmark bar chart (Stage 6 D10).
+    """Holdout-window NESO three-way benchmark bar chart (Stage 6 D10).
 
     Wires up the latent ``NesoBenchmarkConfig.holdout_start/_end`` fields
-    added at Stage 4 by building a single-fold
-    :class:`~conf._schemas.SplitterConfig` that covers ``[holdout_start,
-    holdout_end]`` and delegating to
-    :func:`bristol_ml.evaluation.benchmarks.compare_on_holdout` for the
-    scoring.  The helper then renders one grouped bar per metric, with
-    ``len(candidates) + 1`` bars per group (the ``+1`` is the NESO row).
+    added at Stage 4 by building a rolling-origin
+    :class:`~conf._schemas.SplitterConfig` that walks the holdout in
+    fixed-width chunks and delegating to
+    :func:`bristol_ml.evaluation.benchmarks.compare_on_holdout` for
+    the scoring.  The helper then renders one grouped bar per metric,
+    with ``len(candidates) + 1`` bars per group (the ``+1`` is the NESO
+    row).
+
+    Fold-length contract (changed 2026-05-04, "Stage 6 separation" branch):
+
+    Pre-fix the helper used ``test_len = full_holdout_length`` and so
+    produced a single fold spanning the entire holdout.  That worked for
+    statsmodels-style fit-once-then-predict-N-steps models but broke
+    seasonal-naive variants whose ``predict`` looks back a fixed lag
+    (e.g. ``same_hour_last_week`` needs row ``t-168h`` to exist in the
+    training set; for a single fold of length 2 209 only the first 168
+    test rows have such a row).  The default is now **weekly folds**
+    (168 h), which:
+
+    - **Makes seasonal-naive same_hour_last_week work out of the box.**
+      Each weekly test fold's last row's lookback (``t-168h``) lands at
+      the fold's first row, which is in training under
+      ``fixed_window=True``.
+    - Aggregates per-fold metrics by mean inside ``compare_on_holdout``
+      — a more meaningful score than a single 92-day MAE.
+    - Sets ``step == test_len`` so folds tile the holdout without
+      overlap.
+
+    Pass ``fold_len_hours=None`` to recover the pre-fix single-fold
+    behaviour (the splitter's ``test_len`` becomes the full holdout
+    length).  The rolling default is the right choice for any candidate
+    that uses a fixed-lag lookback; the single-fold path is appropriate
+    for callers who specifically want one cross-fold-free score and
+    have verified their candidates can predict ``test_len``-many rows
+    from a single fit.
 
     Parameters
     ----------
@@ -843,6 +873,12 @@ def benchmark_holdout_bar(
         Metric callables (see :mod:`bristol_ml.evaluation.metrics`).
     holdout_start, holdout_end:
         Inclusive bounds of the holdout window (UTC-aware timestamps).
+    fold_len_hours:
+        Test-fold width in hours.  Default ``168`` (weekly folds).
+        ``None`` selects the legacy single-fold behaviour where
+        ``test_len`` equals the full holdout span.  Must be positive
+        when not ``None``; clamped to the holdout span if it would
+        exceed it.
     ax:
         Optional existing axes.
     title:
@@ -857,12 +893,18 @@ def benchmark_holdout_bar(
     ------
     ValueError
         If ``candidates`` is empty; if the holdout window is empty or
-        out of bounds; if ``metrics`` is empty.
+        out of bounds; if ``metrics`` is empty; if ``fold_len_hours``
+        is set and not positive.
     """
     if not candidates:
         raise ValueError("benchmark_holdout_bar: 'candidates' is empty.")
     if not metrics:
         raise ValueError("benchmark_holdout_bar: 'metrics' is empty.")
+    if fold_len_hours is not None and fold_len_hours <= 0:
+        raise ValueError(
+            f"benchmark_holdout_bar: fold_len_hours must be positive or None; "
+            f"got {fold_len_hours!r}."
+        )
 
     # Import lazily to avoid a circular import between plots <-> benchmarks.
     from bristol_ml.evaluation.benchmarks import compare_on_holdout
@@ -885,8 +927,8 @@ def benchmark_holdout_bar(
     train_mask = df.index < start_ts
     test_mask = (df.index >= start_ts) & (df.index <= end_ts)
     min_train = int(train_mask.sum())
-    test_len = int(test_mask.sum())
-    if test_len == 0:
+    holdout_len = int(test_mask.sum())
+    if holdout_len == 0:
         raise ValueError(
             f"benchmark_holdout_bar: holdout window [{start_ts}, {end_ts}] "
             f"selects zero rows from features.index."
@@ -896,6 +938,15 @@ def benchmark_holdout_bar(
             f"benchmark_holdout_bar: no rows precede holdout_start={start_ts}; "
             f"a fixed-window splitter needs min_train_periods >= 1."
         )
+    # Default: walk the holdout in weekly chunks so seasonal-naive models
+    # (and any other fixed-lag-lookback predictor) work without the caller
+    # having to know the lag.  ``None`` opts back into the single-fold
+    # legacy behaviour.  Clamp to ``holdout_len`` so a caller passing a
+    # larger value than the window simply gets a single fold.
+    if fold_len_hours is None:
+        test_len = holdout_len
+    else:
+        test_len = min(int(fold_len_hours), holdout_len)
     splitter_cfg = SplitterConfig(
         min_train_periods=min_train,
         test_len=test_len,
