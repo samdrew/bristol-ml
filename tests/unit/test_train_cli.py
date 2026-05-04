@@ -538,8 +538,8 @@ def test_resolve_feature_set_with_remit_includes_forward(tmp_path: Path) -> None
         f"all REMIT cols; got {col_names!r}"
     )
     assert "remit_unavail_mw_next_24h" in col_names
-    assert len(col_names) == 52, (
-        f"with_remit (forward enabled) must have 52 columns; got {len(col_names)}"
+    assert len(col_names) == 53, (
+        f"with_remit (forward enabled) must have 53 columns; got {len(col_names)}"
     )
 
 
@@ -584,8 +584,8 @@ def test_resolve_feature_set_with_remit_excludes_forward(tmp_path: Path) -> None
     )
     assert "remit_unavail_mw_total" in col_names
     assert "remit_active_unplanned_count" in col_names
-    assert len(col_names) == 51, (
-        f"with_remit (forward disabled) must have 51 columns (52 - 1); got {len(col_names)}"
+    assert len(col_names) == 52, (
+        f"with_remit (forward disabled) must have 52 columns (53 - 1); got {len(col_names)}"
     )
 
 
