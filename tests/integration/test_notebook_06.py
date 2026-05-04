@@ -131,17 +131,16 @@ def _sweep_stale_pytest_exec_notebooks_06() -> None:
         stale.unlink(missing_ok=True)
 
 
-@pytest.mark.parametrize("expected_count", [9])
+@pytest.mark.parametrize("expected_count", [10])
 def test_notebook_06_has_expected_cell_count(expected_count: int) -> None:
     """Sanity check on the source notebook's cell shape.
 
-    Builder produces nine cells: title-markdown, seven executable
-    (bootstrap, load, harness, diagnostics, overlay, band, benchmark),
-    and a closing discussion-markdown.  This test catches accidental
-    cell drift away from the documented structure (the user-facing
-    requirement is "include both OLS models in 48-hour forecast" /
-    "include both models in uncertainty forecast" / "fix
-    benchmark_holdout_bar" — a structural change should be deliberate).
+    Builder produces ten cells: a title-markdown, seven executable
+    cells (bootstrap, load, harness, diagnostics, 48-hour overlay,
+    combined uncertainty band, holdout benchmark), a holdout-window
+    explainer markdown immediately preceding the benchmark cell, and
+    a closing discussion-markdown.  This test catches accidental cell
+    drift away from the documented structure.
     """
     notebook = json.loads(NOTEBOOK_PATH.read_text())
     assert len(notebook["cells"]) == expected_count, (

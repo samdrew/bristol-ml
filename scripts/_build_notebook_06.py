@@ -420,29 +420,72 @@ else:
 # ---------------------------------------------------------------------------
 
 cell_6 = code(
-    """# T6 Cell 6 — q10-q90 empirical uncertainty band, one stacked panel
-# per OLS model so the calendar uplift on the band width is visible
-# at a glance.  The band is non-parametric: per-horizon quantiles of
-# the rolling-origin per-fold errors (Stage 6 D8).  After the
-# 2026-05-04 sign-inversion fix the band tracks where actual is
-# likely to land — when the band is narrow the model is confident at
-# that hour-of-day; when wide it is hedging.
+    """# T6 Cell 6 — q10-q90 empirical uncertainty band, both OLS variants
+# overlaid on a single 48-hour axis so the calendar uplift on the band
+# width is visible by eye comparison.  The band is non-parametric:
+# per-horizon quantiles of the rolling-origin per-fold errors
+# (Stage 6 D8).  After the 2026-05-04 sign-inversion fix the band
+# tracks where actual is likely to land — when the band is narrow the
+# model is confident at that hour-of-day; when wide it is hedging.
+#
+# Both variants are drawn in distinct Okabe-Ito colours; the actual
+# series renders once (black) so it is unambiguous which line is the
+# observation versus the forecast.
 present = [name for name in ("weather_only", "weather_calendar") if name in results]
 if window is not None and present:
-    fig, axes = plt.subplots(len(present), 1, figsize=(14, 5 * len(present)), sharex=True)
-    if len(present) == 1:
-        axes = [axes]
-    for ax, name in zip(axes, present, strict=True):
-        bundle = results[name]
-        feats = bundle["features"]
-        win = _pick_window(bundle)
-        plots.forecast_overlay_with_band(
-            actual=win["nd_mw"],
-            point_prediction=bundle["linear"].predict(win),
-            per_fold_errors=bundle["per_fold_errors"],
-            title=f"q10-q90 empirical uncertainty band — linear ({name})",
-            ax=ax,
+    # Choose a single 48-hour window — the calendar frame is the canonical
+    # demo grid, so use it whenever present.  Both linear models can
+    # ``predict`` on it because LinearModel.predict slices its input by
+    # the model's own ``feature_columns`` field.
+    canonical_for_band = results.get("weather_calendar") or results.get("weather_only")
+    band_window = _pick_window(canonical_for_band)
+
+    def _band_edges(per_fold_errors, point_prediction, *, quantiles=(0.1, 0.9)):
+        \"\"\"Mirror plots.forecast_overlay_with_band's band math (sign-corrected).
+        Returns (lower, upper) numpy arrays aligned to ``point_prediction``.
+        \"\"\"
+        q_lo_val, q_hi_val = quantiles
+        band = (
+            per_fold_errors.groupby("horizon_h")["error"]
+            .quantile([q_lo_val, q_hi_val])
+            .unstack()
         )
+        n = min(len(point_prediction), band.shape[0])
+        q_lo = band[q_lo_val].iloc[:n].to_numpy(dtype=np.float64)
+        q_hi = band[q_hi_val].iloc[:n].to_numpy(dtype=np.float64)
+        point_arr = np.asarray(point_prediction.values, dtype=np.float64)[:n]
+        return point_arr + q_lo, point_arr + q_hi
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    local_idx = band_window.index.tz_convert("Europe/London")
+    actual_arr = band_window["nd_mw"].to_numpy(dtype=np.float64)
+    ax.plot(local_idx, actual_arr, linewidth=1.8, color=plots.OKABE_ITO[0], label="Actual")
+
+    band_colours = {"weather_only": plots.OKABE_ITO[1], "weather_calendar": plots.OKABE_ITO[3]}
+    for name in present:
+        bundle = results[name]
+        point = bundle["linear"].predict(band_window)
+        lower, upper = _band_edges(bundle["per_fold_errors"], point)
+        n = len(lower)
+        colour = band_colours[name]
+        ax.fill_between(
+            local_idx[:n],
+            lower,
+            upper,
+            alpha=0.20,
+            color=colour,
+            label=f"q10-q90 ({name})",
+        )
+        ax.plot(local_idx[:n], point.to_numpy(dtype=np.float64)[:n],
+                linewidth=1.4, color=colour, label=f"Forecast ({name})")
+
+    import matplotlib.dates as _mdates  # local alias to avoid shadowing
+    ax.xaxis.set_major_formatter(_mdates.DateFormatter("%d %b\\n%H:%M"))
+    ax.set_xlabel("Time (Europe/London)")
+    ax.set_ylabel("Demand (MW)")
+    ax.set_title("48-hour forecast with q10-q90 empirical uncertainty band — both OLS variants")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right")
     plt.tight_layout()
     plt.show()
 else:
@@ -452,46 +495,193 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Cell 7 — benchmark_holdout_bar with both OLS variants vs NESO
+# Cell 7 — markdown explaining the holdout window
+# ---------------------------------------------------------------------------
+
+cell_7_md = md(
+    """## Holdout-window benchmark — what is "holdout"?
+
+The **holdout window** is a fixed future interval reserved by
+`NesoBenchmarkConfig.holdout_start` / `holdout_end` (set in
+`conf/evaluation/benchmark.yaml`) that **no model is allowed to fit
+on**.  It defines a single shared yardstick for cross-model
+comparison: every candidate fits on the data preceding the holdout,
+predicts inside the holdout, and is scored on the same evaluation
+target.  The NESO day-ahead forecast is also clipped to this window
+so the three-way comparison (naive / OLS / NESO) is on the same
+hourly grid.
+
+The next cell rolls **weekly folds within the holdout** — for each
+fold, the training set is the data preceding the fold's test week
+(sliding window, fixed width) and the test set is the next 168
+hourly rows.  The default fold length matches the seasonal-naive
+lookback so `same_hour_last_week` works without splitter twiddling
+(see the 2026-05-04 `benchmark_holdout_bar` fold-length fix).
+Per-fold metrics are averaged across folds; the bars below are those
+cross-fold means.
+
+Two side-by-side panels split the metrics by **scale** so they stay
+visually comparable:
+
+- **Left panel — MW-scale metrics** (MAE, RMSE) in megawatts.
+- **Right panel — fraction-scale metrics** (MAPE, WAPE) as decimal
+  fractions, e.g. `0.05` = 5 %.
+
+A combined single-panel chart would render the fraction metrics as
+flat zero bars next to four-digit MW bars — informationless.  The
+unit-split layout is the project's convention (`_METRIC_UNIT_LABEL`
+in `bristol_ml.evaluation.plots`).
+
+All four candidates appear in **both** panels: naive
+(`same_hour_last_week`), linear OLS on weather only, linear OLS on
+weather + calendar, and the NESO day-ahead.  The calendar uplift is
+the gap between the two linear bars; the residual gap between the
+calendar OLS and NESO is what Stages 7+ chip away at.
+"""
+)
+
+
+# ---------------------------------------------------------------------------
+# Cell 8 — single combined holdout benchmark chart, two panels by metric scale
 # ---------------------------------------------------------------------------
 
 cell_7 = code(
-    """# T6 Cell 7 — Holdout-window benchmark bar charts, one per feature set.
+    """# T6 Cell 7 — Combined holdout benchmark, all four candidates on
+# one chart, split into two panels by metric scale.
 #
-# ``benchmark_holdout_bar`` slices the feature frame by a single shared
-# ``feature_columns`` (the harness's column-set is per-call, not
-# per-candidate), so we call it twice — once on the weather-only
-# frame, once on the weather + calendar frame — and stack the two
-# axes vertically.  The naive baseline appears in both charts so the
-# eye reads the calendar uplift directly across the bar groups.
-#
-# After the 2026-05-04 ``fold_len_hours=168`` default fix, each call
-# rolls the holdout in weekly folds — seasonal-naive
-# ``same_hour_last_week`` works without manual splitter twiddling.
+# Why we don't call ``plots.benchmark_holdout_bar`` directly here:
+# that helper feeds ``compare_on_holdout``, which slices the feature
+# frame once with a single shared ``feature_columns`` argument.  Our
+# two linear models need DIFFERENT feature columns (weather only vs
+# weather + calendar), so the helper cannot evaluate them in one call
+# without one of the models silently dropping its calendar columns.
+# We instead score each feature set's candidates separately, merge
+# the resulting metric tables, and render a single combined chart.
 benchmark_ready = (
     cfg_wonly.evaluation.benchmark is not None
     and neso_df_local is not None
-    and present  # at least one feature set warm
+    and "weather_only" in results
+    and "weather_calendar" in results
 )
 if benchmark_ready:
-    fig, axes = plt.subplots(len(present), 1, figsize=(14, 4.5 * len(present)), sharex=True)
-    if len(present) == 1:
-        axes = [axes]
-    for ax, name in zip(axes, present, strict=True):
-        candidates = {
+    from bristol_ml.evaluation.benchmarks import compare_on_holdout
+    from conf._schemas import SplitterConfig
+
+    holdout_start = cfg_wonly.evaluation.benchmark.holdout_start
+    holdout_end = cfg_wonly.evaluation.benchmark.holdout_end
+
+    # Build the rolling-weekly splitter once and reuse for both feature
+    # sets so every candidate is scored on the same fold sequence
+    # (same train-set widths, same test-week boundaries).  Both feature
+    # frames share an hourly DatetimeIndex aligned by timestamp_utc, so
+    # the same min_train / test_len arithmetic applies.
+    df_wonly_idx = results["weather_only"]["features"]
+    train_mask = df_wonly_idx.index < pd.Timestamp(holdout_start)
+    test_mask = (df_wonly_idx.index >= pd.Timestamp(holdout_start)) & (
+        df_wonly_idx.index <= pd.Timestamp(holdout_end)
+    )
+    min_train = int(train_mask.sum())
+    test_len = min(168, int(test_mask.sum()))  # weekly folds
+    splitter_cfg = SplitterConfig(
+        min_train_periods=min_train,
+        test_len=test_len,
+        step=test_len,
+        gap=0,
+        fixed_window=True,
+    )
+
+    # ``compare_on_holdout`` takes ``feature_columns`` and forwards it
+    # to the harness, which slices the feature frame BEFORE handing it
+    # to model.fit().  Each call must explicitly name the columns the
+    # candidate models actually need — defaulting to None falls back to
+    # the assembler's weather columns and silently strips the calendar
+    # half from the second call.
+    table_wonly = compare_on_holdout(
+        {
             "naive": NaiveModel(NaiveConfig(strategy="same_hour_last_week")),
-            f"linear_{name}": LinearModel(LinearConfig()),
-        }
-        plots.benchmark_holdout_bar(
-            candidates=candidates,
-            neso_forecast=neso_df_local,
-            features=results[name]["features"],
-            metrics=metric_fns,
-            holdout_start=cfg_wonly.evaluation.benchmark.holdout_start,
-            holdout_end=cfg_wonly.evaluation.benchmark.holdout_end,
-            ax=ax,
-            title=f"Holdout benchmark — {name}",
-        )
+            "linear_weather_only": LinearModel(LinearConfig(feature_columns=WEATHER_COLS)),
+        },
+        df_wonly_idx,
+        neso_df_local,
+        splitter_cfg,
+        metric_fns,
+        feature_columns=WEATHER_COLS,
+    )
+    table_wcal = compare_on_holdout(
+        {
+            "linear_weather_calendar": LinearModel(
+                LinearConfig(feature_columns=WEATHER_CALENDAR_COLS)
+            ),
+        },
+        results["weather_calendar"]["features"],
+        neso_df_local,
+        splitter_cfg,
+        metric_fns,
+        feature_columns=WEATHER_CALENDAR_COLS,
+    )
+
+    # Merge: keep ``naive`` and ``neso`` from the weather-only call (NESO
+    # row is identical across the two calls because it is scored on the
+    # same hourly grid); add the calendar-OLS row from the second call.
+    combined = pd.concat(
+        [
+            table_wonly.loc[["naive", "linear_weather_only", "neso"]],
+            table_wcal.loc[["linear_weather_calendar"]],
+        ]
+    )
+    # Re-order so the storyline reads naive -> wonly -> wcal -> neso.
+    combined = combined.reindex(
+        ["naive", "linear_weather_only", "linear_weather_calendar", "neso"]
+    )
+
+    print("Cross-fold mean metrics across the holdout window:")
+    print(combined.to_string(float_format=lambda v: f"{v:.3f}"))
+    print()
+
+    # Two panels by metric scale.  Names map to ``_METRIC_UNIT_LABEL`` in
+    # plots.py — MAE / RMSE in MW; MAPE / WAPE as fractions.
+    mw_metrics = ("mae", "rmse")
+    frac_metrics = ("mape", "wape")
+    fig, (ax_mw, ax_frac) = plt.subplots(1, 2, figsize=(15, 6))
+    candidate_colours = {
+        "naive": plots.OKABE_ITO[7],            # reddish purple
+        "linear_weather_only": plots.OKABE_ITO[1],   # orange
+        "linear_weather_calendar": plots.OKABE_ITO[3],  # bluish green
+        "neso": plots.OKABE_ITO[5],             # blue
+    }
+    for ax, metrics_subset, ylabel in (
+        (ax_mw, mw_metrics, "Score (MW)"),
+        (ax_frac, frac_metrics, "Score (fraction)"),
+    ):
+        n_groups = len(metrics_subset)
+        n_cands = len(combined.index)
+        bar_width = 0.8 / max(n_cands, 1)
+        x_positions = np.arange(n_groups, dtype=np.float64)
+        for offset, candidate in enumerate(combined.index):
+            values = combined.loc[candidate, list(metrics_subset)].to_numpy(dtype=np.float64)
+            ax.bar(
+                x_positions + offset * bar_width,
+                values,
+                width=bar_width,
+                color=candidate_colours[candidate],
+                label=candidate,
+                edgecolor="black",
+                linewidth=0.5,
+            )
+        ax.set_xticks(x_positions + bar_width * (n_cands - 1) / 2.0)
+        ax.set_xticklabels(list(metrics_subset))
+        ax.set_xlabel("Metric")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, axis="y", alpha=0.3)
+    ax_mw.set_title("MW-scale metrics (lower is better)")
+    ax_frac.set_title("Fraction-scale metrics (lower is better)")
+    # Single legend for both panels (the candidate names are identical).
+    ax_mw.legend(title="Candidate", loc="best")
+    fig.suptitle(
+        f"Holdout-window benchmark — {pd.Timestamp(holdout_start).date()} "
+        f"to {pd.Timestamp(holdout_end).date()} (weekly rolling folds)",
+        fontsize=14,
+    )
     plt.tight_layout()
     plt.show()
 else:
@@ -500,10 +690,12 @@ else:
         missing.append("evaluation.benchmark config")
     if neso_df_local is None:
         missing.append("NESO forecast cache")
-    if not present:
-        missing.append("any feature-table cache")
+    if "weather_only" not in results:
+        missing.append("weather_only feature cache")
+    if "weather_calendar" not in results:
+        missing.append("weather_calendar feature cache")
     print(
-        f"Skipping benchmark_holdout_bar — missing: {', '.join(missing)}.\\n"
+        f"Skipping holdout benchmark — missing: {', '.join(missing)}.\\n"
         "Populate via `python -m bristol_ml.ingestion.neso_forecast` and "
         "`python -m bristol_ml.features.assembler features=<set>`."
     )
@@ -515,7 +707,7 @@ else:
 # Cell 8 — closing markdown
 # ---------------------------------------------------------------------------
 
-cell_8 = md(
+cell_closing = md(
     """## What this lets you say to a meetup audience
 
 The metric table at Stage 4 said "calendar features help"; the figures
@@ -531,13 +723,16 @@ above let you point at *where* and *how much*:
   is the lead-in for Stage 7's SARIMAX dual-seasonality treatment.
 - **Hour-of-day x weekday error heatmap** — the weather-only OLS shows
   systematic Sunday-evening over-prediction; the calendar OLS flattens it.
-- **q10-q90 empirical uncertainty band** — narrower for the calendar
-  OLS at weekday afternoons (the regime calendar features inform); the
-  band widens at the same rate for both models on shoulder hours where
-  neither has more information than the other.
-- **Holdout-window benchmark bar** — the calendar OLS row sits between
-  the naive floor and the NESO day-ahead, closing the gap that Stage 4
-  left open.
+- **48-hour overlay + q10-q90 uncertainty band** — both forecasts on a
+  shared axis; the calendar band is visibly tighter on weekday afternoons
+  (the regime calendar features inform) and matches the weather-only
+  band on shoulder hours where neither model has more information.
+- **Holdout-window benchmark (two-panel)** — the calendar OLS row sits
+  between the naive floor and the NESO day-ahead in **both** the
+  MW-scale (MAE / RMSE) and fraction-scale (MAPE / WAPE) panels.  The
+  panels split by metric scale because MAPE / WAPE are decimal
+  fractions (`0.05` = 5 %) and would render as flat zero bars next to
+  four-digit MW bars on a shared y-axis.
 
 The structural lesson: a small, faithful library of diagnostic helpers
 (`plots.residuals_vs_time`, `acf_residuals`, `forecast_overlay_with_band`,
@@ -545,6 +740,15 @@ The structural lesson: a small, faithful library of diagnostic helpers
 narrative.  A future stage extends the same surface — Stage 7 reads
 `acf_residuals` to motivate seasonal differencing; Stage 10 reads the
 hour-of-day heatmap to motivate the NN's input partitioning.
+
+For the holdout-benchmark cell specifically: ``benchmark_holdout_bar``
+is the canonical helper for the **single-feature-set** case; we call
+``compare_on_holdout`` directly here so the two linear models can be
+scored with their respective ``feature_columns`` (the helper's harness
+slices by a single shared column set per call, which would silently
+strip the calendar columns from one of the candidates).  See the
+markdown cell preceding the benchmark for the holdout-window
+definition.
 """
 )
 
@@ -554,7 +758,18 @@ hour-of-day heatmap to motivate the NN's input partitioning.
 # ---------------------------------------------------------------------------
 
 notebook = {
-    "cells": [cell_0, cell_1, cell_2, cell_3, cell_4, cell_5, cell_6, cell_7, cell_8],
+    "cells": [
+        cell_0,
+        cell_1,
+        cell_2,
+        cell_3,
+        cell_4,
+        cell_5,
+        cell_6,
+        cell_7_md,
+        cell_7,
+        cell_closing,
+    ],
     "metadata": {
         "kernelspec": {
             "display_name": "Python 3",
