@@ -79,7 +79,7 @@ Public surface (matches `assembler.__all__`):
 
 Pure weekly Fourier-harmonic feature helper, added by Stage 7 to supply the weekly exogenous regressors for `SarimaxModel`. Public surface:
 
-- `append_weekly_fourier(df, *, period_hours=168, harmonics=3, column_prefix="week") -> pd.DataFrame` — appends `2 * harmonics` columns (`week_sin_k1..kN`, `week_cos_k1..kN`) to `df` and returns a new frame (no input mutation). Requires a tz-aware `DatetimeIndex`; converts to integer hours via `df.index.view("int64") // 3_600_000_000_000` so DST transitions do not introduce phase drift. `harmonics=0` is a no-op fast path. Tz-naive input raises `ValueError`. Module CLI `python -m bristol_ml.features.fourier --help`.
+- `append_weekly_fourier(df, *, period_hours=168, harmonics=3, column_prefix="week") -> pd.DataFrame` — appends `2 * harmonics` columns (`week_sin_k1..kN`, `week_cos_k1..kN`) to `df` and returns a new frame (no input mutation). Requires a tz-aware `DatetimeIndex`; converts to floating-point hours since the UTC epoch via `(idx - 1970-01-01 UTC) / 1h` so DST transitions do not introduce phase drift **and** the conversion is precision-independent (works on `ns` / `us` / `ms` / `s` indices). The pre-2026-05-04 implementation used `idx.view("int64") // _NANOSECONDS_PER_HOUR` which silently produced collapsed sin/cos columns when given the microsecond-precision indices the assembler emits — see the function's `Notes` section for the failure mode. `harmonics=0` is a no-op fast path. Tz-naive input raises `ValueError`. Module CLI `python -m bristol_ml.features.fourier --help`.
 
 ### `calendar` (Stage 5)
 
