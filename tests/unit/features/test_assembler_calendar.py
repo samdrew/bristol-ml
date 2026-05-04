@@ -322,7 +322,7 @@ class TestCalendarOutputSchemaStructure:
         cal_var_cols = assembler_mod.CALENDAR_VARIABLE_COLUMNS
 
         # Total column count
-        assert len(cal_schema) == 55, (
+        assert len(cal_schema) == 56, (
             f"CALENDAR_OUTPUT_SCHEMA must have exactly 55 columns; got {len(cal_schema)}."
         )
 
@@ -333,7 +333,7 @@ class TestCalendarOutputSchemaStructure:
         )
 
         # Pairwise: columns 10..53 match CALENDAR_VARIABLE_COLUMNS
-        assert len(cal_var_cols) == 44, (
+        assert len(cal_var_cols) == 45, (
             f"CALENDAR_VARIABLE_COLUMNS must contain 44 entries; got {len(cal_var_cols)}."
         )
         for i, (expected_name, expected_type) in enumerate(cal_var_cols):

@@ -1,6 +1,6 @@
 """Calendar features for the GB demand forecaster (Stage 5).
 
-Pure-function derivation of the 44 calendar columns required by the
+Pure-function derivation of the 45 calendar columns required by the
 Stage 5 ``weather_calendar`` feature set.  Input: an hourly dataframe
 with a tz-aware UTC ``timestamp_utc`` column and the gov.uk-derived
 ``holidays_df`` as produced by :func:`bristol_ml.ingestion.holidays.load`.
@@ -9,7 +9,7 @@ no global state, no side effects beyond a single structured ``loguru``
 ``INFO`` line per call (matching the Stage 3 D-5 convention) plus an
 optional ``WARNING`` line when the D-6 historical-depth fallback fires.
 
-## Column catalogue (44 columns total)
+## Column catalogue (45 columns total)
 
 1. **``hour_of_day_01`` … ``hour_of_day_23``** (23 cols) — one-hot over
    the **UTC** hour of day.  Hour 0 is the dropped reference category
@@ -54,6 +54,7 @@ optional ``WARNING`` line when the D-6 historical-depth fallback fires.
    UK-wide statutory holiday (plan **D-5**).
 7. **``is_day_after_holiday``** (1 col) — fires on rows whose previous
    calendar date is in the same intersection set (plan **D-5**).
+8. **``is_dst``** (1 col) — fires on rows where `local.dt.dst() != pd.Timedelta(0)`
 
 The ``northern-ireland`` division is *explicitly not encoded* (plan
 **D-2**); the ingester still persists it so a future regional stage
@@ -152,14 +153,20 @@ _HOLIDAY_COLUMNS: tuple[tuple[str, pa.DataType], ...] = (
     ("is_day_after_holiday", pa.int8()),
 )
 
+# Daylight-saving regime flag. Fires when Europe/London is on BST (UTC+1).
+# Captures the constant offset in load level between summer and winter
+# clock regimes; an interaction with hour_of_day would be needed to
+# capture the *shift* in peak-time (follow-up if the main effect pays).
+_DST_COLUMNS: tuple[tuple[str, pa.DataType], ...] = (("is_dst", pa.int8()),)
 
 CALENDAR_VARIABLE_COLUMNS: tuple[tuple[str, pa.DataType], ...] = (
     *_HOUR_COLUMNS,
     *_DAY_OF_WEEK_COLUMNS,
     *_MONTH_COLUMNS,
     *_HOLIDAY_COLUMNS,
+    *_DST_COLUMNS,
 )
-"""The 44 calendar columns (23 + 6 + 11 + 4), in the exact order
+"""The 45 calendar columns (23 + 6 + 11 + 4 + 1), in the exact order
 appended by :func:`derive_calendar`.  Pinned as an ordered constant so
 downstream harnesses (``LinearConfig.feature_columns``) and the
 assembler's ``CALENDAR_OUTPUT_SCHEMA`` have a single source of truth.
@@ -172,6 +179,7 @@ The split is:
 - 4 holiday flags (int8): ``is_bank_holiday_ew``,
   ``is_bank_holiday_sco``, ``is_day_before_holiday``,
   ``is_day_after_holiday``
+- 1 dst flag (int8): ``is_dst``
 """
 
 
@@ -288,6 +296,7 @@ def derive_calendar(df: pd.DataFrame, holidays_df: pd.DataFrame) -> pd.DataFrame
     prev_dates = local_dates.map(lambda d: d - pd.Timedelta(days=1).to_pytimedelta())
     derived["is_day_before_holiday"] = next_dates.map(lambda d: d in uk_wide_dates).astype("int8")
     derived["is_day_after_holiday"] = prev_dates.map(lambda d: d in uk_wide_dates).astype("int8")
+    derived["is_dst"] = ((local.dt.hour - utc_hours) % 24 == 1).astype("int8")
 
     # --- D-6 historical-depth fallback ------------------------------------
     pre_window_rows = 0

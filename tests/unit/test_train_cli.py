@@ -385,7 +385,7 @@ def test_resolve_feature_set_weather_calendar(tmp_path: Path) -> None:
         "differing position."
     )
     assert len(col_names) == 49, (
-        f"weather_calendar feature set must have 49 columns (5 weather + 44 calendar); "
+        f"weather_calendar feature set must have 50 columns (5 weather + 45 calendar); "
         f"got {len(col_names)}."
     )
 
