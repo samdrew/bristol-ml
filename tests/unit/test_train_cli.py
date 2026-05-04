@@ -384,7 +384,7 @@ def test_resolve_feature_set_weather_calendar(tmp_path: Path) -> None:
         "Calendar column names must be weather_names + calendar_names; mismatch at first "
         "differing position."
     )
-    assert len(col_names) == 49, (
+    assert len(col_names) == 50, (
         f"weather_calendar feature set must have 50 columns (5 weather + 45 calendar); "
         f"got {len(col_names)}."
     )
