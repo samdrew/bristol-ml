@@ -96,7 +96,14 @@ def _run_and_assert(executed_path: Path, tmp_path: Path) -> None:
         text=True,
         cwd=REPO_ROOT,
         env=env,
-        timeout=600,
+        # 1200 s — under default BLAS threading the ~400 LinearModel
+        # OLS folds across two feature sets become heavily over-
+        # subscribed (~22 BLAS threads × 400 folds × 2 frames; user
+        # CPU spikes to 20× wall on a 24-core dev container).  On a
+        # warm-cache laptop the notebook completes in well under a
+        # minute, but the integration timeout has to admit the slow
+        # path too.  Bumped from 600s 2026-05-04.
+        timeout=1200,
         check=False,
     )
     assert result.returncode == 0, (

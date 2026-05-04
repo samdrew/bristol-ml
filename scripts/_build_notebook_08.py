@@ -515,6 +515,21 @@ cell_9 = code("""# Plan T5 Cell 9: rolling-origin evaluation across Naive, Linea
 splitter_cfg = cfg.evaluation.rolling_origin
 metric_fns = [METRIC_REGISTRY[name] for name in ("mae", "mape", "rmse", "wape")]
 
+# Each SARIMAX MLE fit takes ~7-8 s on a 30-day window; the harness's
+# `n_jobs` knob (added 2026-05-04) dispatches per-fold work across
+# worker processes via joblib's loky backend.  We use one fewer than
+# all available cores so the notebook stays responsive (the OS keeps
+# a core for matplotlib + the kernel + any other notebook activity).
+# `cpu_count()` returns None in some sandboxed environments, hence
+# the `or 1` fall-through.  The parametric model's own per-fold fit
+# is ~4 ms — pickle overhead exceeds the work — but we use the same
+# n_jobs anyway because the SARIMAX call dominates total wall time
+# and the parametric overhead is negligible at the four-model loop
+# level.
+N_JOBS = max(1, (os.cpu_count() or 1) - 1)
+print(f"Rolling-origin parallelism: n_jobs={N_JOBS} "
+      f"(of {os.cpu_count() or 'unknown'} cores)")
+
 # Instantiate fresh models per evaluation so residual state from the
 # single-fold fits above does not leak in.
 naive_cfg = NaiveConfig(strategy="same_hour_last_week", target_column="nd_mw")
@@ -550,6 +565,7 @@ for name, model, feat_cols in [
         target_column="nd_mw",
         feature_columns=feat_cols,
         return_predictions=True,
+        n_jobs=N_JOBS,
     )
     print(f"{name:>18s}  evaluate: {time.time() - t0:6.1f}s  "
           f"({len(metrics_df)} folds)")

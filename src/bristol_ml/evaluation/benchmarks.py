@@ -174,6 +174,7 @@ def compare_on_holdout(
     aggregation: Literal["mean", "first"] = "mean",
     target_column: str = "nd_mw",
     feature_columns: Sequence[str] | None = None,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """Three-way metric table on the intersection of model holdout ∩ NESO coverage.
 
@@ -217,6 +218,15 @@ def compare_on_holdout(
         internal preparation).
     feature_columns:
         Forwarded to :func:`evaluate`; see that function's docstring.
+    n_jobs:
+        Forwarded to :func:`evaluate`; see that function's docstring.
+        Default ``1`` (serial).  Each candidate model's harness call
+        receives the same value, so a benchmark over four candidates
+        with ``n_jobs=8`` runs 8 fold-workers per candidate, sequentially
+        over the four candidates.  An end-to-end "8 workers across four
+        candidates simultaneously" mode is intentionally not exposed —
+        the per-candidate parallelism is enough for the typical
+        SARIMAX-dominated workload.
 
     Returns
     -------
@@ -266,6 +276,7 @@ def compare_on_holdout(
             metrics,
             target_column=target_column,
             feature_columns=feature_columns,
+            n_jobs=n_jobs,
         )
         per_fold_tables[name] = per_fold
         # Fold-level mean over each metric column; these are the scalars

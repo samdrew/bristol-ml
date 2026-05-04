@@ -39,20 +39,36 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
 
 - `bristol_ml.evaluation.harness.evaluate(model, df, splitter_cfg,
   metrics, *, target_column="nd_mw", feature_columns=None,
-  return_predictions=False) -> pd.DataFrame | tuple[pd.DataFrame,
-  pd.DataFrame]` — iterates the rolling-origin folds described by
-  `splitter_cfg`, calls `model.fit` / `model.predict` per fold, and
-  returns a long-form per-fold DataFrame. Columns: `fold_index`
-  (`int`), `train_end` / `test_start` / `test_end` (timestamps from
-  `df.index`), plus one float column per metric keyed by the metric
-  callable's `__name__`. When `return_predictions=True`, returns a
-  `(metrics_df, predictions_df)` tuple; `predictions_df` has one row
-  per (fold, horizon-index) with columns `["fold_index", "test_start",
-  "test_end", "horizon_h", "y_true", "y_pred", "error"]` (Stage 6 D9
-  — see the API growth trigger note below).
+  return_predictions=False, n_jobs=1) -> pd.DataFrame |
+  tuple[pd.DataFrame, pd.DataFrame]` — iterates the rolling-origin
+  folds described by `splitter_cfg`, calls `model.fit` / `model.predict`
+  per fold, and returns a long-form per-fold DataFrame. Columns:
+  `fold_index` (`int`), `train_end` / `test_start` / `test_end`
+  (timestamps from `df.index`), plus one float column per metric keyed
+  by the metric callable's `__name__`. When `return_predictions=True`,
+  returns a `(metrics_df, predictions_df)` tuple; `predictions_df` has
+  one row per (fold, horizon-index) with columns `["fold_index",
+  "test_start", "test_end", "horizon_h", "y_true", "y_pred", "error"]`
+  (Stage 6 D9 — see the API growth trigger note below).  `n_jobs > 1`
+  dispatches per-fold work across worker processes via joblib's loky
+  backend; folds are mathematically independent so the parallel result
+  matches the serial result on the metrics frame and the predictions
+  frame after both are sorted by `fold_index`.  Bit-exact equality
+  holds for closed-form models (Naive / Linear / ScipyParametric);
+  iterative-MLE models (SARIMAX, NN families) agree to `rtol≈1e-6`
+  but tiny float-level drift across processes is possible (statsmodels
+  Kalman filter + scipy.optimize internals are not bit-deterministic
+  cross-process).  Each worker sets `OMP_NUM_THREADS=1` /
+  `MKL_NUM_THREADS=1` / `OPENBLAS_NUM_THREADS=1` to prevent BLAS
+  thread oversubscription.  Default `n_jobs=1` preserves the original
+  Stage 4 serial behaviour byte-for-byte.  See the harness docstring
+  for the per-stage cost-benefit (Stage 7 SARIMAX wins big; Stage 8
+  parametric is too cheap to benefit per-call but parallelises
+  naturally as part of the four-model comparison loop where SARIMAX
+  dominates total wall time).
 - `bristol_ml.evaluation.harness.evaluate_and_keep_final_model(model,
   df, splitter_cfg, metrics, *, target_column="nd_mw",
-  feature_columns=None) -> tuple[pd.DataFrame, Model]` — Stage 9
+  feature_columns=None, n_jobs=1) -> tuple[pd.DataFrame, Model]` — Stage 9
   (plan D17) companion to `evaluate`.  Delegates to `evaluate()` and
   additionally returns the model instance after the harness has left it
   fitted on the final fold.  Introduced to give the registry
@@ -63,6 +79,11 @@ empirical uncertainty bands, and a fixed-window NESO bar chart).
   is the same object passed in, now carrying final-fold state.  A
   zero-fold configuration leaves `model` unfitted; callers should
   guard on `model.metadata.fit_utc is not None` before registering.
+  When `n_jobs > 1` the workers each held a deepcopy, so this wrapper
+  performs **one additional serial fit on the final fold's training
+  data** in the parent process to leave the caller's `model` instance
+  in the documented final-fold state — costs at most one extra fold's
+  wall time, negligible against the parallel-evaluation savings.
 - **H-1 guard (Stage 3 carry-over, implemented here in Stage 4):**
   `df.index` must be a `pandas.DatetimeIndex`; tz-naive is permitted,
   UTC-aware is permitted, any other timezone is rejected.
