@@ -700,8 +700,19 @@ def forecast_overlay_with_band(
     Computes per-horizon quantiles of ``per_fold_errors["error"]`` (the
     signed ``y_true - y_pred`` residuals emitted by
     ``evaluate(..., return_predictions=True)`` — Stage 6 D9) and shades the
-    band ``[point - q_hi, point - q_lo]`` around ``point_prediction``.  The
-    band is non-parametric and model-agnostic (plan D8).
+    band ``[point + q_lo, point + q_hi]`` around ``point_prediction``.
+    The band is non-parametric and model-agnostic (plan D8).
+
+    Reasoning for the sign: the harness emits ``error = y_true - y_pred``,
+    so ``y_true ≈ y_pred + error``.  The empirical band that brackets where
+    actual is likely to land at horizon ``h`` is therefore ``[y_pred +
+    q_lo(error_h), y_pred + q_hi(error_h)]``.  An earlier version of this
+    helper used subtraction (``[point - q_hi, point - q_lo]``) which
+    silently inverted the band — the reflection of the correct band
+    through the forecast — so where actual was high (positive residual
+    expected) the rendered band collapsed *below* the forecast.  Fixed
+    2026-05-04 after the inversion was caught visually on
+    ``notebooks/04_linear_baseline.ipynb``.
 
     Parameters
     ----------
@@ -767,8 +778,8 @@ def forecast_overlay_with_band(
     fig, axes = _ensure_axes(ax)
     axes.fill_between(
         local_idx,
-        point_arr - q_hi_series,
-        point_arr - q_lo_series,
+        point_arr + q_lo_series,
+        point_arr + q_hi_series,
         alpha=0.25,
         color=OKABE_ITO[1],
         label=f"q{int(q_lo_val * 100)}-q{int(q_hi_val * 100)} empirical band",
