@@ -170,16 +170,30 @@ before you touch `scipy_parametric.py`.
   rolling-origin fold with only-winter training data starts `β_cool` far
   from any reasonable value.  `test_scipy_parametric_fit_same_data_same_params`
   is the determinism guard (Stage 8 plan AC-9).
-- **Default `loss="linear"` keeps CIs Gaussian (plan D3/D5).**
-  `curve_fit`'s `soft_l1` / `huber` / `cauchy` loss functions are
-  available as CLI overrides but produce a `pcov` whose interpretation is
-  heuristic, not a rigorously Gaussian CI.  The shipped default is
-  `loss="linear"` so the notebook's "±Y MW per degree" claim is valid.
-  The notebook's Cell 12 appendix spells out the three Gaussian
-  assumptions (homoscedasticity — violated by peak-hour heteroscedasticity
-  in GB demand; near-linearity around the optimum — weak at hinge
-  transitions; no parameter at a bound).  Stage 10 owns bootstrap /
-  quantile-based alternatives.
+- **`method="trf"` with bounds is the default solver (plan 08a D1/D2).**
+  Both the `loss="linear"` and robust-loss branches use
+  `method="trf"` with physically-motivated bounds: `alpha ∈ [0, 100 000]`;
+  `beta_heat`, `beta_cool ∈ [0, 5 000]`; each Fourier coefficient
+  `∈ [−50 000, 50 000]`.  The original `method="lm"` (unconstrained
+  Levenberg-Marquardt, Stage 8 plan D6) was superseded after empirical
+  discovery that seasonal-mono folds (winter-only → `CDD ≡ 0`,
+  summer-only → `HDD ≡ 0`) caused the unconstrained solver to wander to
+  physically meaningless parameters (e.g. `alpha ≈ −7×10⁶ MW`).  See
+  plan `docs/plans/completed/08a-bounded-parametric-fit.md`.
+  Gaussian-CI reasoning still holds for the default `loss="linear"`
+  provided no parameter is at a bound (the notebook's Cell 12 appendix
+  retains that assumption explicitly).  Three `pcov`-unreliability
+  overrides surface unidentifiable parameters as `std_err = inf` rather
+  than silently publishing a diverged covariance: bound saturation
+  (parameter within `1e-6 · max(width, |lb|+|ub|+1)` of either bound,
+  e.g. ~0.005 MW/°C for the slope bounds), Moore-Penrose-implausibly-
+  large variance (diagonal entry exceeds `((upper - lower) / 2)²`, i.e.
+  ~6.25 × 10⁶ for the slope bounds and ~2.5 × 10⁹ for `alpha`), and
+  zero-information Jacobian column (the design-matrix row for the
+  parameter has standard deviation below `1e-12`).  The WARN message
+  names the affected parameters; `pcov` row/column for each unreliable
+  parameter is set to `np.inf` end-to-end so the saved covariance
+  matrix stays self-consistent.  Stage 10 owns bootstrap / quantile-based alternatives.
 - **UTC-tz guard matches SARIMAX (plan D8).**
   `_require_utc_datetimeindex(features, method=...)` is a private static
   method on `ScipyParametricModel` — copied from SARIMAX rather than

@@ -38,8 +38,10 @@ import pytest
 
 from bristol_ml.models.scipy_parametric import (
     ScipyParametricModel,
+    _build_bounds,
     _build_param_names,
     _derive_p0,
+    _detect_at_bound,
     _parametric_fn,
 )
 from conf._schemas import ScipyParametricConfig
@@ -866,7 +868,8 @@ def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
     ``pyproject.toml``.  Run explicitly with ``uv run pytest -m slow``.
 
     If this test fails, do not weaken the threshold — investigate the
-    convergence behaviour (D4 data-driven p0, D6 method="lm", maxfev=5000).
+    convergence behaviour (D4 data-driven p0, plan 08a D1
+    method="trf" + bounds, max_nfev=5000).
 
     Plan clause: T4 plan §Task T4 / plan D13 / AC-4 / NFR-1.
     """
@@ -902,7 +905,7 @@ def test_scipy_parametric_fit_single_fold_completes_under_10_seconds() -> None:
         f"Single-fold ScipyParametricModel fit on {n_rows} rows took {elapsed_s:.2f} s "
         f"(> 10 s budget). D13 / AC-4 / NFR-1 cost assumptions no longer hold. "
         "Do not weaken the threshold — investigate convergence behaviour "
-        "(D4 data-driven p0, D6 method='lm', maxfev=5000). "
+        "(D4 data-driven p0, plan 08a D1 method='trf' + bounds, max_nfev=5000). "
         "Plan T4 / ``test_scipy_parametric_fit_single_fold_completes_under_10_seconds``."
     )
     # Sanity: the fit actually produced a result.
@@ -1650,3 +1653,379 @@ def test_scipy_parametric_save_load_skops_roundtrip(
     assert restored._pcov is not None
     np.testing.assert_array_equal(model._popt, restored._popt)
     np.testing.assert_array_equal(model._pcov, restored._pcov)
+
+
+# ===========================================================================
+# Task T3 (08a) — Bounded-TRF acceptance tests
+# (plan 08a-bounded-parametric-fit.md AC-1, AC-2, AC-5, AC-6)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Helper: build a healthy full-range fixture for AC-6
+# ---------------------------------------------------------------------------
+
+
+def _healthy_full_range_frame(
+    n_rows: int = 720,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Return ``(features_df, target_series)`` spanning -5 °C to 30 °C.
+
+    Both heating (T < 15.5 °C) and cooling (T > 22.0 °C) segments are
+    well-observed so the fit is full-rank.  Used by the AC-6 parametrised
+    loss test.
+
+    True signal: ``25000 + 120*HDD + 40*CDD + low-noise diurnal``.
+    Noise sigma = 150 MW, seeded at 42.
+    """
+    rng = np.random.default_rng(42)
+    index = pd.date_range("2024-01-01", periods=n_rows, freq="h", tz="UTC")
+    temperature = np.linspace(-5.0, 30.0, n_rows)
+    t_heat, t_cool = 15.5, 22.0
+    hdd = np.maximum(0.0, t_heat - temperature)
+    cdd = np.maximum(0.0, temperature - t_cool)
+    t = np.arange(n_rows, dtype=np.float64)
+    diurnal = 300.0 * np.sin(2.0 * np.pi * t / 24.0)
+    demand = 25_000.0 + 120.0 * hdd + 40.0 * cdd + diurnal + rng.normal(0, 150.0, n_rows)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand, index=index, name="nd_mw")
+    return features, target
+
+
+# ---------------------------------------------------------------------------
+# AC-1 — winter-only window clamps beta_cool
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_winter_only_clamps_beta_cool() -> None:
+    """AC-1: on a winter-only window (all T < t_heat) beta_cool saturates at 0.
+
+    Fixture: 720 h starting 2024-01-01 UTC, temperatures uniform in
+    [-5.0, 10.0) °C — every observation is below ``t_heat=15.5`` *and*
+    ``t_cool=22.0``, so CDD is identically zero throughout.  Target is
+    flat demand ~30 000 MW plus light Gaussian noise.
+
+    Asserts:
+    - ``popt[0]`` (alpha) ∈ [20 000, 50 000].
+    - ``popt[2]`` (beta_cool) is detected at the lower bound via
+      ``_detect_at_bound``.
+    - ``metadata.hyperparameters["param_std_errors"][2]`` == ``float("inf")``.
+    - A loguru WARNING fires naming ``beta_cool``.
+    - The same WARNING does NOT name ``beta_heat``.
+
+    Plan clause: 08a AC-1 / T3 / ``test_scipy_parametric_fit_winter_only_clamps_beta_cool``.
+    """
+    from loguru import logger
+
+    rng = np.random.default_rng(0)
+    n = 720
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    temperature = rng.uniform(-5.0, 10.0, n)
+    assert np.all(temperature < 15.5), (
+        "Precondition: all temperatures must be below t_heat=15.5 °C."
+    )
+    assert np.all(temperature < 22.0), (
+        "Precondition: all temperatures must be below t_cool=22.0 °C."
+    )
+    # Synthesised demand carries a real heating-side signal so beta_heat
+    # is identifiable from the data: ``demand = alpha + beta_heat * HDD
+    # + noise`` with HDD = max(0, t_heat - T).  beta_cool's regressor
+    # column (CDD) is identically zero on this window — the unidentifi-
+    # ability the AC-1 spec exercises.
+    hdd = np.maximum(0.0, 15.5 - temperature)
+    demand = 30_000.0 + 120.0 * hdd + rng.normal(0, 200.0, n)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand, index=index, name="nd_mw")
+
+    config = ScipyParametricConfig()
+    model = ScipyParametricModel(config)
+
+    captured: list[object] = []
+    sink_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+    try:
+        model.fit(features, target)
+    finally:
+        logger.remove(sink_id)
+
+    assert model._popt is not None, "_popt must be set after fit()."
+    popt = model._popt
+    lower, upper = _build_bounds(
+        diurnal_harmonics=config.diurnal_harmonics,
+        weekly_harmonics=config.weekly_harmonics,
+    )
+    at_bound = _detect_at_bound(popt, lower, upper)
+
+    # alpha ∈ [20 000, 50 000]
+    assert 20_000.0 <= popt[0] <= 50_000.0, (
+        f"popt[0] (alpha) must be in [20 000, 50 000] on a winter-only window; "
+        f"got {popt[0]:.1f}. Plan 08a AC-1."
+    )
+
+    # beta_cool detected at lower bound
+    assert at_bound[2], (
+        f"popt[2] (beta_cool) must be detected at the lower bound on a winter-only "
+        f"window (CDD ≡ 0); got popt[2]={popt[2]!r}, at_bound={at_bound[2]!r}. "
+        "Plan 08a AC-1."
+    )
+
+    # std_errors[2] == inf
+    std_errors = model.metadata.hyperparameters["param_std_errors"]
+    assert std_errors[2] == float("inf"), (
+        f"param_std_errors[2] (beta_cool) must be inf when beta_cool is at the bound; "
+        f"got {std_errors[2]!r}. Plan 08a AC-1 / AC-5."
+    )
+
+    # WARNING names beta_cool
+    all_captured = " ".join(str(m) for m in captured)
+    assert "beta_cool" in all_captured, (
+        f"A loguru WARNING must mention 'beta_cool' on the winter-only window; "
+        f"no such WARNING found in captured={[str(m)[:120] for m in captured]!r}. "
+        "Plan 08a AC-1."
+    )
+
+    # WARNING does NOT name beta_heat
+    # (beta_heat is interior, not at a bound, on a heating-dominated window)
+    assert "beta_heat" not in all_captured, (
+        f"The loguru WARNING must NOT mention 'beta_heat' on the winter-only window; "
+        f"found 'beta_heat' in captured={[str(m)[:120] for m in captured]!r}. "
+        "Plan 08a AC-1."
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-2 — summer-only window clamps beta_heat
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_summer_only_clamps_beta_heat() -> None:
+    """AC-2: on a summer-only window (all T > t_cool) beta_heat saturates at 0.
+
+    Fixture: 720 h starting 2024-07-01 UTC, temperatures uniform in
+    [25.0, 35.0) °C — every observation is above both ``t_heat=15.5`` and
+    ``t_cool=22.0``, so HDD is identically zero throughout.  Target is
+    flat demand ~30 000 MW plus light Gaussian noise.
+
+    Asserts:
+    - ``popt[1]`` (beta_heat) is detected at the lower bound via
+      ``_detect_at_bound``.
+    - ``metadata.hyperparameters["param_std_errors"][1]`` == ``float("inf")``.
+    - A loguru WARNING fires naming ``beta_heat``.
+    - The same WARNING does NOT name ``beta_cool``.
+
+    Plan clause: 08a AC-2 / T3 / ``test_scipy_parametric_fit_summer_only_clamps_beta_heat``.
+    """
+    from loguru import logger
+
+    rng = np.random.default_rng(1)
+    n = 720
+    index = pd.date_range("2024-07-01", periods=n, freq="h", tz="UTC")
+    temperature = rng.uniform(25.0, 35.0, n)
+    assert np.all(temperature > 15.5), (
+        "Precondition: all temperatures must be above t_heat=15.5 °C."
+    )
+    assert np.all(temperature > 22.0), (
+        "Precondition: all temperatures must be above t_cool=22.0 °C."
+    )
+    # Synthesised demand carries a real cooling-side signal so beta_cool
+    # is identifiable from the data: ``demand = alpha + beta_cool * CDD
+    # + noise`` with CDD = max(0, T - t_cool).  beta_heat's regressor
+    # column (HDD) is identically zero on this window — the unidentifi-
+    # ability the AC-2 spec exercises.
+    cdd = np.maximum(0.0, temperature - 22.0)
+    demand = 30_000.0 + 80.0 * cdd + rng.normal(0, 200.0, n)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand, index=index, name="nd_mw")
+
+    config = ScipyParametricConfig()
+    model = ScipyParametricModel(config)
+
+    captured: list[object] = []
+    sink_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+    try:
+        model.fit(features, target)
+    finally:
+        logger.remove(sink_id)
+
+    assert model._popt is not None, "_popt must be set after fit()."
+    popt = model._popt
+    lower, upper = _build_bounds(
+        diurnal_harmonics=config.diurnal_harmonics,
+        weekly_harmonics=config.weekly_harmonics,
+    )
+    at_bound = _detect_at_bound(popt, lower, upper)
+
+    # beta_heat detected at lower bound
+    assert at_bound[1], (
+        f"popt[1] (beta_heat) must be detected at the lower bound on a summer-only "
+        f"window (HDD ≡ 0); got popt[1]={popt[1]!r}, at_bound={at_bound[1]!r}. "
+        "Plan 08a AC-2."
+    )
+
+    # std_errors[1] == inf
+    std_errors = model.metadata.hyperparameters["param_std_errors"]
+    assert std_errors[1] == float("inf"), (
+        f"param_std_errors[1] (beta_heat) must be inf when beta_heat is at the bound; "
+        f"got {std_errors[1]!r}. Plan 08a AC-2 / AC-5."
+    )
+
+    # WARNING names beta_heat
+    all_captured = " ".join(str(m) for m in captured)
+    assert "beta_heat" in all_captured, (
+        f"A loguru WARNING must mention 'beta_heat' on the summer-only window; "
+        f"no such WARNING found in captured={[str(m)[:120] for m in captured]!r}. "
+        "Plan 08a AC-2."
+    )
+
+    # WARNING does NOT name beta_cool
+    # (beta_cool is interior, since CDD is non-zero on the hot window)
+    assert "beta_cool" not in all_captured, (
+        f"The loguru WARNING must NOT mention 'beta_cool' on the summer-only window; "
+        f"found 'beta_cool' in captured={[str(m)[:120] for m in captured]!r}. "
+        "Plan 08a AC-2."
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-5 (winter side) — interior parameters' std-err are finite
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_winter_only_param_std_err_at_bound_is_inf() -> None:
+    """AC-5 (winter): bound-saturated param_std_errors is inf; all interior are finite.
+
+    Uses the same fixture as ``test_scipy_parametric_fit_winter_only_clamps_beta_cool``
+    (720 h, T ∈ [-5, 10) °C, seeded RNG 0) and verifies:
+
+    1. ``param_std_errors[2]`` (beta_cool) == ``inf`` (at lower bound).
+    2. All other entries of ``param_std_errors`` are ``np.isfinite``.
+
+    Together with AC-1's assertion (std_errors[2] == inf) this fully verifies
+    plan 08a AC-5 for the winter case.
+
+    Plan clause: 08a AC-5 / T3 /
+    ``test_scipy_parametric_fit_winter_only_param_std_err_at_bound_is_inf``.
+    """
+    rng = np.random.default_rng(0)
+    n = 720
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    temperature = rng.uniform(-5.0, 10.0, n)
+    # Mirror the AC-1 fixture: real heating signal so beta_heat is
+    # identifiable.  beta_cool's regressor (CDD) is identically zero.
+    hdd = np.maximum(0.0, 15.5 - temperature)
+    demand = 30_000.0 + 120.0 * hdd + rng.normal(0, 200.0, n)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand, index=index, name="nd_mw")
+
+    config = ScipyParametricConfig()
+    model = ScipyParametricModel(config)
+    model.fit(features, target)
+
+    std_errors = model.metadata.hyperparameters["param_std_errors"]
+    param_names = model.metadata.hyperparameters["param_names"]
+
+    # beta_cool (index 2) must be inf
+    assert std_errors[2] == float("inf"), (
+        f"param_std_errors[2] (beta_cool) must be inf on a winter-only window; "
+        f"got {std_errors[2]!r}. Plan 08a AC-5."
+    )
+
+    # All other entries must be finite
+    for i, (name, se) in enumerate(zip(param_names, std_errors, strict=True)):
+        if i == 2:
+            continue  # already asserted above
+        assert np.isfinite(se), (
+            f"param_std_errors[{i}] ({name!r}) must be finite on a winter-only "
+            f"window (only beta_cool is at a bound); got {se!r}. "
+            "Plan 08a AC-5."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-5 (summer side) — interior parameters' std-err are finite
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_parametric_fit_summer_only_param_std_err_at_bound_is_inf() -> None:
+    """AC-5 (summer): bound-saturated param_std_errors is inf; all interior are finite.
+
+    Uses the same fixture as ``test_scipy_parametric_fit_summer_only_clamps_beta_heat``
+    (720 h, T ∈ [25, 35) °C, seeded RNG 1) and verifies:
+
+    1. ``param_std_errors[1]`` (beta_heat) == ``inf`` (at lower bound).
+    2. All other entries of ``param_std_errors`` are ``np.isfinite``.
+
+    Together with AC-2's assertion (std_errors[1] == inf) this fully verifies
+    plan 08a AC-5 for the summer case.
+
+    Plan clause: 08a AC-5 / T3 /
+    ``test_scipy_parametric_fit_summer_only_param_std_err_at_bound_is_inf``.
+    """
+    rng = np.random.default_rng(1)
+    n = 720
+    index = pd.date_range("2024-07-01", periods=n, freq="h", tz="UTC")
+    temperature = rng.uniform(25.0, 35.0, n)
+    # Mirror the AC-2 fixture: real cooling signal so beta_cool is
+    # identifiable.  beta_heat's regressor (HDD) is identically zero.
+    cdd = np.maximum(0.0, temperature - 22.0)
+    demand = 30_000.0 + 80.0 * cdd + rng.normal(0, 200.0, n)
+    features = pd.DataFrame({"temperature_2m": temperature}, index=index)
+    target = pd.Series(demand, index=index, name="nd_mw")
+
+    config = ScipyParametricConfig()
+    model = ScipyParametricModel(config)
+    model.fit(features, target)
+
+    std_errors = model.metadata.hyperparameters["param_std_errors"]
+    param_names = model.metadata.hyperparameters["param_names"]
+
+    # beta_heat (index 1) must be inf
+    assert std_errors[1] == float("inf"), (
+        f"param_std_errors[1] (beta_heat) must be inf on a summer-only window; "
+        f"got {std_errors[1]!r}. Plan 08a AC-5."
+    )
+
+    # All other entries must be finite
+    for i, (name, se) in enumerate(zip(param_names, std_errors, strict=True)):
+        if i == 1:
+            continue  # already asserted above
+        assert np.isfinite(se), (
+            f"param_std_errors[{i}] ({name!r}) must be finite on a summer-only "
+            f"window (only beta_heat is at a bound); got {se!r}. "
+            "Plan 08a AC-5."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-6 — robust losses run under the unified TRF call
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("loss", ["linear", "soft_l1", "huber", "cauchy"])
+def test_scipy_parametric_fit_loss_kwarg_runs_under_trf(loss: str) -> None:
+    """AC-6: all four loss values produce finite popt under the unified TRF call.
+
+    On a healthy full-range window (T ∈ [-5, 30] °C, 720 h, both heating and
+    cooling segments well observed) every loss value in
+    ``{linear, soft_l1, huber, cauchy}`` must:
+
+    - Complete ``fit()`` without raising an exception.
+    - Produce a ``popt`` vector that is entirely finite
+      (``np.all(np.isfinite(popt))``).
+
+    This verifies that the legacy separate LM branch (which only supported
+    ``loss="linear"``) has been replaced by a single TRF call that accepts all
+    four loss values (plan 08a D1).
+
+    Plan clause: 08a AC-6 / T3 /
+    ``test_scipy_parametric_fit_loss_kwarg_runs_under_trf``.
+    """
+    features, target = _healthy_full_range_frame(720)
+    config = ScipyParametricConfig(loss=loss)
+    model = ScipyParametricModel(config)
+
+    model.fit(features, target)
+
+    assert model._popt is not None, f"_popt must be set after fit() with loss={loss!r}."
+    assert np.all(np.isfinite(model._popt)), (
+        f"popt must be entirely finite after fit() with loss={loss!r}; "
+        f"got popt={model._popt!r}. Plan 08a AC-6."
+    )

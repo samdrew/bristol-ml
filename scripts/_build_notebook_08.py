@@ -821,12 +821,27 @@ in a slide deck:
    linearity still holds globally; if it sits tightly around one of
    them the quadratic approximation may understate the slope
    uncertainty.
-3. **No parameter estimate sitting at a bound.**  `curve_fit` with
-   `method="lm"` is unconstrained, so this assumption holds
-   automatically; it is listed here because the Gaussian derivation
-   would break down if, say, `method="trf"` with explicit bounds
-   were used (not the case in Stage 8; a future `loss != "linear"`
-   override would need the same audit).
+3. **No parameter estimate sitting at a bound.**  `curve_fit` runs
+   under `method="trf"` (trust-region-reflective, scipy's bounded
+   least-squares algorithm) with physically-motivated bounds on every
+   free parameter — `alpha ≥ 0`, `beta_heat, beta_cool ≥ 0` (the
+   "colder/hotter raises demand" sign convention), Fourier
+   coefficients within `±50 000 MW`.  On a healthy training window
+   every fitted parameter sits comfortably interior, the bounds never
+   bite, and the Gaussian-CI derivation is unchanged from the
+   unconstrained predecessor.  The bounds matter only on
+   **rank-deficient training windows** — most commonly the
+   seasonal-mono folds a sliding rolling-origin splitter produces
+   (winter-only fold ⇒ CDD ≡ 0 ⇒ `beta_cool` unidentifiable;
+   symmetric for summer-only folds and `beta_heat`).  In that case
+   the unidentifiable parameter clamps at its bound, the
+   bound-saturation override forces its `pcov` diagonal entry to
+   `inf`, and the parameter table reports its CI as `±inf`
+   accordingly — the table is **honest about which parameters the
+   data could not determine** rather than silently publishing a
+   diverged fit (the scenario the original `method="lm"`
+   unconstrained predecessor exhibited; see `docs/intent/08-improvements.md`
+   for the empirical motivation).
 
 **When the three assumptions fail**, the right fix is not "widen the
 Gaussian intervals by a fudge factor" but to switch to a resampling
