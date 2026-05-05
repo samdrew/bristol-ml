@@ -26,24 +26,10 @@ comparison against OLS / SARIMAX / gradient boosting.
 - Design matrix is **temperature plus Fourier only** (plan D2
   clarification — Stage 5 calendar one-hots are excluded to avoid
   partial collinearity with the weekly Fourier terms).
-- ``method="trf"`` Trust-Region Reflective with **physically-motivated
-  bounds** on every free parameter (plan 08a D1/D2 — the bounded fit
-  follow-up).  TRF settles unidentifiable parameters at the relevant
-  bound rather than diverging into non-physical popt on rank-deficient
-  training windows (e.g. ``CDD ≡ 0`` on a winter-only fold).  Bounds
-  are derived at fit time from the parameter count; they are not
-  exposed on :class:`~conf._schemas.ScipyParametricConfig`.
-- Bounds (intent option A): ``alpha ∈ [0, 100 000]``;
-  ``beta_heat, beta_cool ∈ [0, 5 000]``; each Fourier coefficient
-  ``∈ [-50 000, +50 000]``.  Wide enough that every healthy fit on a
-  project-default training window stays interior; the change is
-  observable only on rank-deficient folds where the unbounded LM
-  predecessor diverged.
-- ``loss="linear"`` keeps ``pcov → CI`` Gaussian and rigorous (plan
-  Stage 8 D3/D5).  Non-linear losses are available via config override
-  but turn ``pcov`` into a heuristic (the notebook's appendix cell
-  spells this out).  All four loss values run under the same TRF call;
-  the legacy LM path no longer exists.
+- ``method="lm"`` Levenberg-Marquardt, ``loss="linear"`` — the defaults
+  keep ``pcov → CI`` Gaussian and rigorous (plan D3/D5/D6).  Non-linear
+  losses are available via config override but turn ``pcov`` into a
+  heuristic (the notebook's appendix cell spells this out).
 
 **Pickleability** (codebase surprise S2).  ``curve_fit`` internally
 holds a reference to the target function; joblib / pickle must
@@ -189,153 +175,6 @@ def _parametric_fn(X: np.ndarray, *params: float) -> np.ndarray:
     return np.asarray(y, dtype=np.float64)
 
 
-# Parameter bounds for the bounded TRF fit (plan 08a D2).  Order matches
-# :func:`_build_param_names`: ``alpha, beta_heat, beta_cool`` then the
-# Fourier sin/cos pairs.  Bounds are physically motivated:
-#
-# - ``alpha`` non-negative; GB peak demand has never exceeded ~62 GW so
-#   100 000 MW is a generous upper bound.
-# - ``beta_heat, beta_cool`` non-negative ("colder/hotter raises demand"
-#   sign convention); 5 000 MW/°C is well above any plausibly fitted slope.
-# - Fourier coefficients within ±50 000 MW — the periodic signal cannot
-#   plausibly exceed national demand magnitudes.
-#
-# These bounds are *deliberately wide* — every well-conditioned fit on
-# a project-default 1-year+ training window stays interior (typical
-# fitted values: alpha ≈ 26 000, beta_heat ≈ 760, beta_cool ≈ small).
-# The change is observable only on rank-deficient folds, where it
-# converts catastrophic divergence into the documented "parameter at a
-# bound" failure mode.
-_BOUND_ALPHA = (0.0, 100_000.0)
-_BOUND_BETA_HEAT = (0.0, 5_000.0)
-_BOUND_BETA_COOL = (0.0, 5_000.0)
-_BOUND_FOURIER = (-50_000.0, 50_000.0)
-
-
-def _build_bounds(
-    *,
-    diurnal_harmonics: int,
-    weekly_harmonics: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(lower, upper)`` bound arrays in :func:`_build_param_names` order.
-
-    Total length is ``3 + 2*diurnal_harmonics + 2*weekly_harmonics``.
-    Each entry is a finite ``float64`` — TRF's bound-handling does not
-    permit ``np.inf`` here without losing the rank-deficiency safety net.
-    """
-    n_fourier = 2 * diurnal_harmonics + 2 * weekly_harmonics
-    lower = np.empty(3 + n_fourier, dtype=np.float64)
-    upper = np.empty(3 + n_fourier, dtype=np.float64)
-    lower[0], upper[0] = _BOUND_ALPHA
-    lower[1], upper[1] = _BOUND_BETA_HEAT
-    lower[2], upper[2] = _BOUND_BETA_COOL
-    if n_fourier:
-        lower[3:] = _BOUND_FOURIER[0]
-        upper[3:] = _BOUND_FOURIER[1]
-    return lower, upper
-
-
-def _detect_at_bound(
-    popt: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-    *,
-    rtol: float = 1e-6,
-) -> np.ndarray:
-    """Return a boolean mask flagging parameters TRF settled at a bound.
-
-    Test: ``|popt - bound| <= rtol * (upper - lower)`` against either
-    side.  The bound-width-relative tolerance is robust when the bound
-    is exactly zero (where any rtol-on-bound check collapses to an
-    absolute zero tolerance).  For the project bounds the resulting
-    absolute tolerances are: alpha 0.1 MW; beta_heat / beta_cool 0.005
-    MW/°C; Fourier coefficients 0.1 MW — tight enough that a genuinely
-    interior optimum is not false-flagged (a real fitted slope of
-    0.5 MW/°C is correctly classified as interior, well above the
-    0.005 threshold), loose enough that ``popt = 1e-7`` next to
-    ``lb = 0`` from TRF's ``make_strictly_feasible`` perturbation is
-    detected.
-
-    Note: ``rtol = 1e-6`` is *for the at-bound detection itself*, not
-    for any external tolerance on a healthy fit.  A parameter that the
-    optimiser genuinely settled at a bound (because the data pulled it
-    against the bound) sits within this tolerance; a parameter the
-    optimiser left interior because the data permitted any value (zero-
-    information case) is caught separately by
-    :func:`_detect_zero_information_columns`.
-    """
-    width = upper - lower
-    tol = rtol * np.maximum(width, np.abs(lower) + np.abs(upper) + 1.0)
-    at_lower = np.abs(popt - lower) <= tol
-    at_upper = np.abs(popt - upper) <= tol
-    return at_lower | at_upper
-
-
-def _detect_implausible_variance(
-    pcov_diag: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-) -> np.ndarray:
-    """Flag parameters whose ``pcov`` diagonal exceeds the bound-width sanity check.
-
-    Under bounded TRF, ``curve_fit`` uses the Moore-Penrose pseudo-inverse
-    to compute ``pcov`` on rank-deficient problems (scipy docs:
-    "covariance matrices with large condition numbers ... may indicate
-    that results are unreliable").  The pseudo-inverse can return a
-    *finite* but enormous diagonal — far larger than the parameter's
-    permissible range — even when no parameter is clamped at a bound.
-
-    Threshold: implausible if ``pcov_diag[i] > ((upper[i] - lower[i]) / 2)**2``,
-    i.e. the implied 1-sigma exceeds half the bound width.  At that
-    point any Gaussian CI is wider than the bound itself and the
-    metadata's "value +/- 1.96 * std" rendering would be physically
-    nonsense; better to surface the rank deficiency via the existing
-    ``inf`` semantics.
-    """
-    half_width = (upper - lower) / 2.0
-    return pcov_diag > half_width * half_width
-
-
-def _detect_zero_information_columns(
-    design_matrix: np.ndarray,
-    n_params: int,
-    *,
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """Flag parameters whose Jacobian column carries no information.
-
-    For the Stage 8 parametric model the Jacobian wrt parameter ``i``
-    is, for ``i >= 1``, the design-matrix row ``i - 1`` (parameter 0 is
-    ``alpha``, whose Jacobian is the constant ``1`` and is always
-    full-rank).  When that row is identically constant — most notably
-    when ``CDD ≡ 0`` on a winter-only window or ``HDD ≡ 0`` on a
-    summer-only one — the corresponding parameter is unidentifiable
-    in the strict mathematical sense: the gradient w.r.t. it is zero,
-    every value of the parameter produces the same residuals, and TRF
-    cannot move the iterate from its initial guess regardless of
-    direction.  In that case any standard error reported by the
-    pseudo-inverse pcov is meaningless (Moore-Penrose collapses the
-    zero-gradient direction to an artificially tight variance).
-
-    Tested via ``np.std(row) < eps`` — captures both the all-zero case
-    and the all-constant-nonzero case, both of which are
-    rank-deficient with respect to the corresponding parameter.
-
-    Returns a length-``n_params`` boolean mask; entry 0 (alpha) is
-    always ``False`` because ``alpha``'s Jacobian column is the
-    constant ``1`` and is implicit, not stored as a design-matrix row.
-    """
-    flags = np.zeros(n_params, dtype=bool)
-    n_rows = design_matrix.shape[0]
-    for i in range(1, n_params):
-        row_idx = i - 1
-        if row_idx >= n_rows:
-            continue
-        if np.std(design_matrix[row_idx]) < eps:
-            flags[i] = True
-    return flags
-
-
 def _derive_p0(
     *,
     target: pd.Series,
@@ -473,24 +312,13 @@ class ScipyParametricModel:
            None``.
         4. ``p0`` derivation (plan D4): data-driven inside
            :func:`_derive_p0` unless an explicit ``config.p0`` is set.
-        5. :func:`scipy.optimize.curve_fit` with ``method="trf"``,
-           bounded by :func:`_build_bounds` (plan 08a D1/D2), with
-           ``loss=cfg.loss`` and ``max_nfev=cfg.max_iter``.
-           ``OptimizeWarning`` (e.g.  rank-deficient Jacobian → ``pcov``
-           full of ``inf``) is captured and re-emitted at ``loguru``
-           WARN level.
-        6. Bound-saturation override (plan 08a D4).  TRF returns a
-           Moore-Penrose pseudo-inverse ``pcov`` even at a bound, so the
-           existing ``np.isfinite`` finiteness check would otherwise
-           miss "parameter unidentifiable, settled at a bound".
-           :func:`_detect_at_bound` flags every popt entry that TRF
-           clamped; the matching ``pcov`` diagonal entries are
-           overwritten with ``np.inf`` so downstream std-err and CI
-           rendering treats them as unreliable.
-        7. ``pcov``-inf post-check (NFR-4): a dedicated WARNING is
-           emitted when any diagonal entry is non-finite, *naming the
-           affected parameters* — whether the cause is rank deficiency
-           or bound saturation.
+        5. :func:`scipy.optimize.curve_fit` with ``method="lm"`` and
+           ``maxfev=config.max_iter``.  ``OptimizeWarning`` (e.g.
+           rank-deficient Jacobian → ``pcov`` full of ``inf``) is
+           captured and re-emitted at ``loguru`` WARN level.
+        6. ``pcov``-inf post-check (NFR-4): a dedicated WARNING is
+           emitted when any diagonal entry is non-finite, regardless of
+           whether ``OptimizeWarning`` fired.
 
         Re-calling :meth:`fit` discards the previous parameter vector,
         covariance matrix, and param-name tuple entirely (NFR-5).
@@ -547,45 +375,35 @@ class ScipyParametricModel:
             )
 
         # --- 5. curve_fit ----------------------------------------------
-        # Plan 08a D1: bounded TRF.  ``method="trf"`` accepts ``loss=`` for
-        # all four supported values (linear, soft_l1, huber, cauchy) and
-        # uses ``max_nfev`` as the iteration budget.  The bounded fit
-        # converts the rank-deficient-fold divergence (alpha at -7e6 MW
-        # under unbounded LM) into the documented "parameter at a bound"
-        # failure mode, surfaced via the bound-saturation override below.
-        # The Gaussian-CI reasoning in Cell 12 of the notebook only
-        # holds for ``loss="linear"`` and only when no parameter is at
-        # a bound; both caveats are now explicit in the appendix.
+        # Plan D3: ``cfg.loss`` must reach ``curve_fit``.  ``method="lm"`` is
+        # LM's native unconstrained solver and accepts ``maxfev`` + the
+        # default ``loss="linear"``; any non-linear (robust) loss requires
+        # ``method="trf"`` (scipy enforces this) and uses ``max_nfev`` as the
+        # iteration budget.  The Gaussian-CI reasoning in Cell 12 of the
+        # notebook only holds for ``loss="linear"``; choosing a robust loss
+        # is an informed override by the user.
         target_arr = np.asarray(target, dtype=np.float64)
-        param_names = _build_param_names(
-            diurnal_harmonics=cfg.diurnal_harmonics,
-            weekly_harmonics=cfg.weekly_harmonics,
-        )
-        bounds_lower, bounds_upper = _build_bounds(
-            diurnal_harmonics=cfg.diurnal_harmonics,
-            weekly_harmonics=cfg.weekly_harmonics,
-        )
-        # Guard against ``p0`` lying outside the bounds — possible only
-        # for an explicit ``config.p0`` override; the data-driven
-        # ``_derive_p0`` always produces non-negative slope estimates
-        # (its slope formula divides positive-by-positive sums) and a
-        # mean-of-target alpha well inside [0, 100_000].  Clipping
-        # rather than raising keeps the override ergonomic; an out-of-
-        # bound config value is treated as a request for "as close to
-        # the bound as possible" rather than an error.
-        p0 = np.clip(p0, bounds_lower, bounds_upper)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            popt, pcov = curve_fit(
-                _parametric_fn,
-                design_matrix,
-                target_arr,
-                p0=p0,
-                method="trf",
-                bounds=(bounds_lower, bounds_upper),
-                loss=cfg.loss,
-                max_nfev=cfg.max_iter,
-            )
+            if cfg.loss == "linear":
+                popt, pcov = curve_fit(
+                    _parametric_fn,
+                    design_matrix,
+                    target_arr,
+                    p0=p0,
+                    method="lm",
+                    maxfev=cfg.max_iter,
+                )
+            else:
+                popt, pcov = curve_fit(
+                    _parametric_fn,
+                    design_matrix,
+                    target_arr,
+                    p0=p0,
+                    method="trf",
+                    loss=cfg.loss,
+                    max_nfev=cfg.max_iter,
+                )
 
         for w in caught:
             if issubclass(w.category, OptimizeWarning):
@@ -595,85 +413,19 @@ class ScipyParametricModel:
                     str(w.message),
                 )
 
-        # --- 6. Pcov unreliability overrides (plan 08a D4) --------------
-        # Three cases that the raw ``np.isfinite`` check would otherwise
-        # miss under bounded TRF:
-        #
-        # (a) Bound saturation.  TRF uses a Moore-Penrose pseudo-inverse
-        #     for ``pcov`` on rank-deficient problems, so a parameter
-        #     clamped at a bound would read as having a *finite*
-        #     (inflated) covariance — the existing finiteness WARN
-        #     would not fire.  Detect via :func:`_detect_at_bound`.
-        # (b) Implausibly large pseudo-inverse variance.  A near-
-        #     singular Jacobian (e.g. 50-row 43-parameter near-
-        #     degenerate-temperature fixture) produces a finite-but-
-        #     enormous diagonal (~1e14).  At that point the implied
-        #     Gaussian CI is wider than the bound itself; surfacing
-        #     as ``inf`` is more honest than publishing a meaningless
-        #     number.  Detect via :func:`_detect_implausible_variance`.
-        # (c) Zero-information Jacobian column.  When CDD ≡ 0 on a
-        #     winter-only fold (or HDD ≡ 0 on a summer-only fold), the
-        #     corresponding parameter has gradient identically zero;
-        #     TRF cannot move the iterate from its starting point and
-        #     ``popt`` is determined by initialisation rather than the
-        #     data.  Moore-Penrose collapses the zero-gradient
-        #     direction to an artificially tight variance (e.g.
-        #     ~1e-15) — the *opposite* of the (b) case but equally
-        #     meaningless.  Detect by inspecting the design-matrix
-        #     row variance: see :func:`_detect_zero_information_columns`.
-        popt_arr = np.asarray(popt, dtype=np.float64)
-        pcov_arr = np.asarray(pcov, dtype=np.float64).copy()
-        # ``np.diag`` on a 2-D array returns a *view*; ``.copy()`` here
-        # is defensive — a future refactor that moves the implausible-
-        # variance computation below the diagonal-override loop would
-        # otherwise see infinities and silently mis-classify.
-        diag_raw = np.diag(pcov_arr).copy()
-        at_bound = _detect_at_bound(popt_arr, bounds_lower, bounds_upper)
-        implausible = _detect_implausible_variance(diag_raw, bounds_lower, bounds_upper)
-        zero_info = _detect_zero_information_columns(design_matrix, n_params=popt_arr.shape[0])
-        unreliable = at_bound | implausible | zero_info
-        if unreliable.any():
-            # Set the entire row and column for every unreliable
-            # parameter to ``np.inf`` — leaving the off-diagonal entries
-            # at their TRF pseudo-inverse values would publish a
-            # numerically-incoherent covariance matrix (a row/column of
-            # finite off-diagonal values next to an infinite diagonal
-            # is not positive-semidefinite).  Downstream consumers of
-            # ``metadata.hyperparameters["covariance_matrix"]`` then
-            # see a self-consistent "this parameter's covariance is
-            # unreliable in every direction" signal rather than a
-            # silently-broken matrix.
-            for idx in np.flatnonzero(unreliable):
-                pcov_arr[idx, :] = np.inf
-                pcov_arr[:, idx] = np.inf
-        # Zero-information parameters have a gradient identically zero,
-        # so TRF's final ``popt`` for them is determined by
-        # ``make_strictly_feasible``'s tiny perturbation off the initial
-        # guess, not by the data.  Clamp to ``0`` (the maximally
-        # physically-sensible "no effect" default; within the bounds
-        # for every parameter — slopes' lower bound is ``0``, Fourier
-        # bounds straddle zero) so downstream ``predict()`` does not
-        # propagate an arbitrary perturbation as a nominal contribution.
-        if zero_info.any():
-            for idx in np.flatnonzero(zero_info):
-                popt_arr[idx] = float(np.clip(0.0, bounds_lower[idx], bounds_upper[idx]))
-
-        # --- 7. pcov-inf post-check (NFR-4) -----------------------------
-        diag = np.diag(pcov_arr)
-        non_finite_mask = ~np.isfinite(diag)
-        if non_finite_mask.any():
-            affected = [param_names[i] for i in np.flatnonzero(non_finite_mask)]
+        # --- 6. pcov-inf post-check (NFR-4) -----------------------------
+        pcov_arr = np.asarray(pcov, dtype=np.float64)
+        if not np.all(np.isfinite(np.diag(pcov_arr))):
             logger.warning(
-                "ScipyParametricModel.fit: pcov diagonal contains "
-                "non-finite entries for parameters {} — parameter "
-                "identifiability is degraded on this fold (rank-deficient "
-                "Jacobian or parameter at a bound; see plan 08a D4). "
-                "CIs for affected parameters will be reported as +/- inf.",
-                affected,
+                "ScipyParametricModel.fit: pcov diagonal contains non-finite "
+                "entries — parameter identifiability is degraded on this fold "
+                "(try narrowing config.feature_columns, tightening the "
+                "training window, or supplying an explicit config.p0). "
+                "CIs for affected parameters will be reported as +/- inf."
             )
 
-        # --- 8. Publish state -------------------------------------------
-        self._popt = popt_arr
+        # --- 7. Publish state -------------------------------------------
+        self._popt = np.asarray(popt, dtype=np.float64)
         self._pcov = pcov_arr
         # Deliberately store the design-matrix column order (temperature
         # placeholder + Fourier columns) as feature_columns so the
@@ -682,7 +434,10 @@ class ScipyParametricModel:
         # temperature column was pre-transformed into HDD/CDD rows.
         self._feature_columns = ("hdd", "cdd", *fourier_cols)
         self._fit_utc = datetime.now(UTC)
-        self._param_names = param_names
+        self._param_names = _build_param_names(
+            diurnal_harmonics=cfg.diurnal_harmonics,
+            weekly_harmonics=cfg.weekly_harmonics,
+        )
 
     def predict(self, features: pd.DataFrame) -> pd.Series:
         """Return parametric-model predictions indexed to ``features.index``.
