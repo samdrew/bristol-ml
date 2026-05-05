@@ -1,0 +1,7 @@
+# @package services.text_stats
+#
+# Worked example: text-statistics service.  See
+# `src/TEMPLATE_PROJECT/services/text_stats_service.py`.
+
+input_path: tests/fixtures/sample_text.txt
+output_format: json

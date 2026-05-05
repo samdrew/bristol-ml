@@ -1,0 +1,26 @@
+# Root Hydra config.  Compose by `python -m TEMPLATE_PROJECT` (which
+# uses this file as the entry point) or by `load_config(...)` from
+# tests / notebooks.
+#
+# Add a config group by:
+#   1. dropping a YAML file under `conf/<group>/<name>.yaml` with a
+#      `# @package <group>.<name>` header;
+#   2. naming the variant in the `defaults:` list below;
+#   3. adding the matching Pydantic field to `conf/_schemas.py`.
+
+defaults:
+  - _self_
+  - services: text_stats   # the template's worked-example service
+
+project:
+  name: template_project
+  seed: 0
+
+# Hydra writes per-run outputs under `outputs/`; that directory is
+# gitignored.
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

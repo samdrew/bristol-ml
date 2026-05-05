@@ -3,91 +3,21 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bristol_ml"
+name = "TEMPLATE_PROJECT"
 version = "0.0.0"
-description = "Reference ML/DS architecture with a GB day-ahead electricity demand forecaster as the worked example."
+description = "Python project template scaffold extracted from bristol_ml — Hydra+Pydantic config, Claude Code agent infrastructure, four-tier doc methodology."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Sam Drew", email = "comm@sdrew.com" }]
 dependencies = [
+    # Config: Hydra composes YAML; Pydantic validates the resolved tree
+    # at the CLI boundary.  See ADR 0001.
     "hydra-core>=1.3,<2",
     "omegaconf>=2.3,<3",
     "pydantic>=2.7,<3",
-    "httpx>=0.27,<1",
-    "tenacity>=9,<10",
-    "pyarrow>=16,<22",
-    "pandas>=2.2,<3",
+    # Logging.
     "loguru>=0.7,<1",
-    "statsmodels>=0.14,<1",
-    # Stage 8 (D12): explicit scipy declaration.  scipy is transitively pulled
-    # in by statsmodels at present, but relying on that is fragile — a fresh
-    # venv resolving statsmodels from a wheel-only mirror could arrive
-    # without scipy's exposed C extensions.  1.13 is the first scipy release
-    # with formal NumPy 2.0 support; ``<2`` guards a hypothetical ABI break.
-    "scipy>=1.13,<2",
-    "joblib>=1.4,<2",
-    # Stage 6 (D3): matplotlib promoted from dev to runtime so
-    # ``python -m bristol_ml.evaluation.plots --help`` works on non-dev installs
-    # per AC-10 / DESIGN §2.1.1. ``seaborn`` added alongside for the Stage 6
-    # heatmap helper and the ``colorblind`` palette utilities (D1).
-    "matplotlib>=3.8,<4",
-    "seaborn>=0.13,<1",
-    # Stage 10 (D1): PyTorch for the small-MLP neural network.  The lower
-    # bound is ``>=2.7`` because CUDA 12.8 / Blackwell (RTX 5090, sm_120) is
-    # the dev host — cu128 wheels first landed on the 2.7 track.  On Linux
-    # ``torch`` resolves from the ``pytorch-cu128`` index declared below
-    # (CUDA-enabled wheel, ~2 GB); on macOS / Windows it resolves from PyPI
-    # (MPS-capable on Apple Silicon; CPU-only on Windows).  Plan D11's
-    # auto-select helper falls back to CPU on hosts without CUDA / MPS so
-    # the Stage 10 meetup demo works on any laptop.
-    "torch>=2.7,<3",
-    # Stage 12 (D1, D2): FastAPI + uvicorn for the minimal HTTP serving
-    # layer.  No ``[standard]`` extra (D2 / Scope-Diff cut) — ``httpx`` is
-    # already a runtime dep for ingestion, so ``fastapi.testclient.TestClient``
-    # works without it; the extras (``jinja2``, ``python-multipart``,
-    # ``fastapi-cli``) are not required by any AC.  Upper bounds match the
-    # project's standard major-version pin convention.
-    "fastapi>=0.115,<1",
-    "uvicorn>=0.30,<1",
-    # Stage 12 (D10 — Ctrl+G reversal): ``skops.io`` is the canonical
-    # save/load primitive across all six model families.  Joblib was the
-    # Stage 4-11 default and is *removed* at the registry boundary because
-    # the Stage 12 serving layer is a network-facing deserialiser; loading
-    # a malicious joblib artefact is RCE.  ``models/io.py`` retains
-    # ``save_joblib`` / ``load_joblib`` helpers for one stage with a
-    # ``DeprecationWarning`` so any external scripts can complete a
-    # one-off migration before Stage 13.
-    "skops>=0.10,<1",
-    # Stage 14 (D6 — Ctrl+G 2026-04-27 OQ-A): the OpenAI Python SDK is
-    # the live LLM extractor's only network dependency.  ``response_format``
-    # with ``type='json_schema'`` (strict-mode CFG token masking, GA since
-    # August 2024) requires SDK ``>=1.40``; the upper bound holds the
-    # major-version pin convention.  The dep is *runtime*, not dev,
-    # because plan §1 D4's triple-gating means the SDK is imported only
-    # when ``type='openai'`` *and* the API-key env-var is populated *and*
-    # ``BRISTOL_ML_LLM_STUB`` is unset — in which case the operator has
-    # explicitly opted into the live path and a missing ``openai`` module
-    # would surface as a deferred ImportError rather than at config time.
-    # Keeping it in runtime deps means ``uv sync`` produces a working
-    # install for the demo without needing the dev group.
-    "openai>=1.40,<2",
-    # Stage 15 (D15 + A2 — Ctrl+G 2026-04-27): ``sentence-transformers`` is
-    # the Stage 15 live embedder backbone.  The plan-bound default checkpoint
-    # ``Alibaba-NLP/gte-modernbert-base`` (ModernBERT, December 2024) requires
-    # ``transformers >= 4.48.0`` which sentence-transformers ``>=3.3`` brings
-    # in; the upper bound holds the major-version pin convention.  Like
-    # ``openai`` above, the dep is *runtime* because plan §1 D8's triple-
-    # gating means the SDK is imported only when YAML ``type ==
-    # "sentence_transformers"`` *and* ``BRISTOL_ML_EMBEDDING_STUB`` is unset.
-    "sentence-transformers>=3.3,<5",
-    # Stage 15 (A3 — Ctrl+G flip from PCA to UMAP for projection quality on
-    # 768-dim embeddings).  ``umap-learn`` brings ``numba`` + ``llvmlite`` +
-    # ``pynndescent`` (~200 MB compiled stack); the cost is accepted because
-    # PCA's two principal components do not preserve neighbourhood structure
-    # in high-dim space (R-3 / R-6).  Used only by the Stage 15 notebook's
-    # 2D-projection cell via :func:`bristol_ml.embeddings._projection.project_to_2d`.
-    "umap-learn>=0.5,<1",
 ]
 
 [dependency-groups]
@@ -95,21 +25,10 @@ dev = [
     "pytest>=8,<9",
     "ruff>=0.6,<1",
     "pre-commit>=3.7,<5",
-    "pytest-recording>=0.13,<1",
-    "vcrpy>=6,<8",
-    "jupyter>=1,<2",
-    "nbconvert>=7,<8",
-    # Stage 9 (D10): MLflow is a *test-only* dependency — the registry does
-    # not import it at runtime.  The PyFunc adapter at
-    # ``tests/integration/mlflow_adapter.py`` and the D10 round-trip test
-    # prove the mechanical-migration claim in the layer doc is falsifiable.
-    # Pinned to the 2.x line; a future MLflow 3.x PyFunc API change should
-    # be addressed at the version-bump boundary, not silently absorbed.
-    "mlflow>=2.14,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bristol_ml"]
+packages = ["src/TEMPLATE_PROJECT"]
 
 [tool.ruff]
 line-length = 100
@@ -120,36 +39,12 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["bristol_ml", "conf"]
-
-# Stage 10 (D1): torch is installed from the PyTorch cu128 wheel index on
-# Linux (the dev-host Dockerfile targets ``nvidia/cuda:12.8.0`` / Blackwell)
-# and from PyPI on every other platform (MPS on Apple Silicon, CPU on
-# Windows).  ``explicit = true`` on the index means packages are only taken
-# from it when the ``sources`` table below opts them in — prevents any
-# unrelated dep silently moving to the pytorch index.
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
-]
+known-first-party = ["TEMPLATE_PROJECT", "conf"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-# ``-m "not slow and not gpu"`` excludes both the ``@pytest.mark.slow``
-# benchmark guards (Stage 7 T4 clause) and the ``@pytest.mark.gpu``
-# CUDA-path tests (Stage 10 NFR-1 close-match) from the default suite.  Run
-# them explicitly with ``uv run pytest -m slow`` or ``uv run pytest -m gpu``.
-addopts = "-ra --strict-markers --record-mode=none -m 'not slow and not gpu'"
+addopts = "-ra --strict-markers"
 markers = [
-    "slow: benchmark/performance guards excluded from the default run; opt in with -m slow.",
-    "gpu: opt-in CUDA-path tests, skipped when torch.cuda.is_available() is False.",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning:vcr.*",
+    "slow: long-running tests excluded from the default run; opt in with -m slow.",
 ]
