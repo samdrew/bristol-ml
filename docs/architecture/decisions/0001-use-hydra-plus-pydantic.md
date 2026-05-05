@@ -21,7 +21,7 @@ Use a two-stage pipeline:
 3. **Pydantic** (`AppConfig.model_validate(data)`) validates types, ranges, and cross-field invariants.
 4. Application code only ever sees the Pydantic model — never `DictConfig`.
 
-The schema is in `conf/_schemas.py`. The glue is `bristol_ml.config`.
+The schema is in `conf/_schemas.py`. The glue is `TEMPLATE_PROJECT.config`.
 
 ## Consequences
 

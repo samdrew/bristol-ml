@@ -1,9 +1,10 @@
 # Architecture
 
-The canonical architecture is **[`DESIGN.md` §3](../intent/DESIGN.md#3-system-architecture)**.
-This tree adds depth below that overview; it does not replace it. If
-anything here disagrees with `DESIGN.md`, the spec wins — surface the
-drift rather than reconcile silently.
+The canonical architecture is
+**[`DESIGN.md` §3](../intent/DESIGN.md#3-system-architecture)**.
+This tree adds depth below that overview; it does not replace it.
+If anything here disagrees with `DESIGN.md`, the spec wins —
+surface the drift rather than reconcile silently.
 
 ## How this tree is organised
 
@@ -15,64 +16,47 @@ docs/architecture/
 ```
 
 - **`layers/<name>.md`** — a layer's public contract and internal
-  design, plus the concrete modules that realise it. Written when the
-  layer first lands; updated when a later stage stresses its
-  conventions. A layer doc typically carries a **Contract** section
-  (load-bearing for other layers; changes warrant an ADR) and an
-  **Internals** section (evolves freely; audited at PR review).
-- **`decisions/NNNN-*.md`** — ADRs for one-off choices. Overturn by
-  supersession, not edit.
+  design, plus the concrete modules that realise it.  Written when
+  the layer first lands; updated when a later stage stresses its
+  conventions.  A layer doc typically carries a **Contract**
+  section (load-bearing for other layers; changes warrant an ADR)
+  and an **Internals** section (evolves freely; audited at PR
+  review).
+- **`decisions/NNNN-*.md`** — ADRs for one-off choices.  Overturn
+  by supersession, not edit.
 
-Cross-layer conventions belong in layer docs, not ADRs. A would-be ADR
-that reads "how we do X everywhere" is really a layer-doc addition or
-a principle in DESIGN.md §2.
+Cross-layer conventions belong in layer docs, not ADRs.  A would-be
+ADR that reads "how we do X everywhere" is really a layer-doc
+addition or a principle in DESIGN.md §2.
 
 ## Layers
 
-Only layers with a written doc. Unwritten layers are listed in
-[`ROADMAP.md`](../../ROADMAP.md) — the architecture tree reflects what
-exists, not what's planned.
+The shipped scaffold has two renameable layer stubs.  Replace /
+extend / rename them as your project's domain demands.
 
 | Layer | Doc |
 |-------|-----|
-| Ingestion | [`layers/ingestion.md`](./layers/ingestion.md) |
-| Features | [`layers/features.md`](./layers/features.md) |
-| Evaluation | [`layers/evaluation.md`](./layers/evaluation.md) |
-| Models | [`layers/models.md`](./layers/models.md) |
-| Models — NN sub-layer | [`layers/models-nn.md`](./layers/models-nn.md) |
-| Registry | [`layers/registry.md`](./layers/registry.md) |
-| Serving | [`layers/serving.md`](./layers/serving.md) |
-| LLM | [`layers/llm.md`](./layers/llm.md) |
-| Embeddings | [`layers/embeddings.md`](./layers/embeddings.md) |
+| Core | [`layers/core.md`](./layers/core.md) |
+| Services | [`layers/services.md`](./layers/services.md) |
 
 ## Cross-cutting concerns
 
-- **Configuration.** Fully specified by
+- **Configuration.**  Fully specified by
   [`DESIGN.md` §7](../intent/DESIGN.md#7-configuration-and-extensibility)
-  (Hydra + Pydantic, override precedence, the `Model` protocol, config
-  groups). No layer doc here unless implementation ever diverges from
-  §7 — the spec-drift rule says surface the divergence first, then
-  decide whether to record or close.
-- **Provenance.** Required of every derived artefact
-  ([`DESIGN.md` §2.1.6](../intent/DESIGN.md#21-architectural)). The
-  concrete form — `retrieved_at_utc` columns in raw parquet, metadata
-  sidecars alongside registry entries — is documented in the layer
-  that implements it.
-- **Orchestration.** Manual (`python -m bristol_ml.<module>`) until
-  Stage 19. Prefect flow documentation arrives with that stage.
+  (Hydra + Pydantic, override precedence, config groups).  See
+  [ADR 0001](./decisions/0001-use-hydra-plus-pydantic.md) for the
+  framework rationale.
+- **Provenance.**  Required of every derived artefact
+  ([`DESIGN.md` §2.1.6](../intent/DESIGN.md#21-architectural)).
+  The concrete form is documented in the layer that implements it.
 
 ## Decisions
 
-Append-only by convention — supersede older ADRs rather than editing.
+Append-only by convention — supersede older ADRs rather than
+editing.
 
-- [`0001-use-hydra-plus-pydantic.md`](./decisions/0001-use-hydra-plus-pydantic.md) — config framework.
-- [`0002-filesystem-registry-first.md`](./decisions/0002-filesystem-registry-first.md) — registry storage before Stage 9 builds it (superseded at the serialisation boundary by 0005).
-- [`0003-protocol-for-model-interface.md`](./decisions/0003-protocol-for-model-interface.md) — `typing.Protocol` over `abc.ABC` for the `Model` interface.
-- *0004 — reserved* for the deferred model-dispatcher consolidation refactor (Stage 7/8 housekeeping carry-over; filename earmarked `0004-model-dispatcher-consolidation.md`). Revisit at the next housekeeping stage or before a seventh model family lands.
-- [`0005-skops-for-model-serialisation.md`](./decisions/0005-skops-for-model-serialisation.md) — Stage 12 joblib → `skops.io` migration; envelope-of-primitives invariant; trust-list contract for future model families.
-- [`0006-serving-lazy-load-cache.md`](./decisions/0006-serving-lazy-load-cache.md) — Stage 12 lifespan loads only the default model; non-default `run_id`s lazy-load and cache (single highest-leverage cut).
-- [`0007-ingestion-public-contract-bifurcates-by-data-shape.md`](./decisions/0007-ingestion-public-contract-bifurcates-by-data-shape.md) — ingestion-layer public contract is two-tier (level data: `fetch`+`load`; event log: `fetch`+`load`+temporal-query primitive).
-- [`0008-embedding-index-protocol.md`](./decisions/0008-embedding-index-protocol.md) — `Embedder` and `VectorIndex` are `runtime_checkable` `typing.Protocol` types, not ABCs; concrete implementations satisfy them structurally (Stage 15).
+- [`0001-use-hydra-plus-pydantic.md`](./decisions/0001-use-hydra-plus-pydantic.md)
+  — config framework.
 
 ## Changing the architecture
 
@@ -80,4 +64,4 @@ Append-only by convention — supersede older ADRs rather than editing.
    `decisions/`.
 2. Record the change in `CHANGELOG.md`.
 3. If DESIGN.md §3 or §6 misrepresents the new state, update it in
-   the same PR. The spec always reflects `main`.
+   the same PR.  The spec always reflects `main`.
