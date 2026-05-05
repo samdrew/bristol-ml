@@ -63,9 +63,9 @@ Rules for assigning tags:
     determinism; an error-handling path for an input the intent does
     not require support for.
   - A decision is `HOUSEKEEPING` only if it is cross-stage carry-over
-    (e.g. the dispatcher-site update every modelling stage has repeated
-    since Stage 4; a CHANGELOG entry; a DESIGN.md §6 layout-tree
-    update).
+    (e.g. a dispatcher-site update that every stage of a particular
+    family has repeated since the family's first stage; a CHANGELOG
+    entry; a DESIGN.md §6 layout-tree update).
 
 ## Closing sentence — the single highest-leverage cut
 
