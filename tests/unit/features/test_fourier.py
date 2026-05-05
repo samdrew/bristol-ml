@@ -251,6 +251,103 @@ def test_append_weekly_fourier_output_is_not_dst_sensitive() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7b. REGRESSION GUARD — microsecond-precision DatetimeIndex
+#
+# Bug fixed 2026-05-04 ("fourier-microsecond-precision" branch).  The
+# Stage 3 / Stage 5 assembler writes parquet with
+# ``timestamp[us, tz=UTC]``; when ``pyarrow`` round-trips that into
+# pandas the resulting ``DatetimeIndex`` has *microsecond* precision,
+# not nanosecond.  The pre-fix implementation used
+# ``df.index.view("int64") // _NANOSECONDS_PER_HOUR`` which assumed
+# nanosecond precision and silently divided microsecond timestamps by
+# a constant 1000x too large — collapsing a year of hourly data onto
+# just ~10 distinct integer ``t`` values, making every sin/cos column
+# nearly constant.  Stage 8 ``ScipyParametricModel.fit`` (and any other
+# caller of ``append_weekly_fourier`` against a parquet-loaded frame)
+# saw a rank-deficient design matrix, ``curve_fit`` failed convergence
+# with ``alpha`` in the millions and infinite covariance diagonals,
+# and the user-facing scatter plot showed forecasts at -7 000 000 MW.
+#
+# All previous tests in this file used ``pd.date_range(...)`` which
+# defaults to nanosecond precision — the bug was invisible to the
+# suite.  The two tests below are the load-bearing regression guards:
+# they exercise the precision the assembler actually produces.
+# ---------------------------------------------------------------------------
+
+
+def test_append_weekly_fourier_microsecond_precision_index() -> None:
+    """Sin/cos columns must take many distinct values on a microsecond-precision index.
+
+    A year of hourly data has 8760 rows.  A correctly-implemented
+    weekly Fourier basis sees those 8760 distinct UTC timestamps and
+    produces a sinusoid that, modulo period 168, samples ~52 full
+    cycles — yielding ``len(np.unique(...)) ≈ 84``.  The pre-fix
+    implementation collapsed the year onto only 10 distinct integer
+    ``t`` values and therefore only 10 distinct sin/cos values.  The
+    threshold in this test (>= 50 distinct rounded sin values) catches
+    that collapse with margin to spare without being brittle on minor
+    numerical-rounding shifts.
+    """
+    # Match what ``assembler.load_calendar`` returns: microsecond-
+    # precision tz-aware UTC index.
+    idx_us = pd.date_range("2024-01-01", periods=8760, freq="h", tz="UTC").as_unit("us")
+    assert idx_us.dtype == "datetime64[us, UTC]", (
+        f"Test fixture must be microsecond-precision; got {idx_us.dtype}"
+    )
+    df = pd.DataFrame({"value": np.arange(8760)}, index=idx_us)
+
+    out = append_weekly_fourier(df, period_hours=168, harmonics=1, column_prefix="weekly")
+
+    sin_arr = np.asarray(out["weekly_sin_k1"])
+    distinct = len(np.unique(np.round(sin_arr, 8)))
+    assert distinct >= 50, (
+        f"weekly_sin_k1 produced only {distinct} distinct values across 8760 hours; "
+        f"a correct sinusoid samples ~84 distinct values.  This is the "
+        f"microsecond-precision regression — see fourier.py docstring."
+    )
+    # And the squared norm should be ~n/2 = 4380 for a properly-shaped sinusoid.
+    sq_norm = float((sin_arr**2).sum())
+    assert 4000.0 <= sq_norm <= 4800.0, (
+        f"||weekly_sin_k1||² = {sq_norm:.1f}; expected ~4380 (= n/2 for a unit-amplitude "
+        f"sinusoid over a year of hourly data).  Norm well outside that range indicates "
+        f"the sin column has collapsed to near-constant values — the pre-fix "
+        f"microsecond-precision regression."
+    )
+
+
+def test_append_weekly_fourier_precision_independent() -> None:
+    """Same UTC timestamps -> same Fourier values regardless of index precision.
+
+    pandas exposes 4 datetime resolutions (s / ms / us / ns).  The
+    helper must compute identical sin/cos columns at every resolution
+    because the underlying timestamps are identical.  This test pins
+    that contract — a future regression that re-introduces a
+    precision-dependent path (e.g. another ``view("int64")``) fails
+    here loudly.
+    """
+    base = pd.date_range("2024-01-01", periods=200, freq="h", tz="UTC")  # ns by default
+    columns = ("weekly_sin_k1", "weekly_cos_k1", "weekly_sin_k2", "weekly_cos_k2")
+    outs: dict[str, np.ndarray] = {}
+    for unit in ("s", "ms", "us", "ns"):
+        idx = base.as_unit(unit)
+        df = pd.DataFrame({"x": 0.0}, index=idx)
+        out = append_weekly_fourier(df, period_hours=168, harmonics=2, column_prefix="weekly")
+        outs[unit] = np.column_stack([out[c].to_numpy() for c in columns])
+    # Cross-precision equality: every cell within 1e-12 of the ns reference.
+    reference = outs["ns"]
+    for unit, arr in outs.items():
+        np.testing.assert_allclose(
+            arr,
+            reference,
+            atol=1e-12,
+            err_msg=(
+                f"Fourier columns at unit={unit!r} differ from nanosecond reference "
+                f"by more than 1e-12.  The helper must be precision-independent."
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
 # 8. CLI smoke test
 # ---------------------------------------------------------------------------
 

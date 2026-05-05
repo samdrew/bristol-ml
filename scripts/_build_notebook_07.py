@@ -405,9 +405,19 @@ cell_8 = code("""# Plan T5 Cell 8: `evaluate(..., return_predictions=True)` over
 # configured splitter.  Produces per-fold metrics + a long-form
 # predictions DataFrame that feeds Cell 9's ACF plot (the Stage 6 →
 # Stage 7 narrative payoff).
-
+#
+# Each SARIMAX MLE fit takes ~7-8 s on a 30-day window; the harness's
+# `n_jobs` knob (added 2026-05-04) dispatches per-fold work across
+# worker processes via joblib's loky backend.  We use one fewer than
+# all available cores so the notebook stays responsive (the OS keeps
+# a core for matplotlib + the kernel + any other notebook activity).
+# `cpu_count()` returns None in some sandboxed environments, hence
+# the `or 1` fall-through.
 splitter_cfg = cfg.evaluation.rolling_origin
 metric_fns = [METRIC_REGISTRY[name] for name in ("mae", "mape", "rmse", "wape")]
+N_JOBS = max(1, (os.cpu_count() or 1) - 1)
+print(f"Rolling-origin parallelism: n_jobs={N_JOBS} "
+      f"(of {os.cpu_count() or 'unknown'} cores)")
 
 # SARIMAX needs a fresh instance so the earlier single-fold fit is not
 # re-used inside the harness.
@@ -422,6 +432,7 @@ sarimax_metrics_df, sarimax_preds_df = evaluate(
     target_column="nd_mw",
     feature_columns=tuple(exog_cols),
     return_predictions=True,
+    n_jobs=N_JOBS,
 )
 print(f"SARIMAX evaluate: {time.time() - t0:.1f}s, {len(sarimax_metrics_df)} folds")
 print(sarimax_metrics_df.to_string(index=False, float_format=lambda v: f'{v:.3f}'))
@@ -470,6 +481,7 @@ naive_metrics_df, naive_preds_df = evaluate(
     target_column="nd_mw",
     feature_columns=tuple(exog_cols),
     return_predictions=True,
+    n_jobs=N_JOBS,
 )
 print(f"NaiveModel evaluate: {time.time() - t0:.1f}s")
 
@@ -482,6 +494,7 @@ linear_metrics_df, linear_preds_df = evaluate(
     target_column="nd_mw",
     feature_columns=tuple(exog_cols),
     return_predictions=True,
+    n_jobs=N_JOBS,
 )
 print(f"LinearModel evaluate: {time.time() - t0:.1f}s")
 

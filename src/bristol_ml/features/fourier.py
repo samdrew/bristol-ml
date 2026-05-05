@@ -47,10 +47,10 @@ import pandas as pd
 __all__ = ["append_weekly_fourier"]
 
 
-# Nanoseconds-per-hour constant; spelled out so the ``int64`` division is
-# self-documenting.  ``pd.DatetimeIndex.view("int64")`` yields UTC
-# nanoseconds since the Unix epoch for tz-aware indices.
-_NANOSECONDS_PER_HOUR: int = 3_600_000_000_000
+#: Reference epoch for the time-since-epoch conversion below.  Anchored at
+#: UTC so the result is DST-insensitive regardless of the input index's
+#: timezone.
+_EPOCH: pd.Timestamp = pd.Timestamp("1970-01-01", tz="UTC")
 
 
 def append_weekly_fourier(
@@ -100,13 +100,31 @@ def append_weekly_fourier(
     Notes
     -----
     Values are ``sin(2πk · t / period_hours)`` and
-    ``cos(2πk · t / period_hours)`` where ``t`` is the integer number
-    of hours since the Unix epoch (UTC-anchored).  DST is irrelevant
-    because the conversion goes through UTC nanoseconds — a UTC
-    timestamp maps to the same integer hour regardless of the local
-    clock.  On the two DST-transition Sundays the output is continuous
-    across the transition (no jump), which is the property the
-    SARIMAX model relies on.
+    ``cos(2πk · t / period_hours)`` where ``t`` is the **floating-point**
+    number of hours since 1970-01-01 UTC.  DST is irrelevant: the
+    conversion goes through UTC, so a given UTC timestamp maps to the
+    same ``t`` regardless of the local clock.  On the two DST-transition
+    Sundays the output is continuous across the transition (no jump),
+    which is the property the SARIMAX model relies on.
+
+    Time-precision contract (changed 2026-05-04, "fourier-microsecond-
+    precision" branch).  The Stage 3 / Stage 5 assembler writes parquet
+    with ``timestamp[us, tz=UTC]`` and ``pyarrow`` round-trips that
+    precision into pandas; the loaded ``DatetimeIndex`` is therefore
+    microsecond, not nanosecond.  The previous implementation used
+    ``df.index.view("int64") // _NANOSECONDS_PER_HOUR`` which assumes
+    nanosecond precision and silently divided microsecond timestamps by
+    a constant 1000x too large — collapsing a year of hourly data onto
+    just ~10 distinct integer ``t`` values, making every sin/cos column
+    nearly constant and the resulting design matrix rank-deficient by
+    several columns.  This caused ``scipy.optimize.curve_fit`` to fail
+    convergence with ``alpha`` in the millions and infinite covariance
+    diagonals (Stage 8 user-reported regression).  The current
+    implementation uses ``(idx - 1970-01-01 UTC) / 1h`` which is
+    precision-independent — pandas computes the timedelta in the
+    index's native unit and the float division yields hours regardless
+    of whether the underlying integers are ``ns``, ``us``, ``ms``, or
+    ``s``.
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError(
@@ -126,13 +144,18 @@ def append_weekly_fourier(
     if harmonics == 0:
         return df.copy()
 
-    # Integer hours since the Unix epoch, UTC-anchored.  ``view("int64")``
-    # on a tz-aware DatetimeIndex yields UTC nanoseconds directly; floor
-    # division by nanoseconds-per-hour yields the integer-hour clock.
-    # This is DST-insensitive by construction: the same UTC timestamp
-    # always maps to the same integer hour.
-    hours_since_epoch = df.index.view("int64") // _NANOSECONDS_PER_HOUR
-    t = np.asarray(hours_since_epoch, dtype=np.float64)
+    # Floating-point hours since the UTC Unix epoch.  Precision-
+    # independent: pandas does the timedelta arithmetic in the index's
+    # native unit (``ns`` / ``us`` / ``ms`` / ``s``) and the division
+    # by ``Timedelta(hours=1)`` yields a float regardless.  The
+    # previous ``df.index.view("int64") // _NANOSECONDS_PER_HOUR``
+    # assumed nanosecond precision and produced collapsed sin/cos
+    # output for the microsecond-precision indices the Stage 3 / 5
+    # assembler emits — see the Notes section of the docstring.
+    t = np.asarray(
+        (df.index - _EPOCH) / pd.Timedelta(hours=1),
+        dtype=np.float64,
+    )
 
     # Build the new columns in a small dict so the output dtype is
     # unambiguously ``float64`` and the column-insertion order is

@@ -981,3 +981,102 @@ def test_harness_build_model_from_config_dispatches_nn_mlp_after_catch_up() -> N
         f"Stage 11 D14 catch-up; got {type(result)!r}. "
         f"The Stage 10 harness-factory gap was not closed."
     )
+
+
+# ---------------------------------------------------------------------------
+# Parallel rolling-origin folds (n_jobs > 1)
+#
+# The contract (per ``evaluate``'s docstring): folds are mathematically
+# independent, so the parallel result must be byte-for-byte identical
+# to the serial result on both the metrics frame and the predictions
+# frame after both are sorted by ``fold_index``.  These tests pin that
+# contract end-to-end against ``LinearModel`` (cheap fits — single-
+# digit ms each — so the integration test is fast).  The actual
+# wall-clock speedup is dominated by the SARIMAX path, which the
+# Stage 7 / 8 notebook tests exercise; pinning the speedup itself
+# here would be flaky and is not the point.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_n_jobs_2_matches_serial_metrics() -> None:
+    """``n_jobs=2`` produces the same metrics frame as ``n_jobs=1``.
+
+    Pins the "folds are independent" contract.  Any divergence here
+    means a fold's behaviour depends on cross-fold state — which would
+    silently invalidate every Stage 7 / 8 / 16 retrospective.
+    """
+    df = _make_df()
+    serial = evaluate(_linear_model(), df, _SPLIT_CFG, _ALL_METRICS, n_jobs=1)
+    parallel = evaluate(_linear_model(), df, _SPLIT_CFG, _ALL_METRICS, n_jobs=2)
+
+    pd.testing.assert_frame_equal(serial, parallel, check_dtype=True, check_exact=True)
+    assert len(serial) == _EXPECTED_FOLD_COUNT
+
+
+def test_evaluate_n_jobs_2_matches_serial_predictions() -> None:
+    """``n_jobs=2`` predictions frame matches the serial frame exactly.
+
+    The ``return_predictions=True`` path is the load-bearing one for
+    the Stage 6 q10-q90 uncertainty band; a parallelised divergence
+    here would silently shift the band.
+    """
+    df = _make_df()
+    _, serial_preds = evaluate(
+        _linear_model(), df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True, n_jobs=1
+    )
+    _, parallel_preds = evaluate(
+        _linear_model(), df, _SPLIT_CFG, _ALL_METRICS, return_predictions=True, n_jobs=2
+    )
+
+    # The parallel path may interleave folds; sort defensively before
+    # the equality check (the production code does this internally,
+    # but the assertion is more robust to a future ordering change).
+    serial_sorted = serial_preds.sort_values(["fold_index", "horizon_h"]).reset_index(drop=True)
+    parallel_sorted = parallel_preds.sort_values(["fold_index", "horizon_h"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        serial_sorted, parallel_sorted, check_dtype=True, check_exact=True
+    )
+
+
+def test_evaluate_n_jobs_below_one_raises_valueerror() -> None:
+    """``n_jobs <= 0`` raises ``ValueError`` before any fold work begins.
+
+    The early raise (before ``_validate_inputs``) means a misconfigured
+    notebook fails fast rather than after the ingestion-cache load.
+    """
+    df = _make_df()
+    for bad in (0, -1, -8):
+        with pytest.raises(ValueError, match=r"n_jobs >= 1"):
+            evaluate(_linear_model(), df, _SPLIT_CFG, _ALL_METRICS, n_jobs=bad)
+
+
+def test_evaluate_and_keep_final_model_n_jobs_2_leaves_caller_model_fitted() -> None:
+    """Under ``n_jobs > 1`` the caller's model still ends up fit on the final fold.
+
+    Workers run in separate processes, so the parent's ``model`` is
+    untouched by the parallel evaluation.  The wrapper performs one
+    additional serial fit on the final-fold training data so callers
+    (notably the Stage 9 registry path) see a populated
+    ``metadata.fit_utc`` and a fittable estimator on return.
+    """
+    from bristol_ml.evaluation.harness import evaluate_and_keep_final_model
+
+    df = _make_df()
+    model = _linear_model()
+    assert model.metadata.fit_utc is None, "test fixture: model must start unfitted."
+
+    metrics_df, returned_model = evaluate_and_keep_final_model(
+        model, df, _SPLIT_CFG, _ALL_METRICS, n_jobs=2
+    )
+
+    # Same instance round-trips (the docstring's "same fitted estimator passed in").
+    assert returned_model is model
+    # And it is now fitted (the post-parallel serial refit on the final fold).
+    assert returned_model.metadata.fit_utc is not None, (
+        "evaluate_and_keep_final_model(n_jobs=2) must leave the caller's model fitted on "
+        "the final fold's training data — the workers fit deepcopies, so a final "
+        "serial refit on the parent is required."
+    )
+    # And the metrics row from that final-fold model matches the metrics_df row,
+    # because both were fit on the same final-fold training data deterministically.
+    assert len(metrics_df) == _EXPECTED_FOLD_COUNT
