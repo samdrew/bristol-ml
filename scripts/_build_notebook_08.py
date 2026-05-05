@@ -155,17 +155,50 @@ plots.apply_plots_config(
     ).evaluation.plots
 )
 
-# Plan D4 splitter override — fixed sliding window + weekly-ish stride,
-# matching the Stage 7 notebook budget envelope (AC-3: end-to-end under
-# 10 minutes).  The CLI path inherits the full-year defaults.
+# Plan D4 splitter override.
+#
+# Earlier versions of this notebook used a 30-day (720-row) sliding
+# training window for budget reasons (AC-3: end-to-end under 10 minutes).
+# That config produced a hidden defect for the parametric model
+# specifically: on a 30-day window from a single season, **one of the
+# hinge-regime columns is identically zero** (HDD = max(0, 15.5-T) is
+# zero on every July hour; CDD = max(0, T-22) is zero on every January
+# hour), so the corresponding slope parameter (``beta_cool`` in winter,
+# ``beta_heat`` in summer) is unidentifiable, the design matrix is
+# rank-deficient, and ``scipy.optimize.curve_fit`` with the unconstrained
+# ``method="lm"`` solver wanders into popt with no physical meaning
+# (alpha at -7e6 MW; Fourier coefficients in the tens of millions).
+# The harness then scored those diverged predictions, dragging the
+# cross-fold mean MAE 35x above the median (~167 600 vs ~4 850).
+#
+# The smallest-correct fix is to **size the training window so every
+# fold spans both hinge regimes**.  A full year crosses both heating
+# and cooling seasons, so HDD and CDD are both non-zero on every fold
+# and the parametric model is well-conditioned.  We pair the bumped
+# window with a wider stride (16 weeks) so the fold count stays inside
+# the 10-minute budget — about 22 folds, each with a sliding 1-year
+# training window.  The harness's parallel ``n_jobs`` knob (added
+# 2026-05-04) makes the ~75 s SARIMAX-per-fold cost affordable.
+#
+# A subsequent stage will tighten this further by bounding the
+# parametric solver's parameter space (option 2(b) in the Stage 8
+# discussion thread); see ``docs/intent/`` once the relevant intent
+# lands.  Until then, **the cross-seasonal training window is the
+# load-bearing reason the cross-fold metrics in Cell 9 are honest**.
 cfg = load_config(
     config_path=REPO_ROOT / "conf",
     overrides=[
         "model=scipy_parametric",
         "features=weather_calendar",
+        # Sliding 1-year window: every fold spans both hinge regimes
+        # so the parametric model is well-conditioned everywhere.
         "evaluation.rolling_origin.fixed_window=true",
-        "evaluation.rolling_origin.min_train_periods=720",
-        "evaluation.rolling_origin.step=1344",
+        "evaluation.rolling_origin.min_train_periods=8760",
+        # 16-week stride keeps the fold count to ~22 — within the
+        # 10-minute notebook budget under n_jobs parallelism.
+        "evaluation.rolling_origin.step=2688",
+        # Weekly test fold matches Stage 7 nb's choice; gives
+        # ~22 * 168 = ~3 700 hours of evaluation across the whole loop.
         "evaluation.rolling_origin.test_len=168",
     ],
 )
@@ -329,7 +362,7 @@ cell_5 = code("""# Plan T5 Cell 5: single-fold fit + timing.  AC-4 evidence (und
 
 from conf._schemas import ScipyParametricConfig
 
-train_n = cfg.evaluation.rolling_origin.min_train_periods  # 720
+train_n = cfg.evaluation.rolling_origin.min_train_periods  # 8760
 test_n = cfg.evaluation.rolling_origin.test_len  # 168
 train_slice = df.iloc[:train_n]
 test_slice = df.iloc[train_n : train_n + test_n]
@@ -515,6 +548,21 @@ cell_9 = code("""# Plan T5 Cell 9: rolling-origin evaluation across Naive, Linea
 splitter_cfg = cfg.evaluation.rolling_origin
 metric_fns = [METRIC_REGISTRY[name] for name in ("mae", "mape", "rmse", "wape")]
 
+# Each SARIMAX MLE fit takes ~7-8 s on a 30-day window; the harness's
+# `n_jobs` knob (added 2026-05-04) dispatches per-fold work across
+# worker processes via joblib's loky backend.  We use one fewer than
+# all available cores so the notebook stays responsive (the OS keeps
+# a core for matplotlib + the kernel + any other notebook activity).
+# `cpu_count()` returns None in some sandboxed environments, hence
+# the `or 1` fall-through.  The parametric model's own per-fold fit
+# is ~4 ms — pickle overhead exceeds the work — but we use the same
+# n_jobs anyway because the SARIMAX call dominates total wall time
+# and the parametric overhead is negligible at the four-model loop
+# level.
+N_JOBS = max(1, (os.cpu_count() or 1) - 1)
+print(f"Rolling-origin parallelism: n_jobs={N_JOBS} "
+      f"(of {os.cpu_count() or 'unknown'} cores)")
+
 # Instantiate fresh models per evaluation so residual state from the
 # single-fold fits above does not leak in.
 naive_cfg = NaiveConfig(strategy="same_hour_last_week", target_column="nd_mw")
@@ -550,20 +598,87 @@ for name, model, feat_cols in [
         target_column="nd_mw",
         feature_columns=feat_cols,
         return_predictions=True,
+        n_jobs=N_JOBS,
     )
     print(f"{name:>18s}  evaluate: {time.time() - t0:6.1f}s  "
           f"({len(metrics_df)} folds)")
     results[name] = (metrics_df, preds_df)
 
 metric_names = [fn.__name__ for fn in metric_fns]
-summary_df = pd.concat(
+mean_df = pd.concat(
     [results[m][0][metric_names].mean().rename(m) for m in results],
     axis=1,
 ).T
-summary_df.index.name = "model"
+median_df = pd.concat(
+    [results[m][0][metric_names].median().rename(m) for m in results],
+    axis=1,
+).T
+mean_df.index.name = median_df.index.name = "model"
 print()
 print("Mean metric across folds (lower is better):")
-print(summary_df.to_string(float_format=lambda v: f"{v:.3f}"))
+print(mean_df.to_string(float_format=lambda v: f"{v:.3f}"))
+print()
+print("Median metric across folds (canonical sanity check):")
+print(median_df.to_string(float_format=lambda v: f"{v:.3f}"))
+# A wide median-vs-mean gap is the canonical signal that one or more
+# folds have produced divergent predictions.  Under the current
+# cross-seasonal splitter (1-year sliding window) every fold has both
+# heating and cooling regimes in training, so the parametric model is
+# well-conditioned everywhere and the gap should be small (single-digit
+# percent).  See the markdown immediately below for the identifiability
+# story.
+""")
+
+
+# ---------------------------------------------------------------------------
+# Cell 9b — Identifiability narrative (markdown after the summary)
+# ---------------------------------------------------------------------------
+
+cell_9b = md("""## Why the parametric row in this table can be trusted
+
+The parametric model's three slope parameters
+(`alpha`, `beta_heat`, `beta_cool`) are only **identifiable** from a
+training window that contains observations on both sides of each
+hinge.  Concretely:
+
+- A purely-winter window has every temperature below the heating
+  hinge (15.5 °C), so `CDD = max(0, T - 22)` is identically zero
+  across every training row.  `beta_cool` then has no observational
+  support — any value satisfies the fit equally well — and
+  `scipy.optimize.curve_fit` with the unconstrained
+  `method="lm"` solver wanders to nonsense.
+- A purely-summer window has the symmetric problem: `HDD =
+  max(0, 15.5 - T)` is identically zero, `beta_heat` is unidentifiable.
+
+Earlier versions of this notebook used a 30-day sliding window for
+budget reasons, which produced ~10 catastrophically divergent folds
+out of 50 (per-fold MAE in the millions of MW), dragging the
+**cross-fold mean MAE 35x above the median**.  The fix is structural:
+the splitter at the top of the notebook now uses a **1-year sliding
+window**, so every fold spans both heating and cooling seasons and
+both slopes are estimable everywhere.
+
+Two consequences worth pointing out for the reader:
+
+1. **The mean and median agree** on the parametric row of the table
+   above (within single-digit percent).  A wide mean-vs-median gap is
+   the canonical signal that one or more folds have diverged and the
+   training-window choice needs revisiting; if you reduce
+   `min_train_periods` for a faster demo, watch the gap.
+2. **The notebook's metric-mean is now consistent with the train
+   CLI's** (`uv run python -m bristol_ml.train
+   model=scipy_parametric features=weather_calendar`).  The CLI
+   inherits the project default `min_train_periods=8760`, so the
+   two paths now disagree only on stride / fold-count, not on the
+   parameter-identifiability regime.
+
+A subsequent stage will tighten the model itself by bounding the
+solver's parameter space — converting "rank-deficient → diverged
+fit" into "rank-deficient → parameter at a documented bound, with
+the existing `pcov=inf` warning accurately diagnosing it."  The
+intent for that follow-up captures the contract; the notebook's
+splitter choice will become a comfort margin once it lands rather
+than a load-bearing safety condition.
 """)
 
 
@@ -781,6 +896,7 @@ notebook = {
         cell_7,
         cell_8,
         cell_9,
+        cell_9b,
         cell_10,
         cell_11,
         cell_12,
