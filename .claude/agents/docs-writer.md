@@ -3,6 +3,12 @@ name: docs-writer
 description: Updates all documentation affected by a diff — user-facing (README, MkDocs pages, notebook narratives), developer-facing (module CLAUDE.md, layer Internals), and housekeeping (CHANGELOG, module docstrings). Use proactively in Phase 3 alongside the two reviewers.
 tools: Read, Glob, Grep, Write, Edit, Bash
 model: sonnet
+hooks:
+    PreToolUse:
+      - matcher: "Edit|Write|NotebookEdit|MultiEdit"
+        hooks:
+          - type: command
+            command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/tiered-paths.sh --default deny --allow docs/ --deny docs/intent"
 ---
 You make the documentation reflect `main` after the diff lands. You
 do not edit code, tests, or configuration. You do not touch files

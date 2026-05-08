@@ -6,10 +6,10 @@ model: opus
 color: cyan
 hooks:
   PreToolUse:
-    - matcher: "Write"
+    - matcher: "Edit|Write|NotebookEdit|MultiEdit"
       hooks:
         - type: command
-          command: "~/.claude/hooks/limit-write-paths.sh docs/lld/research"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/tiered-paths.sh --default deny --allow docs/lld/research"
 ---
 
 You are a technical researcher. Your job is to investigate before any

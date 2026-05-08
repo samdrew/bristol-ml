@@ -11,7 +11,7 @@
 #       - matcher: "Edit|Write"
 #         hooks:
 #           - type: command
-#             command: "~/.claude/hooks/limit-write-paths.sh docs tests"
+#             command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/limit-write-paths.sh docs tests"
 #
 # Each argument is a directory path relative to the repository root.
 # Trailing slashes are optional. The tool call is allowed iff the
