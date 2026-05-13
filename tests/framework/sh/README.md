@@ -1,11 +1,11 @@
 # Shell-framework tests
 
 Spec-derived tests for the shell scripts that ship with this
-template's agent infrastructure (the `.claude/hooks/` family).
+project's agent infrastructure (the `.claude/hooks/` family).
 These scripts are a generic capability, not part of the Python
 project, so their tests live in this separate tree rather than
 under `tests/{unit,integration}/` (which mirror
-`src/TEMPLATE_PROJECT/`).
+`src/bristol_ml/`).
 
 ## Running
 
