@@ -1,5 +1,6 @@
 # server.py
 from datetime import datetime
+
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("scratchpad")
