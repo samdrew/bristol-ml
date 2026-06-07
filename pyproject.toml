@@ -70,6 +70,11 @@ torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
 
+[tool.uv.workspace]
+members = [
+    "meetups/assets/scratchpad-mcp",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
