@@ -15,10 +15,10 @@ class LightBackend(ABC):
     #: Short identifier surfaced in LightState.backend (e.g. "virtual", "hue").
     name: str = "base"
 
-    async def connect(self) -> None:
+    async def connect(self) -> None:  # noqa: B027 — optional hook, no-op by default
         """Establish any connection the backend needs. No-op by default."""
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027 — optional hook, no-op by default
         """Tear down. No-op by default."""
 
     @abstractmethod

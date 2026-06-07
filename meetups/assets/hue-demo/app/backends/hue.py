@@ -64,8 +64,8 @@ class HueBackend(LightBackend):
         self._last_color = "#ffffff"  # fallback when the light is in temp mode
 
     async def connect(self) -> None:
-        from bleak import BleakScanner  # deferred
         import HueBLE
+        from bleak import BleakScanner  # deferred
 
         _patch_effect_type_tolerance()
 
