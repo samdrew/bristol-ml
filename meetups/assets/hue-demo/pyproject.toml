@@ -1,0 +1,31 @@
+[project]
+name = "hue-mcp-demo"
+version = "0.1.0"
+description = "REST + visualiser front-end for a Hue light, with virtual and HueBLE backends."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+]
+
+# Extra deps for driving a real Hue Go over Bluetooth (LIGHT_BACKEND=hue).
+# Install with:  uv sync --extra hue
+[project.optional-dependencies]
+hue = [
+    "HueBLE>=2.2",
+    "bleak>=0.21",
+    "bleak-retry-connector",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The package lives in app/, which doesn't match the project name, so point
+# hatchling at it explicitly. Installing the project (editable, via uv) puts
+# `app` on sys.path in every process — including the --reload worker, which on
+# macOS is spawned fresh and would otherwise not find a CWD-only import.
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
