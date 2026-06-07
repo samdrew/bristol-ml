@@ -26,9 +26,7 @@ def make_backend() -> LightBackend:
 
         return HueBackend()
 
-    raise ValueError(
-        f"Unknown LIGHT_BACKEND {kind!r}; expected 'virtual' or 'hue'."
-    )
+    raise ValueError(f"Unknown LIGHT_BACKEND {kind!r}; expected 'virtual' or 'hue'.")
 
 
 __all__ = ["make_backend"]

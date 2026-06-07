@@ -22,12 +22,10 @@ class LightBackend(ABC):
         """Tear down. No-op by default."""
 
     @abstractmethod
-    async def get_state(self) -> LightState:
-        ...
+    async def get_state(self) -> LightState: ...
 
     @abstractmethod
-    async def set_power(self, on: bool) -> None:
-        ...
+    async def set_power(self, on: bool) -> None: ...
 
     @abstractmethod
     async def set_brightness(self, level: int) -> None:
