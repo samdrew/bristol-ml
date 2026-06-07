@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hue Light · live view</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0b0f;
+    --panel: #14161d;
+    --line: #262a36;
+    --ink: #e8e9ee;
+    --muted: #6f7689;
+    --accent: #ffd6aa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #161922 0%, var(--bg) 55%),
+      var(--bg);
+    color: var(--ink);
+    font-family: "Space Mono", ui-monospace, monospace;
+    display: grid;
+    place-items: center;
+    min-height: 100%;
+    padding: 32px;
+  }
+  .stage {
+    width: min(560px, 92vw);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 36px;
+  }
+  header { text-align: center; }
+  h1 {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(28px, 6vw, 44px);
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .sub {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-top: 8px;
+  }
+  /* The light itself */
+  .orb-wrap { display: grid; place-items: center; height: 260px; width: 260px; }
+  .orb {
+    height: 180px; width: 180px; border-radius: 50%;
+    background: var(--accent);
+    transition: background 240ms ease, box-shadow 320ms ease, transform 320ms ease, opacity 240ms ease;
+    will-change: box-shadow, background;
+  }
+  .orb.off { background: #1c1e26 !important; box-shadow: inset 0 0 0 1px var(--line) !important; }
+  /* Telemetry */
+  .panel {
+    width: 100%;
+    background: linear-gradient(180deg, var(--panel), #10121a);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 18px 20px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .cell .k { color: var(--muted); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
+  .cell .v { font-size: 18px; margin-top: 4px; }
+  .swatch { display: inline-block; height: 12px; width: 12px; border-radius: 3px; vertical-align: middle; margin-right: 6px; border: 1px solid rgba(255,255,255,0.15); }
+  /* Controls */
+  .controls { width: 100%; display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; align-items: center; gap: 14px; }
+  button {
+    font-family: inherit; font-size: 13px; cursor: pointer;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px;
+    transition: border-color 160ms ease, transform 120ms ease;
+  }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatches button { padding: 0; height: 30px; width: 30px; border-radius: 8px; }
+  .badge { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+  .dot { display:inline-block; height:7px; width:7px; border-radius:50%; background:#3ad17a; margin-right:6px; }
+  .dot.bad { background:#d1493a; }
+</style>
+</head>
+<body>
+  <main class="stage">
+    <header>
+      <h1>Hue Light</h1>
+      <div class="sub"><span id="conn"><span class="dot"></span>live</span> · backend: <span id="backend">…</span></div>
+    </header>
+
+    <div class="orb-wrap">
+      <div class="orb" id="orb"></div>
+    </div>
+
+    <section class="panel">
+      <div class="cell"><div class="k">Power</div><div class="v" id="m-power">—</div></div>
+      <div class="cell"><div class="k">Brightness</div><div class="v" id="m-bri">—</div></div>
+      <div class="cell"><div class="k">Colour</div><div class="v"><span class="swatch" id="m-swatch"></span><span id="m-color">—</span></div></div>
+    </section>
+
+    <section class="controls">
+      <div class="row">
+        <button id="toggle">Toggle power</button>
+        <span class="badge">brightness</span>
+        <input type="range" id="bri" min="0" max="100" value="80" />
+      </div>
+      <div class="row">
+        <span class="badge">colour</span>
+        <div class="swatches" id="swatches"></div>
+      </div>
+    </section>
+  </main>
+
+<script>
+const PALETTE = ["#ff4d4d", "#ff8800", "#ffd000", "#3ad17a", "#3aa0ff", "#9b6bff", "#ff6fae", "#ffffff"];
+
+const el = (id) => document.getElementById(id);
+
+async function api(path, body) {
+  const opts = body
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : {};
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(path + " -> " + res.status);
+  return res.json();
+}
+
+// Dim the displayed colour to fake luminance: scale RGB toward black by brightness.
+function dim(hex, pct) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = Math.max(0.06, pct / 100);
+  const r = Math.round(((n >> 16) & 255) * f);
+  const g = Math.round(((n >> 8) & 255) * f);
+  const b = Math.round((n & 255) * f);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function render(s) {
+  el("backend").textContent = s.backend;
+  el("m-power").textContent = s.on ? "ON" : "OFF";
+  el("m-bri").textContent = s.brightness + "%";
+  el("m-color").textContent = s.color;
+  el("m-swatch").style.background = s.color;
+
+  const conn = el("conn");
+  conn.innerHTML = (s.reachable ? '<span class="dot"></span>' : '<span class="dot bad"></span>')
+    + (s.reachable ? "live" : "unreachable");
+
+  const orb = el("orb");
+  if (!s.on) {
+    orb.classList.add("off");
+  } else {
+    orb.classList.remove("off");
+    const lit = dim(s.color, s.brightness);
+    orb.style.background = lit;
+    const glow = 30 + s.brightness * 0.9;
+    const alpha = 0.25 + (s.brightness / 100) * 0.55;
+    orb.style.boxShadow = `0 0 ${glow}px ${glow / 3}px ${s.color}${Math.round(alpha * 255).toString(16).padStart(2, "0")}`;
+  }
+}
+
+// --- controls ---
+let lastState = { on: true, brightness: 80 };
+
+el("toggle").addEventListener("click", async () => {
+  render(await api("/api/power", { on: !lastState.on }));
+});
+
+let briTimer;
+el("bri").addEventListener("input", (e) => {
+  clearTimeout(briTimer);
+  const level = parseInt(e.target.value, 10);
+  briTimer = setTimeout(async () => render(await api("/api/brightness", { level })), 80);
+});
+
+const sw = el("swatches");
+PALETTE.forEach((hex) => {
+  const b = document.createElement("button");
+  b.style.background = hex;
+  b.title = hex;
+  b.addEventListener("click", async () => render(await api("/api/color", { hex })));
+  sw.appendChild(b);
+});
+
+// --- poll loop: the page is a *view* of REST state ---
+async function poll() {
+  try {
+    const s = await api("/api/state");
+    lastState = s;
+    render(s);
+  } catch (err) {
+    el("conn").innerHTML = '<span class="dot bad"></span>offline';
+  }
+}
+poll();
+setInterval(poll, 400);
+</script>
+</body>
+</html>
