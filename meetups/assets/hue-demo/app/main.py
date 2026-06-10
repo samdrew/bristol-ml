@@ -14,12 +14,14 @@ that MCP layer can be built from.
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.backends import make_backend
 from app.models import (
@@ -30,6 +32,44 @@ from app.models import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Paths whose access logs are pure noise on a polling demo: the visualiser hits
+# /api/state several times a second, and browsers probe for icons that don't exist.
+_QUIET_PATHS = ("/api/state", "/favicon.ico", "/apple-touch-icon")
+
+# Mutating endpoints we *do* want to see in detail, so the request -> response is
+# legible on the CLI during a live demo.
+_VERBOSE_PATHS = ("/api/power", "/api/brightness", "/api/color")
+
+logger = logging.getLogger("hue")
+
+
+class _QuietAccessFilter(logging.Filter):
+    """Drop uvicorn access-log records for high-frequency, low-interest paths."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access formats with args = (client, method, path, http_version, status)
+        if isinstance(record.args, tuple) and len(record.args) >= 3:
+            path = str(record.args[2])
+            return not path.startswith(_QUIET_PATHS)
+        return True
+
+
+def _configure_logging() -> None:
+    """Quieten polling noise and route our verbose logs through uvicorn's handler."""
+    logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
+
+    # Reuse uvicorn's *default* handler (plain "INFO:" formatter) so our lines match
+    # the house style. The access handler is no good here: its formatter expects the
+    # 5-tuple access record args and would crash on our messages.
+    default = logging.getLogger("uvicorn")
+    if default.handlers and not logger.handlers:
+        logger.handlers = default.handlers
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+
+_configure_logging()
 
 
 @asynccontextmanager
@@ -44,6 +84,46 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hue Light REST", version="0.1.0", lifespan=lifespan)
+
+
+class VerboseRequestLogging(BaseHTTPMiddleware):
+    """Log the full request body and response for the mutating endpoints."""
+
+    async def dispatch(self, request: Request, call_next):
+        if not request.url.path.startswith(_VERBOSE_PATHS):
+            return await call_next(request)
+
+        body = (await request.body()).decode("utf-8", "replace").strip()
+        logger.info(
+            "→ %s %s from %s  %s",
+            request.method,
+            request.url.path,
+            request.client.host if request.client else "?",
+            body or "(no body)",
+        )
+
+        response = await call_next(request)
+
+        # BaseHTTPMiddleware hands back a streaming response; drain it so we can both
+        # log the payload and replay it to the client.
+        chunks = [chunk async for chunk in response.body_iterator]  # type: ignore[attr-defined]
+        payload = b"".join(chunks)
+        logger.info(
+            "← %s %s  %s",
+            response.status_code,
+            request.url.path,
+            payload.decode("utf-8", "replace").strip(),
+        )
+        # body_iterator is now exhausted; hand the buffered payload back to the client.
+        return Response(
+            content=payload,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+
+
+app.add_middleware(VerboseRequestLogging)
 
 
 @app.get("/api/state", response_model=LightState, tags=["light"])
