@@ -111,13 +111,9 @@ async def _request(
             detail = f" - {e.response.json()}"
         except Exception:
             pass
-        raise ToolError(
-            f"Light service returned HTTP {e.response.status_code}{detail}"
-        ) from e
+        raise ToolError(f"Light service returned HTTP {e.response.status_code}{detail}") from e
     except httpx.HTTPError as e:
-        raise ToolError(
-            f"Couldn't reach the light service at {API_BASE}: {e}"
-        ) from e
+        raise ToolError(f"Couldn't reach the light service at {API_BASE}: {e}") from e
 
     state = LightState.model_validate(resp.json())
     if require_reachable and not state.reachable:
@@ -129,11 +125,7 @@ async def _request(
 
 
 # --- Tools -------------------------------------------------------------------
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=True, idempotentHint=True, openWorldHint=True
-    )
-)
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True))
 async def get_state(ctx: Context) -> LightState:
     """Return the light's current power, brightness, colour and reachability."""
     # require_reachable=False: an unreachable light is still useful to report.
@@ -179,11 +171,7 @@ async def set_light(
     return await _request(ctx, "GET", "/api/state")
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=True, idempotentHint=True, openWorldHint=True
-    )
-)
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True))
 async def health(ctx: Context) -> dict[str, Any]:
     """Report whether the light service itself is up (independent of the light)."""
     try:

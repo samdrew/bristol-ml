@@ -54,9 +54,7 @@ def mock_backend(monkeypatch, backend_state):
     monkeypatch.setattr(
         server,
         "build_client",
-        lambda: httpx.AsyncClient(
-            base_url=server.API_BASE, timeout=5.0, transport=transport
-        ),
+        lambda: httpx.AsyncClient(base_url=server.API_BASE, timeout=5.0, transport=transport),
     )
 
 
@@ -70,9 +68,7 @@ async def test_get_state():
 
 async def test_set_light_combined():
     async with Client(server.mcp) as c:
-        res = await c.call_tool(
-            "set_light", {"brightness": 20, "color": "#ff8800"}
-        )
+        res = await c.call_tool("set_light", {"brightness": 20, "color": "#ff8800"})
     assert res.data.brightness == 20
     assert res.data.color == "#ff8800"
 

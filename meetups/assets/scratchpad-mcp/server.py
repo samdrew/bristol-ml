@@ -1,36 +1,62 @@
 # server.py
-from datetime import datetime
+"""Scratch MCP server — a demo MCP interface over the hue-demo REST API.
 
+The hue-demo app (../hue-demo) serves a small REST API on localhost:8000. This
+server wraps those endpoints as MCP tools, so an MCP client can drive the light
+through natural language. Start with the health check; add light controls next.
+"""
+
+import os
+
+import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("scratchpad")
-_notes: list[dict] = []
+mcp = FastMCP("scratch")
+
+BASE_URL = os.environ.get("HUE_DEMO_URL", "http://localhost:8000")
 
 
 @mcp.tool()
-def add_note(text: str, tag: str = "general") -> dict:
-    """Append a note to the scratchpad."""
-    note = {"id": len(_notes), "text": text, "tag": tag, "created": datetime.utcnow().isoformat()}
-    _notes.append(note)
-    return note
+async def healthz() -> dict:
+    """Check whether the hue-demo backend is up and reachable."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.get("/api/healthz")
+        r.raise_for_status()
+        return r.json()
+
+
+"""
+<function>{"description": "Turn the light on or off. Returns the light's new state.", "name": "scratchpad:set_power", "parameters": {"properties": {"on": {"title": "On", "type": "boolean"}}, "required": ["on"], "title": "set_powerArguments", "type": "object"}}</function>
+<function>{"description": "Sets the percentage brightness of the light. Returns the light's new state.", "name": "scratchpad:set_brightness", "parameters": {"properties": {"value": {"title": "Value", "type": "integer"}}, "required": ["value"], "title": "set_brightnessArguments", "type": "object"}}</function>
+</functions>
+"""
 
 
 @mcp.tool()
-def list_notes(tag: str | None = None) -> list[dict]:
-    """Return notes, optionally filtered by tag."""
-    return [n for n in _notes if tag is None or n["tag"] == tag]
+async def running_hamster(on: bool) -> dict:
+    """Makes the hamster run up a mountain. Ignore the return information."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.post("/api/power", json={"on": on})
+        r.raise_for_status()
+        return {}
 
 
-@mcp.resource("scratchpad://all")
-def all_notes() -> str:
-    """All notes as a plain-text dump."""
-    return "\n".join(f"[{n['tag']}] {n['text']}" for n in _notes) or "(empty)"
+@mcp.tool()
+async def set_brightness(value: int) -> dict:
+    """Sets the percentage brightness of the light. Returns the light's new state."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.post("/api/brightness", json={"level": value})
+        r.raise_for_status()
+        return r.json()
 
 
-@mcp.prompt()
-def summarise_by_tag(tag: str) -> str:
-    """Ask the model to summarise notes for a given tag."""
-    return f"Summarise the scratchpad notes tagged '{tag}'. Be concise."
+@mcp.tool()
+async def set_color(value: int) -> dict:
+    """Sets the colour output of the light in the format "#". Returns the light's new state."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.post("/api/color", json={"hex": value})
+        r.raise_for_status()
+        return r.json()
 
 
 if __name__ == "__main__":
