@@ -11,7 +11,7 @@ import json
 import httpx
 import pytest
 from fastmcp import Client
-
+from fastmcp.exceptions import ToolError
 from hue_mcp import server
 
 
@@ -81,13 +81,13 @@ async def test_set_light_power_off():
 
 async def test_set_light_requires_an_argument():
     async with Client(server.mcp) as c:
-        with pytest.raises(Exception):
+        with pytest.raises(ToolError):
             await c.call_tool("set_light", {})
 
 
 async def test_bad_colour_rejected_before_call():
     async with Client(server.mcp) as c:
-        with pytest.raises(Exception):
+        with pytest.raises(ToolError):
             await c.call_tool("set_light", {"color": "not-a-hex"})
 
 

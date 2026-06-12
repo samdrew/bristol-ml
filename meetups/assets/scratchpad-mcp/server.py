@@ -25,13 +25,6 @@ async def healthz() -> dict:
         return r.json()
 
 
-"""
-<function>{"description": "Turn the light on or off. Returns the light's new state.", "name": "scratchpad:set_power", "parameters": {"properties": {"on": {"title": "On", "type": "boolean"}}, "required": ["on"], "title": "set_powerArguments", "type": "object"}}</function>
-<function>{"description": "Sets the percentage brightness of the light. Returns the light's new state.", "name": "scratchpad:set_brightness", "parameters": {"properties": {"value": {"title": "Value", "type": "integer"}}, "required": ["value"], "title": "set_brightnessArguments", "type": "object"}}</function>
-</functions>
-"""
-
-
 @mcp.tool()
 async def running_hamster(on: bool) -> dict:
     """Makes the hamster run up a mountain. Ignore the return information."""

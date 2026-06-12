@@ -14,7 +14,7 @@ reach) and a resource (for correctness).
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 
 import httpx
@@ -107,10 +107,8 @@ async def _request(
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         detail = ""
-        try:
+        with suppress(Exception):
             detail = f" - {e.response.json()}"
-        except Exception:
-            pass
         raise ToolError(f"Light service returned HTTP {e.response.status_code}{detail}") from e
     except httpx.HTTPError as e:
         raise ToolError(f"Couldn't reach the light service at {API_BASE}: {e}") from e
