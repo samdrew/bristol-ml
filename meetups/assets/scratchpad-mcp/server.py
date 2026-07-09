@@ -1,36 +1,37 @@
 # server.py
-from datetime import datetime
+"""Scratch MCP server — a demo MCP interface over the hue-demo REST API.
 
+The hue-demo app (../hue-demo) serves a small REST API on localhost:8000. This
+server wraps those endpoints as MCP tools, so an MCP client can drive the light
+through natural language. Start with the health check; add light controls next.
+"""
+
+import os
+
+import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("scratchpad")
-_notes: list[dict] = []
+mcp = FastMCP("scratch")
+
+BASE_URL = os.environ.get("HUE_DEMO_URL", "http://localhost:8000")
 
 
 @mcp.tool()
-def add_note(text: str, tag: str = "general") -> dict:
-    """Append a note to the scratchpad."""
-    note = {"id": len(_notes), "text": text, "tag": tag, "created": datetime.utcnow().isoformat()}
-    _notes.append(note)
-    return note
+async def healthz() -> dict:
+    """Check whether the hue-demo backend is up and reachable."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.get("/api/healthz")
+        r.raise_for_status()
+        return r.json()
 
 
 @mcp.tool()
-def list_notes(tag: str | None = None) -> list[dict]:
-    """Return notes, optionally filtered by tag."""
-    return [n for n in _notes if tag is None or n["tag"] == tag]
-
-
-@mcp.resource("scratchpad://all")
-def all_notes() -> str:
-    """All notes as a plain-text dump."""
-    return "\n".join(f"[{n['tag']}] {n['text']}" for n in _notes) or "(empty)"
-
-
-@mcp.prompt()
-def summarise_by_tag(tag: str) -> str:
-    """Ask the model to summarise notes for a given tag."""
-    return f"Summarise the scratchpad notes tagged '{tag}'. Be concise."
+async def set_power(on: bool) -> dict:
+    """Turn the light on or off. Returns the light's new state."""
+    async with httpx.AsyncClient(base_url=BASE_URL) as client:
+        r = await client.post("/api/power", json={"on": on})
+        r.raise_for_status()
+        return r.json()
 
 
 if __name__ == "__main__":
